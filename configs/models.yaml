@@ -1,0 +1,11 @@
+# Model router aliases -> ordered fallback list of provider/model.
+# Fill model IDs and prices from provider docs; see docs/layers/05-model-router.md
+aliases:
+  fast: []
+  smart: []
+  local: [ollama/llama3:8b]
+  extractor: []
+  judge: []
+pricing_usd_per_1m_tokens: {}
+retry: { max_attempts: 3, backoff_s: [1, 2, 4] }
+timeout_s: 60

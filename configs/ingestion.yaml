@@ -1,0 +1,14 @@
+# See docs/layers/01-ingestion.md
+ocr:
+  engine: tesseract      # tesseract | paddle
+  dpi: 300
+  min_confidence: 40
+chunking:
+  contract: { max_tokens: 512, overlap: 50 }
+embedding:
+  dense_model: BAAI/bge-base-en-v1.5
+  batch_size: 32
+  sparse: bm25
+extraction:
+  default: llm           # rules | llm | finetuned
+  model_alias: extractor

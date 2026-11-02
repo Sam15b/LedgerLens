@@ -1,0 +1,8 @@
+# See docs/layers/04-agents-mcp.md
+max_steps: 8
+agents:
+  router: { model: fast }
+  qa: { model: smart }
+  extractor: { model: extractor }
+  reconciler: { model: smart, price_tolerance_pct: 2.0 }
+  reminder_writer: { model: smart }

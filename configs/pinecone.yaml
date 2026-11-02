@@ -1,0 +1,8 @@
+# See docs/layers/02-storage.md and docs/adr/0001-pinecone-for-vector-store.md
+index: ledgerlens-chunks
+dimension: 768
+metric: dotproduct     # required for hybrid dense + sparse search
+spec: serverless
+namespaces: [dev, eval, prod]
+upsert_batch_size: 100
+hybrid_alpha: 0.7

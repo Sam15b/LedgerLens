@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Data (keep folder structure + golden set)
+data/**
+!data/**/
+!data/**/.gitkeep
+!data/golden/*.jsonl
+
+# Models / weights / artifacts
+models/
+*.safetensors
+*.bin
+*.gguf
+*.keras
+*.h5
+*.pt
+ml/**/runs/
+ml/**/checkpoints/
+wandb/
+mlruns/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Node / web
+node_modules/
+web/.next/
+web/out/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

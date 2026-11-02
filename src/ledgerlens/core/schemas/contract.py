@@ -1,0 +1,1 @@
+"""ledgerlens.core.schemas.contract."""

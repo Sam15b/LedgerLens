@@ -1,0 +1,32 @@
+# Local infrastructure. App services (api, worker, mcp, web) are added in later phases.
+# See docs/layers/10-deployment.md
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledgerlens
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/change-me
+    ports: ["7474:7474", "7687:7687"]
+    volumes: [neo4jdata:/data]
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  ollama:
+    image: ollama/ollama
+    ports: ["11434:11434"]
+    volumes: [ollama:/root/.ollama]
+
+volumes:
+  pgdata: {}
+  neo4jdata: {}
+  ollama: {}

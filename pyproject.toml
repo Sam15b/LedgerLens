@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ledgerlens"
+version = "0.1.0"
+description = "Agentic GraphRAG system for invoices, purchase orders and contracts."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+ingestion = [
+    "pymupdf",
+    "pytesseract",
+    "pillow",
+    "sentence-transformers",
+    "pinecone-text",
+]
+storage = [
+    "pinecone",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]",
+    "alembic",
+    "neo4j",
+]
+llm = [
+    "openai",
+    "google-genai",
+    "mistralai",
+    "ollama",
+    "boto3",
+]
+agents = [
+    "langgraph",
+    "langchain-core",
+    "langchain-mcp-adapters",
+    "mcp",
+]
+ml = [
+    "torch",
+    "transformers",
+    "peft",
+    "bitsandbytes",
+    "datasets",
+    "diffusers",
+    "tensorflow",
+    "scikit-learn",
+]
+eval = [
+    "ragas",
+    "langsmith",
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "httpx",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ledgerlens"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+strict = true
+ignore_missing_imports = true
