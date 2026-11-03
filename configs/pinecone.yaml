@@ -1,8 +1,12 @@
-# See docs/layers/02-storage.md and docs/adr/0001-pinecone-for-vector-store.md
+# Pinecone vector index. See docs/layers/02-storage.md and docs/adr/0001-pinecone-for-vector-store.md
+# Validated by ledgerlens.core.config.PineconeConfig. API key, cloud, region, active
+# namespace and host (Pinecone Local) come from environment variables.
 index: ledgerlens-chunks
-dimension: 768
-metric: dotproduct     # required for hybrid dense + sparse search
+dimension: 768                 # BAAI/bge-base-en-v1.5
+metric: dotproduct             # required for hybrid dense + sparse search
 spec: serverless
-namespaces: [dev, eval, prod]
+namespaces: [dev, eval, prod]  # eval runs never pollute prod
 upsert_batch_size: 100
-hybrid_alpha: 0.7
+hybrid_alpha: 0.7              # dense weight; sparse weight = 1 - alpha (tune on golden set)
+query_top_k: 20                # candidates fetched before reranking
+metadata_text_max_bytes: 1024  # chunk text kept in metadata; full text lives in Postgres

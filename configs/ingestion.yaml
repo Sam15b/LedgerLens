@@ -1,14 +1,35 @@
-# See docs/layers/01-ingestion.md
+# Ingestion: loading, OCR, layout, chunking, embeddings, extraction.
+# See docs/layers/01-ingestion.md. Validated by ledgerlens.core.config.IngestionConfig.
+loader:
+  max_file_mb: 25
+  allowed_mime_types: [application/pdf, image/png, image/jpeg, image/tiff]
+
 ocr:
-  engine: tesseract      # tesseract | paddle
-  dpi: 300
-  min_confidence: 40
+  engine: tesseract        # tesseract | paddle
+  dpi: 300                 # rasterization DPI for scanned pages
+  min_confidence: 40       # drop OCR words below this confidence (0-100)
+  tesseract_psm: 6         # page segmentation mode: uniform block of text
+  tesseract_cmd: null      # set to the tesseract binary path if it is not on PATH (Windows)
+  preprocess:
+    deskew: true
+    denoise: true
+    binarize: true
+
+layout:
+  text_layer_min_chars: 50 # fewer extractable chars than this on a page -> treat as scanned
+
 chunking:
+  context_header: true     # prefix chunks with "[INVOICE INV-889 | Vendor: ... | Date: ...]"
   contract: { max_tokens: 512, overlap: 50 }
+  # invoices / POs: 1 header chunk + 1 line-items chunk; payments: 1 chunk (not configurable)
+
 embedding:
   dense_model: BAAI/bge-base-en-v1.5
   batch_size: 32
+  normalize: true
   sparse: bm25
+  sparse_params_path: data/processed/bm25.json
+
 extraction:
-  default: llm           # rules | llm | finetuned
+  default: llm             # rules | llm | finetuned
   model_alias: extractor
