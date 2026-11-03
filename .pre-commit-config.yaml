@@ -1,14 +1,37 @@
+# Install once per clone:  pre-commit install
+# Run on everything:       pre-commit run --all-files
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    rev: v0.17.3
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
+        types_or: [python, pyi]
       - id: ruff-format
+        types_or: [python, pyi] # leave code samples in docs/*.md untouched
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.4.1
+    hooks:
+      - id: mypy
+        # Settings (strict, mypy_path) come from [tool.mypy] in pyproject.toml.
+        files: ^(src|tests)/
+        additional_dependencies:
+          - pydantic>=2.7
+          - pydantic-settings>=2.3
+          - fastapi>=0.115
+          - httpx>=0.27
+          - pytest>=8
+          - types-PyYAML
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
       - id: detect-private-key
