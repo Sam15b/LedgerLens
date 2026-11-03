@@ -75,6 +75,19 @@ packages = ["src/ledgerlens"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+filterwarnings = [
+    # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.
+    "ignore::DeprecationWarning:langsmith.*",
+]
+
+[tool.coverage.run]
+source = ["ledgerlens"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]
 
 [tool.ruff]
 line-length = 100
