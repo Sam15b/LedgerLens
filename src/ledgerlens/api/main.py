@@ -4,9 +4,12 @@ from fastapi import FastAPI
 
 from ledgerlens import __version__
 from ledgerlens.api.routers import health
+from ledgerlens.core.config import get_settings
+from ledgerlens.core.logging import configure_logging
 
 
 def create_app() -> FastAPI:
+    configure_logging(get_settings().log_level)
     app = FastAPI(
         title="LedgerLens API",
         version=__version__,
