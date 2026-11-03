@@ -53,3 +53,6 @@ web/out/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Private daily implementation plan (local only, never pushed)
+docs/daily-plan/
