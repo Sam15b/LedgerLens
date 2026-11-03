@@ -1,0 +1,25 @@
+# LedgerLens: ML training dependencies (run on a CUDA GPU: Google Colab / Kaggle).
+# Install:  pip install -r requirements-ml.txt
+# Colab/Kaggle already ship a CUDA build of torch; on a local GPU install torch
+# first from https://pytorch.org for your CUDA version.
+
+# --- Shared ---
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.5              # scalers, Isolation Forest baseline, metrics
+
+# --- Fine-tuning Llama 3 8B with LoRA / QLoRA (PyTorch + PEFT) ---
+torch>=2.3
+transformers>=4.44
+peft>=0.12
+trl>=0.10                      # SFTTrainer
+accelerate>=0.33
+bitsandbytes>=0.43             # 4-bit quantization (Linux + CUDA)
+datasets>=2.20
+
+# --- Synthetic data (PyTorch GAN + Stable Diffusion img2img) ---
+diffusers>=0.30
+albumentations>=1.4            # classical scan degradations
+
+# --- Anomaly detection (TensorFlow / Keras autoencoder) ---
+tensorflow>=2.16

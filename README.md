@@ -48,7 +48,8 @@ git clone https://github.com/Sam15b/LedgerLens.git
 cd LedgerLens
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -r requirements.txt    # app deps (API, ingestion, storage, LLMs, agents, eval)
+pip install -e . --no-deps         # make the ledgerlens package importable
 cp .env.example .env               # fill in API keys
 
 docker compose up -d               # Postgres, Neo4j, Redis, Ollama
@@ -57,8 +58,12 @@ curl http://localhost:8000/health
 pytest
 ```
 
-Optional dependency groups: `ingestion`, `storage`, `llm`, `agents`, `ml`, `eval`
-(e.g. `pip install -e ".[dev,storage,llm]"`).
+ML training dependencies (LoRA fine-tuning, GAN, diffusion, Keras autoencoder) are in
+`requirements-ml.txt` and are meant for a CUDA GPU on Google Colab or Kaggle:
+
+```bash
+pip install -r requirements-ml.txt
+```
 
 ## Datasets
 
