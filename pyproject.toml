@@ -64,6 +64,7 @@ dev = [
     "httpx",
     "ruff",
     "mypy",
+    "types-PyYAML",
     "pre-commit",
 ]
 
@@ -87,4 +88,9 @@ select = ["E", "F", "I", "B", "UP", "N", "SIM"]
 python_version = "3.11"
 mypy_path = "src"
 strict = true
-ignore_missing_imports = true
+files = ["src", "tests"]
+# Untyped third-party packages get a per-module override instead of a global
+# ignore_missing_imports, e.g.:
+# [[tool.mypy.overrides]]
+# module = ["pytesseract.*"]
+# ignore_missing_imports = true
