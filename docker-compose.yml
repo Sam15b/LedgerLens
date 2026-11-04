@@ -1,5 +1,9 @@
 # Local infrastructure. App services (api, worker, mcp, web) are added in later phases.
 # See docs/layers/10-deployment.md
+#
+#   docker compose up -d --wait     # start everything and block until healthy
+#
+# Compose reads .env from this directory, so NEO4J_PASSWORD there is shared with the app.
 services:
   postgres:
     image: postgres:16
@@ -7,24 +11,57 @@ services:
       POSTGRES_USER: ledger
       POSTGRES_PASSWORD: ledger
       POSTGRES_DB: ledgerlens
-    ports: ["5432:5432"]
+    ports: ["${POSTGRES_PORT:-5432}:5432"]  # set POSTGRES_PORT if a local Postgres already uses 5432
     volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledgerlens"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   neo4j:
     image: neo4j:5
     environment:
-      NEO4J_AUTH: neo4j/change-me
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-change-me}
     ports: ["7474:7474", "7687:7687"]
     volumes: [neo4jdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#neo4j/}\" 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
 
   redis:
     image: redis:7
     ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Pinecone Local: in-memory emulator of the Pinecone API for development and CI.
+  # Control plane on :5080; each index it creates is served on the next free port (5081+).
+  # Point the app at it with PINECONE_HOST=http://localhost:5080 (any PINECONE_API_KEY works).
+  # Data is not persisted across restarts. Use the real serverless index for eval and prod.
+  pinecone-local:
+    image: ghcr.io/pinecone-io/pinecone-local:latest
+    platform: linux/amd64
+    environment:
+      PORT: 5080
+      PINECONE_HOST: localhost
+    ports: ["5080-5090:5080-5090"]
 
   ollama:
     image: ollama/ollama
     ports: ["11434:11434"]
     volumes: [ollama:/root/.ollama]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
 volumes:
   pgdata: {}
