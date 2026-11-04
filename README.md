@@ -65,6 +65,48 @@ ML training dependencies (LoRA fine-tuning, GAN, diffusion, Keras autoencoder) a
 pip install -r requirements-ml.txt
 ```
 
+## Development
+
+```bash
+make setup          # .venv + app/dev deps + editable install + git hooks
+make help           # list every target
+```
+
+| Target | What it does |
+|--------|--------------|
+| `make up` / `make down` | Start / stop local services (Docker) |
+| `make api` | FastAPI with reload on `:8000` |
+| `make test` | Unit tests |
+| `make cov` | Unit tests with a coverage report |
+| `make lint` | `ruff check`, `ruff format --check`, `mypy --strict` (src + tests) |
+| `make format` | Auto-format and auto-fix lint issues |
+| `make clean` | Remove caches and build artifacts |
+
+Targets for later phases (`init`, `data`, `ingest`, `mcp`, `web`, `test-int`, `eval`, `eval-ci`)
+already exist and print `not implemented yet` until their phase lands.
+
+On Windows, install GNU make with `choco install make` (or run the commands from Git Bash);
+the Makefile picks `.venv/Scripts/python.exe` automatically.
+
+### Pre-commit hooks
+
+`make setup` installs them; otherwise run `pre-commit install` once per clone.
+Every commit then runs ruff (lint + format), mypy `--strict`, YAML/TOML checks, a
+large-file guard and a private-key detector. Run them on the whole repo with:
+
+```bash
+pre-commit run --all-files
+```
+
+CI (`.github/workflows/ci.yml`) runs the same lint, format, type and test checks on every
+push and pull request.
+
+### Configuration
+
+Secrets and per-environment values come from `.env` (see `.env.example`). Tunable values —
+model aliases, chunk sizes, thresholds — live in `configs/*.yaml` and are validated at load
+time (`ledgerlens.core.config.get_config()`); unknown keys are rejected.
+
 ## Datasets
 
 [SROIE](https://rrc.cvc.uab.es/?ch=13), [CORD](https://github.com/clovaai/cord),

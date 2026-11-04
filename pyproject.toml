@@ -64,6 +64,7 @@ dev = [
     "httpx",
     "ruff",
     "mypy",
+    "types-PyYAML",
     "pre-commit",
 ]
 
@@ -74,11 +75,25 @@ packages = ["src/ledgerlens"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+filterwarnings = [
+    # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.
+    "ignore::DeprecationWarning:langsmith.*",
+]
+
+[tool.coverage.run]
+source = ["ledgerlens"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+extend-exclude = ["*.md"]  # keep code samples in docs as written
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM"]
@@ -87,4 +102,9 @@ select = ["E", "F", "I", "B", "UP", "N", "SIM"]
 python_version = "3.11"
 mypy_path = "src"
 strict = true
-ignore_missing_imports = true
+files = ["src", "tests"]
+# Untyped third-party packages get a per-module override instead of a global
+# ignore_missing_imports, e.g.:
+# [[tool.mypy.overrides]]
+# module = ["pytesseract.*"]
+# ignore_missing_imports = true
