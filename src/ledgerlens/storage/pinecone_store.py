@@ -15,7 +15,7 @@ Index administration has two implementations behind one protocol:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 from pinecone import NotFoundError, Pinecone, ServerlessSpec
@@ -28,6 +28,10 @@ LOCAL_API_VERSION = "2025-10"
 
 class PineconeNotConfiguredError(RuntimeError):
     """Raised when neither PINECONE_API_KEY nor PINECONE_HOST is set."""
+
+
+class IndexMismatchError(RuntimeError):
+    """An index with the requested name exists but has a different shape."""
 
 
 def create_client(api_key: str, host: str = "", *, timeout_s: float = 30.0) -> Pinecone:
@@ -100,11 +104,18 @@ class CloudIndexAdmin:
 class LocalIndexAdmin:
     """Index administration on the Pinecone Local emulator over REST."""
 
-    def __init__(self, host: str, *, timeout_s: float = 10.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        *,
+        timeout_s: float = 10.0,
+        transport: httpx.BaseTransport | None = None,  # injectable for tests
+    ) -> None:
         self._http = httpx.Client(
             base_url=host.rstrip("/"),
             timeout=timeout_s,
             headers={"Api-Key": LOCAL_API_KEY, "X-Pinecone-Api-Version": LOCAL_API_VERSION},
+            transport=transport,
         )
 
     @staticmethod
@@ -153,3 +164,24 @@ def create_index_admin(api_key: str, host: str = "", *, timeout_s: float = 30.0)
     if host:
         return LocalIndexAdmin(host, timeout_s=timeout_s)
     return CloudIndexAdmin(create_client(api_key, timeout_s=timeout_s))
+
+
+def ensure_index(
+    admin: IndexAdmin, name: str, *, dimension: int, metric: str, cloud: str, region: str
+) -> tuple[Literal["created", "exists"], IndexInfo]:
+    """Create the index if it is missing. Idempotent.
+
+    Raises :class:`IndexMismatchError` if an index with this name already exists with a
+    different dimension or metric -- recreating it would silently drop every vector.
+    """
+    existing = admin.describe(name)
+    if existing is None:
+        return "created", admin.create(
+            name, dimension=dimension, metric=metric, cloud=cloud, region=region
+        )
+    if existing.dimension != dimension or existing.metric != metric:
+        raise IndexMismatchError(
+            f"index {name!r} exists with dimension={existing.dimension}, "
+            f"metric={existing.metric!r}; expected dimension={dimension}, metric={metric!r}"
+        )
+    return "exists", existing
