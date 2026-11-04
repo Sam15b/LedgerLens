@@ -43,8 +43,8 @@ init:             ## Create Pinecone index, Neo4j schema, run DB migrations
 	$(PY) scripts/init_neo4j_schema.py
 	$(call todo,Phase 3: Alembic migrations for Postgres)
 
-data:             ## Download public datasets into data/raw
-	$(call todo,Phase 0: scripts/download_datasets.py)
+data:             ## Download public datasets into data/raw (DATASETS="funsd cuad" for a subset)
+	$(PY) scripts/download_datasets.py $(DATASETS)
 
 ingest:           ## Run ingestion pipeline (DATASET=sroie)
 	$(call todo,Phase 1: python -m ledgerlens.ingestion.pipeline data/raw/$(DATASET))
@@ -63,8 +63,8 @@ web:              ## Run the Next.js dashboard
 test:             ## Unit tests
 	$(PY) -m pytest tests/unit
 
-test-int:         ## Integration tests (needs `make up`)
-	$(call todo,Phase 0: integration marker + tests/integration)
+test-int:         ## Integration tests (needs `make up`; PINECONE_HOST=http://localhost:5080 for Pinecone Local)
+	$(PY) -m pytest -m integration tests/integration
 
 cov:              ## Unit tests with coverage report
 	$(PY) -m pytest tests/unit --cov --cov-report=term-missing

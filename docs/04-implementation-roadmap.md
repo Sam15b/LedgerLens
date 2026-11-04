@@ -54,17 +54,27 @@ gantt
 
 **Goal:** empty-but-working skeleton; all services start with one command.
 
-- [ ] `git init`, `.gitignore` (data/, .env, model weights), branch protection on `main`
-- [ ] `pyproject.toml` with `uv`; ruff, mypy, pytest, pre-commit
-- [ ] Create the folder tree from [03-folder-structure.md](03-folder-structure.md)
-- [ ] `core/config.py` (pydantic-settings) + `.env.example`
-- [ ] `docker-compose.yml`: postgres, neo4j, pinecone-local, ollama, api (FastAPI `/health`)
-- [ ] Create a Pinecone account + API key; `scripts/create_pinecone_index.py`
-- [ ] `.github/workflows/ci.yml`: lint + type-check + unit tests
-- [ ] `scripts/download_datasets.py` for SROIE, CORD, FUNSD (+ CUAD)
+- [x] `git init`, `.gitignore` (data/, .env, model weights)
+- [ ] Branch protection on `main` (GitHub repository settings)
+- [x] `pyproject.toml`; ruff, mypy (`--strict`), pytest, pre-commit — dependencies are managed
+  with pip + `requirements.txt` rather than `uv`
+- [x] Create the folder tree from [03-folder-structure.md](03-folder-structure.md)
+- [x] `core/config.py` (pydantic-settings + validated `configs/*.yaml`) + `.env.example`
+- [x] `docker-compose.yml`: postgres, neo4j, redis, pinecone-local, ollama with healthchecks;
+  the API runs via `make api` (its container arrives with the Dockerfiles in Phase 8)
+- [x] FastAPI `/health` (per-dependency status) and `/ready`
+- [x] `scripts/create_pinecone_index.py` (idempotent; cloud or Pinecone Local)
+  and `scripts/init_neo4j_schema.py`
+- [ ] Create a Pinecone account + API key (only needed for the cloud index)
+- [x] `.github/workflows/ci.yml`: lint + format + type-check + unit tests, plus an
+  integration job against the compose services
+- [x] `scripts/download_datasets.py` for SROIE (manual instructions), CORD, FUNSD and CUAD
 
 **Exit criteria:** `make up && curl localhost:8000/health` → `{"status":"ok"}` with all
 dependencies reported healthy; CI green.
+
+**Status:** met — with the compose stack up, `/health` reports Postgres, Neo4j, Redis and
+Pinecone (Local) as `ok` and `/ready` returns 200; unit and integration CI jobs run on every PR.
 
 ## Phase 1 — Ingestion + extraction baseline (weeks 2–3) · [guide](layers/01-ingestion.md)
 

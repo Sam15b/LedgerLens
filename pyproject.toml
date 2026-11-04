@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ledgerlens"
-version = "0.1.0"
+dynamic = ["version"]  # single source: src/ledgerlens/__init__.py
 description = "Agentic GraphRAG system for invoices, purchase orders and contracts."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -70,13 +70,21 @@ dev = [
     "pre-commit",
 ]
 
+[tool.hatch.version]
+path = "src/ledgerlens/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ledgerlens"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra"
+# Integration tests need `docker compose up` and are excluded by default;
+# run them with `pytest -m integration` (or `make test-int`).
+addopts = "-ra -m 'not integration'"
+markers = [
+    "integration: needs the docker compose services (Postgres, Neo4j, Redis, Pinecone Local)",
+]
 filterwarnings = [
     # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.
     "ignore::DeprecationWarning:langsmith.*",
