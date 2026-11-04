@@ -21,6 +21,10 @@ repos:
           - pydantic-settings>=2.3
           - fastapi>=0.115
           - httpx>=0.27
+          - sqlalchemy>=2.0
+          - neo4j>=5.20
+          - redis>=5.0
+          - pinecone>=10.0
           - pytest>=8
           - types-PyYAML
 
