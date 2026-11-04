@@ -103,3 +103,42 @@ def test_main_reports_failures_and_keeps_going(
 def test_main_rejects_unknown_dataset(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         dd.main(["nope", "--dest", str(tmp_path)])
+
+
+def test_failed_download_leaves_no_dataset_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def partial_then_fail(repo_id: str, dest: Path) -> None:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "train-00000.parquet").write_text("half")
+        raise httpx.ReadError("connection reset")
+
+    monkeypatch.setattr(dd, "download_huggingface", partial_then_fail)
+
+    assert dd.main(["cord", "--dest", str(tmp_path)]) == 1
+
+    assert not dd.is_present(tmp_path / "cord")  # a rerun will not skip it
+    assert (tmp_path / "cord.partial" / "train-00000.parquet").is_file()  # kept for resume
+
+
+def test_transient_errors_are_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Path] = []
+
+    def flaky(repo_id: str, dest: Path) -> None:
+        calls.append(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        if len(calls) == 1:
+            raise httpx.ReadError("connection reset")
+        (dest / "data.parquet").write_text("ok")
+        (dest / ".cache").mkdir()
+        (dest / ".cache" / "meta.json").write_text("{}")
+
+    monkeypatch.setattr(dd, "download_huggingface", flaky)
+
+    assert dd.main(["cord", "--dest", str(tmp_path)]) == 0
+
+    assert len(calls) == 2
+    assert (tmp_path / "cord" / "data.parquet").is_file()
+    assert not (tmp_path / "cord.partial").exists()
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["cord"] | {"status": "downloaded", "files": 1} == manifest["cord"]

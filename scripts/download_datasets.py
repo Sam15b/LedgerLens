@@ -35,6 +35,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEST = REPO_ROOT / "data" / "raw"
 MANIFEST_NAME = "manifest.json"
 IGNORED_FILES = {".gitkeep", ".DS_Store"}
+IGNORED_DIRS = {".cache"}  # huggingface_hub download metadata
+PARTIAL_SUFFIX = ".partial"  # downloads land here and are renamed only once complete
+ATTEMPTS = 3
 
 Kind = Literal["zip", "huggingface", "manual"]
 
@@ -98,7 +101,13 @@ DATASETS: dict[str, Dataset] = {
 def dataset_files(folder: Path) -> list[Path]:
     if not folder.is_dir():
         return []
-    return [p for p in folder.rglob("*") if p.is_file() and p.name not in IGNORED_FILES]
+    return [
+        p
+        for p in folder.rglob("*")
+        if p.is_file()
+        and p.name not in IGNORED_FILES
+        and not IGNORED_DIRS.intersection(p.relative_to(folder).parts)
+    ]
 
 
 def is_present(folder: Path) -> bool:
@@ -184,13 +193,25 @@ def fetch(dataset: Dataset, dest: Path, *, force: bool, client: httpx.Client) ->
         print(dataset.instructions.format(dest=folder))
         return entry | {"status": "manual_download_required"}
 
-    if force and folder.exists():
-        shutil.rmtree(folder)
+    # Download into <name>.partial and rename only on success, so an interrupted run never
+    # leaves a half-filled folder that a later run would mistake for a complete dataset.
+    staging = dest / f"{dataset.name}{PARTIAL_SUFFIX}"
     print(f"[{dataset.name}] downloading {dataset.source} ...", flush=True)
-    if dataset.kind == "zip":
-        entry["sha256"] = download_zip(dataset.source, folder, client=client)
-    else:
-        download_huggingface(dataset.source, folder)
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            if dataset.kind == "zip":
+                shutil.rmtree(staging, ignore_errors=True)
+                entry["sha256"] = download_zip(dataset.source, staging, client=client)
+            else:
+                download_huggingface(dataset.source, staging)  # resumes a partial download
+            break
+        except (httpx.HTTPError, OSError) as exc:
+            if attempt == ATTEMPTS:
+                raise
+            print(f"[{dataset.name}] attempt {attempt} failed ({exc}); retrying", flush=True)
+    if folder.exists():
+        shutil.rmtree(folder)  # only reached with --force, or when the folder held no data
+    staging.rename(folder)
     return entry | {"status": "downloaded"} | summarize(folder)
 
 
