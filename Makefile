@@ -39,7 +39,9 @@ down:             ## Stop local services
 	docker compose down
 
 init:             ## Create Pinecone index, Neo4j schema, run DB migrations
-	$(call todo,Phase 0/3: index + schema scripts and Alembic migrations)
+	$(PY) scripts/create_pinecone_index.py
+	$(PY) scripts/init_neo4j_schema.py
+	$(call todo,Phase 3: Alembic migrations for Postgres)
 
 data:             ## Download public datasets into data/raw
 	$(call todo,Phase 0: scripts/download_datasets.py)
