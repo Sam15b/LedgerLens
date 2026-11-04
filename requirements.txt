@@ -21,7 +21,7 @@ pinecone-text>=0.9             # BM25 sparse vectors for hybrid search
 tiktoken>=0.7                  # token counting for chunking / cost
 
 # --- Storage ---
-pinecone>=5.0                  # vector database
+pinecone>=10.0                 # vector database (SDK; index admin for Pinecone Local uses REST)
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
 alembic>=1.13

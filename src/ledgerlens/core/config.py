@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     log_level: str = "INFO"
     configs_dir: Path | None = None  # defaults to <repo>/configs, then ./configs
+    health_check_timeout_s: float = 3.0
 
     # PostgreSQL
     database_url: str = "postgresql+psycopg://ledger:ledger@localhost:5432/ledgerlens"
