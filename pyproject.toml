@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ledgerlens"
-version = "0.1.0"
+dynamic = ["version"]  # single source: src/ledgerlens/__init__.py
 description = "Agentic GraphRAG system for invoices, purchase orders and contracts."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -69,6 +69,9 @@ dev = [
     "types-PyYAML",
     "pre-commit",
 ]
+
+[tool.hatch.version]
+path = "src/ledgerlens/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ledgerlens"]
