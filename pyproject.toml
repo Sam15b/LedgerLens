@@ -76,7 +76,12 @@ packages = ["src/ledgerlens"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra"
+# Integration tests need `docker compose up` and are excluded by default;
+# run them with `pytest -m integration` (or `make test-int`).
+addopts = "-ra -m 'not integration'"
+markers = [
+    "integration: needs the docker compose services (Postgres, Neo4j, Redis, Pinecone Local)",
+]
 filterwarnings = [
     # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.
     "ignore::DeprecationWarning:langsmith.*",

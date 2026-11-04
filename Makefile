@@ -63,8 +63,8 @@ web:              ## Run the Next.js dashboard
 test:             ## Unit tests
 	$(PY) -m pytest tests/unit
 
-test-int:         ## Integration tests (needs `make up`)
-	$(call todo,Phase 0: integration marker + tests/integration)
+test-int:         ## Integration tests (needs `make up`; PINECONE_HOST=http://localhost:5080 for Pinecone Local)
+	$(PY) -m pytest -m integration tests/integration
 
 cov:              ## Unit tests with coverage report
 	$(PY) -m pytest tests/unit --cov --cov-report=term-missing
