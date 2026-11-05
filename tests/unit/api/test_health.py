@@ -145,22 +145,43 @@ class FakeAdmin:
         return self.info
 
 
-@pytest.mark.parametrize(
-    ("info", "expected"),
-    [
-        (None, "missing"),
-        (IndexInfo("ledgerlens-chunks", 768, "dotproduct", "h", ready=True), "ready"),
-        (IndexInfo("ledgerlens-chunks", 768, "dotproduct", None, ready=False), "initializing"),
-    ],
-)
-def test_check_pinecone_reports_index_state(
-    monkeypatch: pytest.MonkeyPatch, info: IndexInfo | None, expected: str
-) -> None:
+def test_check_pinecone_ok_when_index_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = IndexInfo("ledgerlens-chunks", 768, "dotproduct", "h", ready=True)
     monkeypatch.setattr(deps, "get_pinecone_admin", lambda: FakeAdmin(info))
 
     detail = health_checks.check_pinecone()
 
-    assert detail is not None and expected in detail
+    assert detail is not None and "ready" in detail
+
+
+@pytest.mark.parametrize(
+    ("info", "expected"),
+    [
+        (None, "missing"),
+        (IndexInfo("ledgerlens-chunks", 768, "dotproduct", None, ready=False), "initializing"),
+    ],
+)
+def test_check_pinecone_fails_without_a_ready_index(
+    monkeypatch: pytest.MonkeyPatch, info: IndexInfo | None, expected: str
+) -> None:
+    monkeypatch.setattr(deps, "get_pinecone_admin", lambda: FakeAdmin(info))
+
+    with pytest.raises(RuntimeError, match=expected):
+        health_checks.check_pinecone()
+
+
+def test_ready_returns_503_when_pinecone_index_missing(
+    monkeypatch: pytest.MonkeyPatch, make_client: Callable[..., TestClient]
+) -> None:
+    monkeypatch.setattr(deps, "get_pinecone_admin", lambda: FakeAdmin(None))
+    client = make_client([HealthCheck("pinecone", health_checks.check_pinecone)])
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    pinecone = response.json()["dependencies"]["pinecone"]
+    assert pinecone["status"] == "down"
+    assert "create_pinecone_index.py" in pinecone["error"]
 
 
 def test_check_redis_propagates_failure(monkeypatch: pytest.MonkeyPatch) -> None:

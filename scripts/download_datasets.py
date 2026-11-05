@@ -23,6 +23,7 @@ import json
 import shutil
 import sys
 import tempfile
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -129,7 +130,9 @@ def flatten_single_root(dest: Path) -> None:
     """If extraction produced exactly one top-level folder, move its contents up."""
     entries = [p for p in dest.iterdir() if p.name not in IGNORED_FILES | {"__MACOSX"}]
     if len(entries) == 1 and entries[0].is_dir():
-        inner = entries[0]
+        # Rename first: the root may contain an entry with its own name (data/data/...),
+        # which would otherwise collide with the folder being emptied.
+        inner = entries[0].rename(dest / f".flatten-{uuid.uuid4().hex}")
         for child in inner.iterdir():
             shutil.move(str(child), dest / child.name)
         inner.rmdir()

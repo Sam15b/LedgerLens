@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from ledgerlens.core.config import AppConfig, Settings, load_config, resolve_configs_dir
+from ledgerlens.core.config import (
+    ENV_FILES,
+    AppConfig,
+    Settings,
+    load_config,
+    resolve_configs_dir,
+)
 
 
 def test_repo_configs_load_and_validate() -> None:
@@ -76,14 +82,42 @@ def test_agent_specific_extras_are_kept() -> None:
     assert reconciler.model_extra == {"price_tolerance_pct": 2.0}
 
 
-def test_settings_work_without_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.chdir(tmp_path)  # no .env here
+def test_settings_work_without_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("APP_ENV", raising=False)
+
+    monkeypatch.setitem(Settings.model_config, "env_file", None)  # ignore any developer .env
 
     settings = Settings()
 
     assert settings.app_env == "dev"
     assert settings.embedding_dim == 768
+
+
+def test_repo_env_file_is_found_from_any_directory() -> None:
+    repo_env, cwd_env = ENV_FILES
+
+    assert repo_env.is_absolute()
+    assert repo_env.parent == resolve_configs_dir().parent  # same root as configs/
+    assert Settings.model_config["env_file"] == ENV_FILES
+    assert not cwd_env.is_absolute()  # resolved against the working directory at load time
+
+
+def test_working_directory_env_file_overrides_repo_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    root_env = tmp_path / "root.env"
+    root_env.write_text("APP_ENV=staging\nLOG_LEVEL=DEBUG\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("APP_ENV=prod\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setitem(Settings.model_config, "env_file", (root_env, ENV_FILES[1]))
+
+    settings = Settings()
+
+    assert settings.app_env == "prod"  # ./.env wins
+    assert settings.log_level == "DEBUG"  # repo-root value kept where ./.env is silent
 
 
 def test_configs_dir_override(tmp_path: Path) -> None:

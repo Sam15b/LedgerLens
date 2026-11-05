@@ -20,9 +20,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # src/ledgerlens/core/config.py -> repository root is three levels above the package dir.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# The repo-root .env is found from any working directory (like configs/ is); a ./.env in the
+# working directory is read after it, so its values win.
+ENV_FILES = (_REPO_ROOT / ".env", Path(".env"))
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=ENV_FILES, env_file_encoding="utf-8", extra="ignore")
 
     # App
     app_env: str = "dev"
