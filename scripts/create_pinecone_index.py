@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import get_args
 
-from ledgerlens.core.config import get_config, get_settings
+from ledgerlens.core.config import PineconeConfig, get_config, get_settings
 from ledgerlens.storage.pinecone_store import (
     IndexMismatchError,
     PineconeNotConfiguredError,
@@ -27,7 +28,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--name", default=settings.pinecone_index)
     parser.add_argument("--dimension", type=int, default=config.dimension)
-    parser.add_argument("--metric", default=config.metric)
+    parser.add_argument(
+        "--metric",
+        default=config.metric,
+        choices=get_args(PineconeConfig.model_fields["metric"].annotation),
+    )
     parser.add_argument("--cloud", default=settings.pinecone_cloud)
     parser.add_argument("--region", default=settings.pinecone_region)
     args = parser.parse_args(argv)
