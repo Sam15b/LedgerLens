@@ -54,11 +54,15 @@ def check_redis() -> str | None:
 
 
 def check_pinecone() -> str | None:
+    # Reachable is not enough: without a ready index every upsert and query fails, so a
+    # missing or still-initializing index counts as down and keeps /ready at 503.
     name = get_settings().pinecone_index
     info = deps.get_pinecone_admin().describe(name)
     if info is None:
-        return f"index {name!r} missing; run scripts/create_pinecone_index.py"
-    return f"index {name!r} ready" if info.ready else f"index {name!r} initializing"
+        raise RuntimeError(f"index {name!r} missing; run scripts/create_pinecone_index.py")
+    if not info.ready:
+        raise RuntimeError(f"index {name!r} initializing")
+    return f"index {name!r} ready"
 
 
 def check_ollama() -> str | None:
