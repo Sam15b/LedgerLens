@@ -60,6 +60,17 @@ def test_download_zip_extracts_and_flattens_single_root(tmp_path: Path) -> None:
     assert sorted(p.name for p in tmp_path.iterdir()) == ["funsd"]  # temp archive cleaned up
 
 
+def test_download_zip_flattens_root_containing_its_own_name(tmp_path: Path) -> None:
+    payload = _zip_bytes({"data/data/a.json": "{}", "data/b.json": "{}"})
+
+    dd.download_zip("https://x/data.zip", tmp_path / "cuad", client=_client(payload))
+
+    assert sorted(
+        p.relative_to(tmp_path / "cuad").as_posix() for p in dd.dataset_files(tmp_path / "cuad")
+    ) == ["b.json", "data/a.json"]
+    assert sorted(p.name for p in (tmp_path / "cuad").iterdir()) == ["b.json", "data"]
+
+
 def test_safe_extract_rejects_zip_slip(tmp_path: Path) -> None:
     archive = tmp_path / "evil.zip"
     archive.write_bytes(_zip_bytes({"../escape.txt": "x"}))
