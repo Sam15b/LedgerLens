@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # src/ledgerlens/core/config.py -> repository root is three levels above the package dir.
@@ -87,6 +87,24 @@ class _Section(BaseModel):
 # models.yaml ------------------------------------------------------------------------
 
 
+LLM_PROVIDERS = frozenset({"openai", "gemini", "ollama", "mistral", "bedrock"})
+"""Provider prefixes allowed in ``provider/model`` references."""
+
+
+def split_model_ref(ref: str) -> tuple[str, str]:
+    """Split ``provider/model`` (e.g. ``ollama/llama3:8b``) into its two parts.
+
+    Only the first ``/`` separates them, so model ids may contain slashes themselves.
+    """
+    provider, sep, model = ref.partition("/")
+    if not sep or not provider or not model:
+        raise ValueError(f"model reference {ref!r} must look like 'provider/model'")
+    if provider not in LLM_PROVIDERS:
+        known = ", ".join(sorted(LLM_PROVIDERS))
+        raise ValueError(f"unknown provider {provider!r} in {ref!r} (known: {known})")
+    return provider, model
+
+
 class ModelPrice(_Section):
     input: float | None = Field(default=None, alias="in", ge=0)
     output: float | None = Field(default=None, alias="out", ge=0)
@@ -94,7 +112,15 @@ class ModelPrice(_Section):
 
 class RetryConfig(_Section):
     max_attempts: int = Field(default=3, ge=1)
-    backoff_s: list[float] = Field(default_factory=lambda: [1.0, 2.0, 4.0])
+    """Attempts per provider before falling back to the next one."""
+    backoff_s: list[Annotated[float, Field(ge=0)]] = Field(
+        default_factory=lambda: [1.0, 2.0, 4.0], min_length=1
+    )
+    """Wait before retry n is ``backoff_s[n-1]``; the last value repeats."""
+
+    def delay_for(self, retry: int) -> float:
+        """Seconds to wait before the ``retry``-th retry (1-based)."""
+        return self.backoff_s[min(max(retry, 1), len(self.backoff_s)) - 1]
 
 
 class ModelsConfig(_Section):
@@ -103,13 +129,38 @@ class ModelsConfig(_Section):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     timeout_s: float = Field(default=60, gt=0)
 
+    @field_validator("aliases")
+    @classmethod
+    def _check_aliases(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
+        for name, refs in aliases.items():
+            for ref in refs:
+                split_model_ref(ref)
+            if len(set(refs)) != len(refs):
+                raise ValueError(f"alias {name!r} lists the same model more than once")
+        return aliases
+
+    @field_validator("pricing_usd_per_1m_tokens")
+    @classmethod
+    def _check_pricing_keys(cls, prices: dict[str, ModelPrice]) -> dict[str, ModelPrice]:
+        for ref in prices:
+            split_model_ref(ref)
+        return prices
+
     def resolve(self, alias: str) -> list[str]:
-        """Return the ordered ``provider/model`` fallback list for an alias."""
-        try:
-            return self.aliases[alias]
-        except KeyError:
-            known = ", ".join(sorted(self.aliases)) or "none"
-            raise KeyError(f"unknown model alias {alias!r} (known: {known})") from None
+        """Return the ordered ``provider/model`` fallback list for an alias.
+
+        An explicit ``provider/model`` reference is accepted too and resolves to itself.
+        """
+        if alias in self.aliases:
+            refs = self.aliases[alias]
+            if not refs:
+                raise ValueError(f"model alias {alias!r} has no models in models.yaml")
+            return list(refs)
+        if "/" in alias:
+            split_model_ref(alias)
+            return [alias]
+        known = ", ".join(sorted(self.aliases)) or "none"
+        raise KeyError(f"unknown model alias {alias!r} (known: {known})")
 
 
 # pinecone.yaml ----------------------------------------------------------------------
