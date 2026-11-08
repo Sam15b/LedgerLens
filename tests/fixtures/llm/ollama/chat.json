@@ -1,0 +1,16 @@
+{
+  "model": "llama3:8b",
+  "created_at": "2026-11-08T16:40:12.418273Z",
+  "message": {
+    "role": "assistant",
+    "content": "An invoice is a request for payment issued by a seller to a buyer."
+  },
+  "done_reason": "stop",
+  "done": true,
+  "total_duration": 1840211300,
+  "load_duration": 21093400,
+  "prompt_eval_count": 26,
+  "prompt_eval_duration": 141000000,
+  "eval_count": 17,
+  "eval_duration": 1675000000
+}

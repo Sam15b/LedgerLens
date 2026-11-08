@@ -6,6 +6,14 @@ aliases:
   local: [ollama/llama3:8b]
   extractor: []
   judge: []
-pricing_usd_per_1m_tokens: {}
+
+# USD per 1M tokens, keyed like the aliases (provider/model). A model with no entry (or a
+# null in/out) is logged once and its cost recorded as None.
+# Prices change: re-check https://openai.com/api/pricing before relying on these numbers.
+pricing_usd_per_1m_tokens:
+  openai/gpt-4o: { in: 2.50, out: 10.00 }
+  openai/gpt-4o-mini: { in: 0.15, out: 0.60 }
+  ollama/llama3:8b: { in: 0.0, out: 0.0 }
+
 retry: { max_attempts: 3, backoff_s: [1, 2, 4] }
 timeout_s: 60

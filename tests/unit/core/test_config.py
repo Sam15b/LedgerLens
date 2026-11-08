@@ -9,6 +9,7 @@ from ledgerlens.core.config import (
     Settings,
     load_config,
     resolve_configs_dir,
+    split_model_ref,
 )
 
 
@@ -122,3 +123,100 @@ def test_working_directory_env_file_overrides_repo_one(
 
 def test_configs_dir_override(tmp_path: Path) -> None:
     assert resolve_configs_dir(tmp_path) == tmp_path
+
+
+def _models_yaml(tmp_path: Path, body: str) -> Path:
+    (tmp_path / "models.yaml").write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+def test_repo_models_yaml_aliases_and_prices_are_valid() -> None:
+    models = load_config().models
+
+    assert models.resolve("local") == ["ollama/llama3:8b"]
+    assert models.timeout_s > 0
+    for ref in models.pricing_usd_per_1m_tokens:
+        split_model_ref(ref)
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("ollama/llama3:8b", ("ollama", "llama3:8b")),
+        ("openai/gpt-4o", ("openai", "gpt-4o")),
+        ("ollama/hf.co/org/model:q4", ("ollama", "hf.co/org/model:q4")),
+    ],
+)
+def test_split_model_ref(ref: str, expected: tuple[str, str]) -> None:
+    assert split_model_ref(ref) == expected
+
+
+@pytest.mark.parametrize("ref", ["gpt-4o", "openai/", "/gpt-4o", "anthropc/claude"])
+def test_split_model_ref_rejects_bad_refs(ref: str) -> None:
+    with pytest.raises(ValueError):
+        split_model_ref(ref)
+
+
+def test_alias_with_unknown_provider_is_rejected(tmp_path: Path) -> None:
+    _models_yaml(tmp_path, "aliases:\n  smart: [opneai/gpt-4o]\n")
+
+    with pytest.raises(ValidationError, match="unknown provider 'opneai'"):
+        load_config(tmp_path)
+
+
+def test_alias_listing_a_model_twice_is_rejected(tmp_path: Path) -> None:
+    _models_yaml(tmp_path, "aliases:\n  fast: [openai/gpt-4o-mini, openai/gpt-4o-mini]\n")
+
+    with pytest.raises(ValidationError, match="more than once"):
+        load_config(tmp_path)
+
+
+def test_pricing_key_must_be_a_model_ref(tmp_path: Path) -> None:
+    _models_yaml(tmp_path, "pricing_usd_per_1m_tokens:\n  gpt-4o: { in: 1, out: 2 }\n")
+
+    with pytest.raises(ValidationError, match="provider/model"):
+        load_config(tmp_path)
+
+
+def test_resolve_accepts_explicit_model_ref(tmp_path: Path) -> None:
+    models = load_config(_models_yaml(tmp_path, "aliases: {}\n")).models
+
+    assert models.resolve("openai/gpt-4o") == ["openai/gpt-4o"]
+
+
+def test_resolve_empty_alias_is_an_error(tmp_path: Path) -> None:
+    models = load_config(_models_yaml(tmp_path, "aliases:\n  smart: []\n")).models
+
+    with pytest.raises(ValueError, match="no models"):
+        models.resolve("smart")
+
+
+def test_resolve_returns_a_copy(tmp_path: Path) -> None:
+    models = load_config(_models_yaml(tmp_path, "aliases:\n  local: [ollama/a]\n")).models
+
+    models.resolve("local").append("ollama/b")
+
+    assert models.resolve("local") == ["ollama/a"]
+
+
+def test_retry_and_timeout_are_parsed(tmp_path: Path) -> None:
+    body = "retry: { max_attempts: 2, backoff_s: [0.5, 3] }\ntimeout_s: 15\n"
+    models = load_config(_models_yaml(tmp_path, body)).models
+
+    assert models.retry.max_attempts == 2
+    assert models.timeout_s == 15
+    assert [models.retry.delay_for(n) for n in (1, 2, 3, 9)] == [0.5, 3, 3, 3]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "retry: { max_attempts: 0 }\n",
+        "retry: { backoff_s: [] }\n",
+        "retry: { backoff_s: [1, -2] }\n",
+        "timeout_s: 0\n",
+    ],
+)
+def test_invalid_retry_or_timeout_is_rejected(tmp_path: Path, body: str) -> None:
+    with pytest.raises(ValidationError):
+        load_config(_models_yaml(tmp_path, body))
