@@ -4,6 +4,8 @@ Callers ask for an alias from ``configs/models.yaml`` (``smart``, ``fast``, ``lo
 or an explicit ``provider/model``. The alias resolves to an ordered list of models; each is
 tried in turn until one answers:
 
+* :class:`LLMTransientError` (429, 5xx, timeout) -> retried on the same model with the
+  ``retry`` backoff from ``models.yaml``, then the next model.
 * :class:`LLMProviderError` (bad key, unknown model, provider not built yet) -> next model.
 * :class:`LLMValidationError` -> raised to the caller; another provider is not tried.
 
@@ -14,6 +16,7 @@ provider, model, tokens, cost and latency. See docs/layers/05-model-router.md.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -34,6 +37,9 @@ from ledgerlens.llm.types import (
 logger = logging.getLogger(__name__)
 
 ProviderFactory = Callable[[], LLMProvider]
+
+# Honour a server's Retry-After, but never park a caller for longer than this.
+MAX_RETRY_AFTER_S = 30.0
 
 # Providers built so far; the rest of models.yaml's providers arrive with their adapters.
 DEFAULT_PROVIDER_FACTORIES: Mapping[str, ProviderFactory] = {
@@ -60,6 +66,7 @@ class LLMClient:
         providers: Mapping[str, LLMProvider] | None = None,
         factories: Mapping[str, ProviderFactory] | None = None,
         prices: PriceTable | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """``providers`` pins ready-made adapters (tests, custom clients); any other provider
         is built on first use from ``factories``."""
@@ -67,6 +74,7 @@ class LLMClient:
         self._providers: dict[str, LLMProvider] = dict(providers or {})
         self._factories = dict(DEFAULT_PROVIDER_FACTORIES if factories is None else factories)
         self._prices = prices or PriceTable.from_config(self.config)
+        self._sleep = sleep
 
     def complete(
         self,
@@ -115,7 +123,31 @@ class LLMClient:
         return provider
 
     def _call(self, provider_name: str, request: LLMRequest) -> LLMResponse:
-        return self._provider(provider_name).complete(request)
+        """Call one model, retrying transient errors with the configured backoff."""
+        provider = self._provider(provider_name)
+        retry = self.config.retry
+        for attempt in range(1, retry.max_attempts + 1):
+            try:
+                return provider.complete(request)
+            except LLMTransientError as exc:
+                if attempt == retry.max_attempts:
+                    raise
+                delay = retry.delay_for(attempt)
+                if exc.retry_after_s is not None:
+                    delay = max(delay, min(exc.retry_after_s, MAX_RETRY_AFTER_S))
+                logger.warning(
+                    "llm call transient error provider=%s model=%s attempt=%d/%d: %s; "
+                    "retrying in %.1fs",
+                    provider_name,
+                    request.model,
+                    attempt,
+                    retry.max_attempts,
+                    exc,
+                    delay,
+                    extra={"llm_provider": provider_name, "llm_model": request.model},
+                )
+                self._sleep(delay)
+        raise AssertionError("unreachable: max_attempts >= 1")  # pragma: no cover
 
     def _finish(self, alias: str, ref: str, response: LLMResponse) -> LLMResponse:
         response = response.model_copy(
