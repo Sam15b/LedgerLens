@@ -9,6 +9,9 @@ tried in turn until one answers:
 * :class:`LLMProviderError` (bad key, unknown model, provider not built yet) -> next model.
 * :class:`LLMValidationError` -> raised to the caller; another provider is not tried.
 
+:meth:`LLMClient.structured` sends a Pydantic model's JSON schema, validates the reply into
+an instance and, if it does not validate, asks the *same* model once to repair it.
+
 Every successful call is priced from ``pricing_usd_per_1m_tokens`` and logged with
 provider, model, tokens, cost and latency. See docs/layers/05-model-router.md.
 """
@@ -16,9 +19,12 @@ provider, model, tokens, cost and latency. See docs/layers/05-model-router.md.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
 
 from ledgerlens.core.config import ModelsConfig, get_config, split_model_ref
 from ledgerlens.llm.pricing import PriceTable
@@ -31,15 +37,21 @@ from ledgerlens.llm.types import (
     LLMRequest,
     LLMResponse,
     LLMTransientError,
+    LLMValidationError,
     Message,
 )
 
 logger = logging.getLogger(__name__)
 
 ProviderFactory = Callable[[], LLMProvider]
+T = TypeVar("T", bound=BaseModel)
 
 # Honour a server's Retry-After, but never park a caller for longer than this.
 MAX_RETRY_AFTER_S = 30.0
+
+# Local models often wrap JSON in a Markdown fence even in JSON mode.
+_CODE_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+_MAX_REPORTED_ERRORS = 10
 
 # Providers built so far; the rest of models.yaml's providers arrive with their adapters.
 DEFAULT_PROVIDER_FACTORIES: Mapping[str, ProviderFactory] = {
@@ -110,6 +122,57 @@ class LLMClient:
                 continue
             return self._finish(model, ref, response)
         raise AllProvidersFailedError(model, attempts)
+
+    def structured(
+        self,
+        messages: list[Message],
+        schema: type[T],
+        *,
+        model: str = "smart",
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> T:
+        """Return the reply parsed into ``schema``, with one repair attempt.
+
+        The schema goes to the provider as native structured output. If the reply still does
+        not validate, the validation errors are shown to the model that produced it (not the
+        next one in the alias) and it gets one chance to fix them; after that
+        :class:`LLMValidationError` is raised.
+        """
+        json_schema = schema.model_json_schema()
+        call: dict[str, Any] = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "json_schema": json_schema,
+            "schema_name": schema.__name__,
+        }
+        response = self.complete(messages, model=model, **call)
+        try:
+            return parse_structured(schema, response.text)
+        except ValidationError as first_error:
+            ref = f"{response.provider}/{response.model}"
+            logger.warning(
+                "structured output from %s does not match %s; asking it to repair: %s",
+                ref,
+                schema.__name__,
+                _describe(first_error),
+                extra={"llm_model_ref": ref, "schema": schema.__name__},
+            )
+            repair = [
+                *messages,
+                Message.assistant(response.text),
+                Message.user(_repair_prompt(schema, first_error)),
+            ]
+            repaired = self.complete(repair, model=ref, **call)
+            try:
+                return parse_structured(schema, repaired.text)
+            except ValidationError as second_error:
+                raise LLMValidationError(
+                    f"{ref} returned output that does not match {schema.__name__} after one "
+                    f"repair attempt: {_describe(second_error)}",
+                    provider=response.provider,
+                    raw=repaired.text,
+                ) from second_error
 
     # ------------------------------------------------------------------ internals
 
@@ -188,3 +251,29 @@ class LLMClient:
             action,
             extra={"llm_alias": alias, "llm_model_ref": ref, "error_type": type(exc).__name__},
         )
+
+
+# --------------------------------------------------------------------------- structured
+
+
+def parse_structured(schema: type[T], text: str) -> T:
+    """Validate ``text`` as JSON for ``schema``, tolerating a surrounding code fence."""
+    fenced = _CODE_FENCE.match(text)
+    return schema.model_validate_json(fenced.group(1) if fenced else text)
+
+
+def _describe(error: ValidationError) -> str:
+    problems = [
+        f"{'.'.join(str(part) for part in e['loc']) or '<root>'}: {e['msg']}"
+        for e in error.errors()[:_MAX_REPORTED_ERRORS]
+    ]
+    more = error.error_count() - len(problems)
+    return "; ".join(problems) + (f"; and {more} more" if more > 0 else "")
+
+
+def _repair_prompt(schema: type[BaseModel], error: ValidationError) -> str:
+    return (
+        f"Your previous reply is not a valid {schema.__name__} object. Problems: "
+        f"{_describe(error)}. Reply again with only the corrected JSON object - no prose, "
+        "no code fences."
+    )
