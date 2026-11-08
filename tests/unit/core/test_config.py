@@ -220,3 +220,17 @@ def test_retry_and_timeout_are_parsed(tmp_path: Path) -> None:
 def test_invalid_retry_or_timeout_is_rejected(tmp_path: Path, body: str) -> None:
     with pytest.raises(ValidationError):
         load_config(_models_yaml(tmp_path, body))
+
+
+def test_every_agent_alias_resolves_to_a_model() -> None:
+    config = load_config()
+
+    for name, agent in config.agents.agents.items():
+        assert config.models.resolve(agent.model), f"agent {name!r} has no model"
+
+
+def test_every_aliased_model_has_a_price() -> None:
+    models = load_config().models
+    aliased = {ref for refs in models.aliases.values() for ref in refs}
+
+    assert aliased <= set(models.pricing_usd_per_1m_tokens)

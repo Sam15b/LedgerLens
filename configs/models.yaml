@@ -1,11 +1,13 @@
 # Model router aliases -> ordered fallback list of provider/model.
 # Fill model IDs and prices from provider docs; see docs/layers/05-model-router.md
+# Only openai and ollama adapters exist so far; gemini, mistral and bedrock join the
+# chains when their adapters land (see the target chains in the layer doc).
 aliases:
-  fast: []
-  smart: []
+  fast: [openai/gpt-4o-mini, ollama/llama3:8b]
+  smart: [openai/gpt-4o]
   local: [ollama/llama3:8b]
-  extractor: []
-  judge: []
+  extractor: [openai/gpt-4o-mini]
+  judge: [openai/gpt-4o]  # eval only
 
 # USD per 1M tokens, keyed like the aliases (provider/model). A model with no entry (or a
 # null in/out) is logged once and its cost recorded as None.
