@@ -11,6 +11,8 @@ it
 and returns a :class:`LoadedFile`. :meth:`FileLoader.load` also checks the hash against a
 :class:`DedupeRegistry`, so the same bytes uploaded twice -- under any name -- map to one
 ``document_id`` and the second upload is skipped.
+
+Size and type limits come from ``loader`` in ``configs/ingestion.yaml``.
 """
 
 from __future__ import annotations
@@ -90,8 +92,16 @@ class LoaderError(ValueError):
     """The file cannot be ingested; the message says why and is safe to show the user."""
 
 
+class UnsupportedFileError(LoaderError):
+    pass
+
+
+class FileTooLargeError(LoaderError):
+    pass
+
+
 class UnreadableFileError(LoaderError):
-    """Truncated, corrupt or password-protected."""
+    """Empty, truncated, corrupt or password-protected."""
 
 
 # --------------------------------------------------------------------------- helpers
@@ -206,11 +216,16 @@ class FileLoader:
         self.config = config or get_config().ingestion.loader
         self.registry: DedupeRegistry = registry if registry is not None else InMemoryRegistry()
 
+    @property
+    def max_bytes(self) -> int:
+        return int(self.config.max_file_mb * 1024 * 1024)
+
     def inspect(self, path: Path | str) -> LoadedFile:
         """Identify the file at ``path`` (no dedupe check). Raises :class:`LoaderError`."""
         path = Path(path)
         try:
             size = path.stat().st_size
+            self._check_size(path.name, size)
             with path.open("rb") as f:
                 mime_type = self._check_type(path.name, f.read(_SNIFF_BYTES))
                 f.seek(0)
@@ -227,6 +242,7 @@ class FileLoader:
 
     def inspect_bytes(self, data: bytes, filename: str) -> LoadedFile:
         """Identify an upload held in memory (no dedupe check). Raises :class:`LoaderError`."""
+        self._check_size(filename, len(data))
         mime_type = self._check_type(filename, data[:_SNIFF_BYTES])
         return LoadedFile(
             filename=filename,
@@ -258,10 +274,23 @@ class FileLoader:
         )
         return LoadResult(file=file, document_id=existing, duplicate=True)
 
+    def _check_size(self, filename: str, size: int) -> None:
+        if size == 0:
+            raise UnreadableFileError(f"{filename}: the file is empty")
+        if size > self.max_bytes:
+            raise FileTooLargeError(
+                f"{filename}: {size / 1024 / 1024:.1f} MB is over the "
+                f"{self.config.max_file_mb:g} MB limit"
+            )
+
     def _check_type(self, filename: str, head: bytes) -> str:
         mime_type = sniff_mime_type(head)
-        if mime_type is None:
-            raise LoaderError(f"{filename}: unrecognised file type")
+        allowed = self.config.allowed_mime_types
+        if mime_type is None or mime_type not in allowed:
+            found = mime_type or "an unrecognised format"
+            raise UnsupportedFileError(
+                f"{filename}: {found} is not supported (allowed: {', '.join(allowed)})"
+            )
         return mime_type
 
     @staticmethod
