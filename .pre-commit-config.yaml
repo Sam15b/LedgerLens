@@ -25,6 +25,8 @@ repos:
           - neo4j>=5.20
           - redis>=5.0
           - pinecone>=10.0
+          - pymupdf>=1.24
+          - pillow>=10.0
           - pytest>=8
           - types-PyYAML
 
