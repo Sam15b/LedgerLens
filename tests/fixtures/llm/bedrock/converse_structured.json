@@ -1,0 +1,24 @@
+{
+  "ResponseMetadata": { "RequestId": "0a9b8c7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d", "HTTPStatusCode": 200 },
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "text": "The vendor is Acme Supplies and the total is 1,250.00 USD.",
+              "signature": "EqQBCkgIBhABGAIiQL3"
+            }
+          }
+        },
+        {
+          "text": "{\"vendor\":\"Acme Supplies\",\"total\":1250.0,\"currency\":\"USD\",\"po_number\":null}"
+        }
+      ]
+    }
+  },
+  "stopReason": "end_turn",
+  "usage": { "inputTokens": 236, "outputTokens": 58, "totalTokens": 294 },
+  "metrics": { "latencyMs": 1904 }
+}

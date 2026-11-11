@@ -1,0 +1,19 @@
+{
+  "id": "5c1f0e3a9b7d4f2e8a6c1b0d3e5f7a9c",
+  "object": "chat.completion",
+  "created": 1794158460,
+  "model": "mistral-small-2603",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "A purchase order is a document a buyer sends a seller to order goods or services at agreed prices.",
+        "tool_calls": null,
+        "prefix": false
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 12, "completion_tokens": 21, "total_tokens": 33 }
+}

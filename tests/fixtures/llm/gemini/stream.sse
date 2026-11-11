@@ -1,0 +1,5 @@
+data: {"candidates": [{"content": {"parts": [{"text": "Net"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 11,"totalTokenCount": 11},"modelVersion": "gemini-3.8-flash"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " 30"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 11,"totalTokenCount": 11},"modelVersion": "gemini-3.8-flash"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ""}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 11,"candidatesTokenCount": 3,"totalTokenCount": 14},"modelVersion": "gemini-3.8-flash"}

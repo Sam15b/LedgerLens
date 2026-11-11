@@ -1,0 +1,25 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "A purchase order is a buyer's written offer to buy goods or services at agreed prices and terms."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 9,
+    "candidatesTokenCount": 19,
+    "totalTokenCount": 52,
+    "thoughtsTokenCount": 24,
+    "promptTokensDetails": [{ "modality": "TEXT", "tokenCount": 9 }]
+  },
+  "modelVersion": "gemini-3.8-flash",
+  "responseId": "kD8yaZ7nO4uR1MkP2o3t8Qc"
+}
