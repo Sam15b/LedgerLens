@@ -118,3 +118,7 @@ files = ["src", "tests"]
 # [[tool.mypy.overrides]]
 # module = ["pytesseract.*"]
 # ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
+ignore_missing_imports = true
