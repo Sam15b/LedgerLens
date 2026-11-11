@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,17 @@ from ledgerlens.llm.types import (
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "llm" / "ollama"
 BASE_URL = "http://ollama.test:11434"
+
+
+def drain(stream: Generator[str, None, Usage]) -> tuple[list[str], Usage]:
+    """Collect a provider stream's chunks and its returned usage."""
+    chunks: list[str] = []
+    while True:
+        try:
+            chunks.append(next(stream))
+        except StopIteration as stop:
+            return chunks, stop.value
+
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -181,9 +192,10 @@ def test_malformed_body_is_a_provider_error(body: str) -> None:
 def test_stream_yields_recorded_chunks_until_done() -> None:
     handler, sent = reply_with(recorded("chat_stream.ndjson"))
 
-    chunks = list(make_provider(handler).stream(request()))
+    chunks, usage = drain(make_provider(handler).stream(request()))
 
     assert chunks == ["Net", " 30", " days."]
+    assert usage == Usage(tokens_in=19, tokens_out=3)
     assert sent[0]["stream"] is True
 
 

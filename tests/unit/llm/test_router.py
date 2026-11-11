@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 
 import httpx
@@ -44,13 +44,22 @@ CONFIG = ModelsConfig.model_validate(
 Outcome = str | LLMError
 
 
+# A scripted stream: chunks to yield, then optionally an error to raise.
+StreamOutcome = list[str] | LLMError | tuple[list[str], LLMError]
+STREAM_USAGE = Usage(tokens_in=1_000, tokens_out=100)
+
+
 class FakeProvider:
     """Plays back scripted outcomes: a string is a reply, an exception is raised."""
 
-    def __init__(self, name: str, *outcomes: Outcome) -> None:
+    def __init__(
+        self, name: str, *outcomes: Outcome, streams: list[StreamOutcome] | None = None
+    ) -> None:
         self.name = name
         self.outcomes = list(outcomes)
+        self.streams = list(streams or [])
         self.requests: list[LLMRequest] = []
+        self.closed_streams = 0
 
     def complete(self, req: LLMRequest) -> LLMResponse:
         self.requests.append(req)
@@ -65,8 +74,24 @@ class FakeProvider:
             latency_ms=5.0,
         )
 
-    def stream(self, req: LLMRequest) -> Iterator[str]:
-        yield from ()
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        self.requests.append(req)
+        outcome = self.streams.pop(0) if self.streams else ["ok"]
+        chunks: list[str]
+        error: LLMError | None
+        if isinstance(outcome, tuple):
+            chunks, error = outcome
+        elif isinstance(outcome, LLMError):
+            chunks, error = [], outcome
+        else:
+            chunks, error = outcome, None
+        try:
+            yield from chunks
+            if error is not None:
+                raise error
+            return STREAM_USAGE
+        finally:
+            self.closed_streams += 1
 
 
 def make_client(*providers: FakeProvider, sleeps: list[float] | None = None) -> LLMClient:
@@ -247,6 +272,85 @@ def test_backoff_wins_over_a_shorter_retry_after() -> None:
     make_client(openai, sleeps=sleeps).complete(MESSAGES, model="openai/big")
 
     assert sleeps == [1]
+
+
+# --------------------------------------------------------------------------- stream
+
+
+def drain(stream: Generator[str, None, LLMResponse]) -> tuple[list[str], LLMResponse]:
+    chunks: list[str] = []
+    while True:
+        try:
+            chunks.append(next(stream))
+        except StopIteration as stop:
+            return chunks, stop.value
+
+
+def test_stream_yields_chunks_and_returns_a_priced_response() -> None:
+    openai = FakeProvider("openai", streams=[["Net", " 30"]])
+
+    chunks, response = drain(make_client(openai).stream(MESSAGES, model="smart", max_tokens=9))
+
+    assert chunks == ["Net", " 30"]
+    assert (response.text, response.provider, response.model) == ("Net 30", "openai", "big")
+    assert response.usage == STREAM_USAGE
+    assert response.cost_usd == pytest.approx((1_000 * 2.0 + 100 * 10.0) / 1_000_000)
+    assert openai.requests[0].max_tokens == 9
+    assert openai.requests[0].timeout_s == 12
+
+
+def test_stream_falls_back_before_the_first_chunk() -> None:
+    openai = FakeProvider("openai", streams=[LLMProviderError("bad key", provider="openai")])
+    ollama = FakeProvider("ollama", streams=[["local ", "reply"]])
+
+    chunks, response = drain(make_client(openai, ollama).stream(MESSAGES, model="smart"))
+
+    assert chunks == ["local ", "reply"]
+    assert response.provider == "ollama"
+
+
+def test_stream_retries_transient_errors_before_the_first_chunk() -> None:
+    openai = FakeProvider("openai", streams=[transient(429), ["ok"]])
+    sleeps: list[float] = []
+
+    chunks, _ = drain(make_client(openai, sleeps=sleeps).stream(MESSAGES, model="smart"))
+
+    assert chunks == ["ok"]
+    assert sleeps == [1]
+    assert len(openai.requests) == 2
+
+
+def test_stream_error_after_the_first_chunk_is_raised_without_fallback() -> None:
+    openai = FakeProvider("openai", streams=[(["Net"], transient(503))])
+    ollama = FakeProvider("ollama")
+    sleeps: list[float] = []
+    stream = make_client(openai, ollama, sleeps=sleeps).stream(MESSAGES, model="smart")
+
+    assert next(stream) == "Net"
+    with pytest.raises(LLMTransientError):
+        next(stream)
+    assert sleeps == []
+    assert ollama.requests == []
+
+
+def test_stream_raises_when_every_model_fails() -> None:
+    openai = FakeProvider("openai", streams=[LLMProviderError("no", provider="openai")])
+    ollama = FakeProvider("ollama", streams=[LLMProviderError("down", provider="ollama")])
+
+    with pytest.raises(AllProvidersFailedError) as excinfo:
+        drain(make_client(openai, ollama).stream(MESSAGES, model="smart"))
+
+    assert [ref for ref, _ in excinfo.value.attempts] == ["openai/big", "ollama/small"]
+
+
+def test_stopping_early_closes_the_provider_stream() -> None:
+    openai = FakeProvider("openai", streams=[["a", "b", "c"]])
+    stream = make_client(openai).stream(MESSAGES, model="smart")
+
+    assert next(stream) == "a"
+    stream.close()
+
+    assert openai.closed_streams == 1
 
 
 # --------------------------------------------------------------------------- structured

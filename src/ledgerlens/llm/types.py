@@ -15,7 +15,7 @@ Errors are split by what the router should do next:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -87,7 +87,13 @@ class LLMProvider(Protocol):
 
     def complete(self, req: LLMRequest) -> LLMResponse: ...
 
-    def stream(self, req: LLMRequest) -> Iterator[str]: ...
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        """Yield text deltas as they arrive; return the call's token usage at the end.
+
+        Callers that only want text can iterate as usual; ``usage = yield from
+        provider.stream(req)`` also captures the usage.
+        """
+        ...
 
 
 # --------------------------------------------------------------------------- errors
