@@ -3,15 +3,13 @@
 * ``json_schema`` uses native structured outputs (``response_format.type = "json_schema"``,
   ``strict: true``). Strict mode needs every object closed (``additionalProperties: false``)
   with all properties required and no ``default`` keyword, so Pydantic schemas are
-  converted by :func:`strict_json_schema`; optional fields stay nullable, which is how
-  Pydantic already writes ``X | None``.
+  converted by :func:`~ledgerlens.llm.providers._schema.strict_json_schema`.
 * ``json_mode`` alone uses ``{"type": "json_object"}`` (the prompt must mention JSON).
 * ``OPENAI_BASE_URL`` lets the same adapter talk to an OpenAI-compatible gateway.
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import time
 from collections.abc import Iterator
@@ -22,6 +20,7 @@ import httpx
 
 from ledgerlens.core.config import get_settings
 from ledgerlens.llm.providers._http import check_response, json_body, transport_errors
+from ledgerlens.llm.providers._schema import strict_json_schema
 from ledgerlens.llm.types import (
     LLMProviderError,
     LLMRequest,
@@ -171,39 +170,6 @@ class OpenAIProvider:
         if stream:
             payload["stream"] = True
         return payload
-
-
-# --------------------------------------------------------------------------- strict schema
-
-# Keywords whose value is a single sub-schema / a list of them / a name -> schema mapping.
-_SUBSCHEMA_KEYS = ("items", "additionalProperties", "not", "contains")
-_SUBSCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
-_SUBSCHEMA_MAP_KEYS = ("properties", "$defs", "definitions")
-
-
-def strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``schema`` that OpenAI's strict structured-output mode accepts."""
-    strict = copy.deepcopy(schema)
-    _make_strict(strict)
-    return strict
-
-
-def _make_strict(node: dict[str, Any]) -> None:
-    node.pop("default", None)
-    if node.get("type") == "object" and "properties" in node:
-        node["additionalProperties"] = False
-        node["required"] = list(node["properties"])
-    for key in _SUBSCHEMA_KEYS:
-        if isinstance(node.get(key), dict):
-            _make_strict(node[key])
-    for key in _SUBSCHEMA_LIST_KEYS:
-        for sub in node.get(key) or []:
-            if isinstance(sub, dict):
-                _make_strict(sub)
-    for key in _SUBSCHEMA_MAP_KEYS:
-        for sub in (node.get(key) or {}).values():
-            if isinstance(sub, dict):
-                _make_strict(sub)
 
 
 # --------------------------------------------------------------------------- parsing

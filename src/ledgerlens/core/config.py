@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     mistral_api_key: str = ""
+    mistral_base_url: str = "https://api.mistral.ai/v1"
     ollama_base_url: str = "http://localhost:11434"
     aws_region: str = "us-east-1"
 
