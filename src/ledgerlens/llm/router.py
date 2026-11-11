@@ -28,6 +28,7 @@ from pydantic import BaseModel, ValidationError
 
 from ledgerlens.core.config import ModelsConfig, get_config, split_model_ref
 from ledgerlens.llm.pricing import PriceTable
+from ledgerlens.llm.providers.gemini_provider import GeminiProvider
 from ledgerlens.llm.providers.ollama_provider import OllamaProvider
 from ledgerlens.llm.providers.openai_provider import OpenAIProvider
 from ledgerlens.llm.types import (
@@ -55,6 +56,7 @@ _MAX_REPORTED_ERRORS = 10
 
 # Providers built so far; the rest of models.yaml's providers arrive with their adapters.
 DEFAULT_PROVIDER_FACTORIES: Mapping[str, ProviderFactory] = {
+    "gemini": GeminiProvider,
     "ollama": OllamaProvider,
     "openai": OpenAIProvider,
 }

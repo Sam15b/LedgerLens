@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     google_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     mistral_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
     aws_region: str = "us-east-1"
