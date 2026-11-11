@@ -12,14 +12,19 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from types import TracebackType
 from typing import Any
 
 import httpx
 
 from ledgerlens.core.config import get_settings
-from ledgerlens.llm.providers._http import check_response, json_body, transport_errors
+from ledgerlens.llm.providers._http import (
+    check_response,
+    json_body,
+    sse_data,
+    transport_errors,
+)
 from ledgerlens.llm.providers._schema import strict_json_schema
 from ledgerlens.llm.types import (
     LLMProviderError,
@@ -85,8 +90,13 @@ class OpenAIProvider:
             finish_reason=choice.get("finish_reason"),
         )
 
-    def stream(self, req: LLMRequest) -> Iterator[str]:
-        """Yield content deltas from the server-sent event stream."""
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        """Yield content deltas from the server-sent event stream; return the usage.
+
+        ``stream_options.include_usage`` makes OpenAI end the stream with a chunk that
+        carries the usage and no choices.
+        """
+        usage = Usage()
         with (
             transport_errors(self.name),
             self._client.stream(
@@ -98,19 +108,16 @@ class OpenAIProvider:
             ) as response,
         ):
             self._check(response)
-            for line in response.iter_lines():
-                if not line.startswith("data:"):
-                    continue  # blank keep-alives and SSE comments
-                data = line.removeprefix("data:").strip()
-                if data == "[DONE]":
-                    return
-                event = _decode_event(data)
+            for event in sse_data(self.name, response):
                 if "error" in event:
                     raise LLMProviderError(f"openai: {event['error']}", provider=self.name)
+                if event.get("usage"):
+                    usage = _usage(event)
                 choices = event.get("choices") or [{}]
                 content = (choices[0].get("delta") or {}).get("content")
                 if content:
                     yield content
+        return usage
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -169,6 +176,7 @@ class OpenAIProvider:
             payload["response_format"] = {"type": "json_object"}
         if stream:
             payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         return payload
 
 
@@ -199,15 +207,3 @@ def _error_code(response: httpx.Response) -> str | None:
         code = error.get("code") or error.get("type")
         return str(code) if code else None
     return None
-
-
-def _decode_event(data: str) -> dict[str, Any]:
-    try:
-        event = json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise LLMProviderError(
-            f"openai stream sent a non-JSON event: {data[:200]!r}", provider="openai"
-        ) from exc
-    if not isinstance(event, dict):
-        raise LLMProviderError("openai stream sent a non-object event", provider="openai")
-    return event

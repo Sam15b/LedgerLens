@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,17 @@ from ledgerlens.llm.types import (
 FIXTURES = Path(__file__).parents[3] / "fixtures" / "llm" / "mistral"
 BASE_URL = "https://mistral.test/v1"
 MODEL = "mistral-small-2603"
+
+
+def drain(stream: Generator[str, None, Usage]) -> tuple[list[str], Usage]:
+    """Collect a provider stream's chunks and its returned usage."""
+    chunks: list[str] = []
+    while True:
+        try:
+            chunks.append(next(stream))
+        except StopIteration as stop:
+            return chunks, stop.value
+
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -177,9 +188,10 @@ def test_missing_api_key_fails_before_sending() -> None:
 def test_stream_yields_content_deltas() -> None:
     handler, sent = reply_with(recorded("chat_stream.sse"))
 
-    chunks = list(make_provider(handler).stream(request()))
+    chunks, usage = drain(make_provider(handler).stream(request()))
 
     assert chunks == ["Net", " 30"]
+    assert usage == Usage(tokens_in=11, tokens_out=3)
     assert payload(sent[0])["stream"] is True
 
 
