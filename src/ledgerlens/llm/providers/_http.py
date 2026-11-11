@@ -70,6 +70,28 @@ def json_body(provider: str, response: httpx.Response) -> dict[str, Any]:
     return data
 
 
+def sse_data(provider: str, response: httpx.Response) -> Iterator[dict[str, Any]]:
+    """Yield the JSON object in each ``data:`` line of a server-sent event stream.
+
+    Blank keep-alives and ``:`` comments are skipped; a ``[DONE]`` sentinel ends the stream.
+    """
+    for line in response.iter_lines():
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if data == "[DONE]":
+            return
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise LLMProviderError(
+                f"{provider} stream sent a non-JSON event: {data[:200]!r}", provider=provider
+            ) from exc
+        if not isinstance(event, dict):
+            raise LLMProviderError(f"{provider} stream sent a non-object event", provider=provider)
+        yield event
+
+
 def _error_detail(response: httpx.Response) -> str:
     try:
         data = response.json()

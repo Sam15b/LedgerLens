@@ -1,0 +1,19 @@
+{
+  "id": "8e2d4c6a0b1f4e3d9c7b5a3f1e0d2c4b",
+  "object": "chat.completion",
+  "created": 1794158470,
+  "model": "mistral-small-2603",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"vendor\": \"Acme Supplies\", \"total\": 1250.0, \"currency\": \"USD\", \"po_number\": null}",
+        "tool_calls": null,
+        "prefix": false
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 131, "completion_tokens": 24, "total_tokens": 155 }
+}

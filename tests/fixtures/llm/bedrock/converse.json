@@ -1,0 +1,16 @@
+{
+  "ResponseMetadata": { "RequestId": "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", "HTTPStatusCode": 200 },
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "A purchase order is a buyer-issued document that authorizes a purchase at agreed prices and terms."
+        }
+      ]
+    }
+  },
+  "stopReason": "end_turn",
+  "usage": { "inputTokens": 14, "outputTokens": 22, "totalTokens": 36 },
+  "metrics": { "latencyMs": 812 }
+}

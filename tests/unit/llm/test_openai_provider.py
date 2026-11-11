@@ -7,7 +7,8 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from ledgerlens.llm.providers.openai_provider import OpenAIProvider, strict_json_schema
+from ledgerlens.llm.providers._schema import strict_json_schema
+from ledgerlens.llm.providers.openai_provider import OpenAIProvider
 from ledgerlens.llm.types import (
     LLMProviderError,
     LLMRequest,

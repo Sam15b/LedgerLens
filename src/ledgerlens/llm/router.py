@@ -6,7 +6,7 @@ tried in turn until one answers:
 
 * :class:`LLMTransientError` (429, 5xx, timeout) -> retried on the same model with the
   ``retry`` backoff from ``models.yaml``, then the next model.
-* :class:`LLMProviderError` (bad key, unknown model, provider not built yet) -> next model.
+* :class:`LLMProviderError` (bad key, unknown model, SDK not installed) -> next model.
 * :class:`LLMValidationError` -> raised to the caller; another provider is not tried.
 
 :meth:`LLMClient.structured` sends a Pydantic model's JSON schema, validates the reply into
@@ -28,6 +28,9 @@ from pydantic import BaseModel, ValidationError
 
 from ledgerlens.core.config import ModelsConfig, get_config, split_model_ref
 from ledgerlens.llm.pricing import PriceTable
+from ledgerlens.llm.providers.bedrock_provider import BedrockProvider
+from ledgerlens.llm.providers.gemini_provider import GeminiProvider
+from ledgerlens.llm.providers.mistral_provider import MistralProvider
 from ledgerlens.llm.providers.ollama_provider import OllamaProvider
 from ledgerlens.llm.providers.openai_provider import OpenAIProvider
 from ledgerlens.llm.types import (
@@ -53,8 +56,11 @@ MAX_RETRY_AFTER_S = 30.0
 _CODE_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 _MAX_REPORTED_ERRORS = 10
 
-# Providers built so far; the rest of models.yaml's providers arrive with their adapters.
+# One adapter per provider prefix allowed in models.yaml.
 DEFAULT_PROVIDER_FACTORIES: Mapping[str, ProviderFactory] = {
+    "bedrock": BedrockProvider,
+    "gemini": GeminiProvider,
+    "mistral": MistralProvider,
     "ollama": OllamaProvider,
     "openai": OpenAIProvider,
 }

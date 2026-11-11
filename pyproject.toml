@@ -61,6 +61,7 @@ eval = [
     "langsmith",
 ]
 dev = [
+    "boto3",  # Bedrock contract tests check requests against botocore's service model
     "pytest>=8",
     "pytest-cov",
     "httpx",
@@ -118,3 +119,7 @@ files = ["src", "tests"]
 # [[tool.mypy.overrides]]
 # module = ["pytesseract.*"]
 # ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
+ignore_missing_imports = true

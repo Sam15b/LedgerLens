@@ -1,20 +1,29 @@
 # Model router aliases -> ordered fallback list of provider/model.
-# Fill model IDs and prices from provider docs; see docs/layers/05-model-router.md
-# Only openai and ollama adapters exist so far; gemini, mistral and bedrock join the
-# chains when their adapters land (see the target chains in the layer doc).
+# See docs/layers/05-model-router.md. Model ids and prices change: keep them only in this
+# file and re-check each provider's docs (links below) before relying on them.
 aliases:
-  fast: [openai/gpt-4o-mini, ollama/llama3:8b]
-  smart: [openai/gpt-4o]
+  fast: [gemini/gemini-3.1-flash-lite, openai/gpt-4o-mini, mistral/mistral-small-2603, ollama/llama3:8b]
+  smart: [openai/gpt-4o, bedrock/global.anthropic.claude-sonnet-5-5, gemini/gemini-4-carbon]
   local: [ollama/llama3:8b]
-  extractor: [openai/gpt-4o-mini]
-  judge: [openai/gpt-4o]  # eval only
+  # The fine-tuned ollama/ledgerlens-llama3-lora goes first here once Phase 6a ships it.
+  extractor: [openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]
+  judge: [openai/gpt-4o]  # eval only: one fixed model so scores stay comparable
 
-# USD per 1M tokens, keyed like the aliases (provider/model). A model with no entry (or a
-# null in/out) is logged once and its cost recorded as None.
-# Prices change: re-check https://openai.com/api/pricing before relying on these numbers.
+# USD per 1M tokens (standard / on-demand tier, text), keyed like the aliases. A model with
+# no entry (or a null in/out) is logged once and its cost recorded as None.
+# Checked 2026-11-11 against:
+#   openai   https://developers.openai.com/api/docs/pricing
+#   gemini   https://aistudio.google.com/docs/pricing  (output includes thinking tokens)
+#   mistral  https://docs.mistral.ai/models/mistral-small-4-0-26-03
+#   bedrock  https://aws.amazon.com/bedrock/pricing/  (global cross-Region profile)
 pricing_usd_per_1m_tokens:
   openai/gpt-4o: { in: 2.50, out: 10.00 }
   openai/gpt-4o-mini: { in: 0.15, out: 0.60 }
+  gemini/gemini-3.1-flash-lite: { in: 0.25, out: 1.50 }
+  gemini/gemini-3.8-flash: { in: 0.75, out: 3.75 }  # rises to 1.50 / 7.50 on 2027-01-01
+  gemini/gemini-4-carbon: { in: 2.00, out: 10.00 }  # rises to 4.00 / 20.00 on 2026-12-01
+  mistral/mistral-small-2603: { in: 0.15, out: 0.60 }
+  bedrock/global.anthropic.claude-sonnet-5-5: { in: 2.00, out: 10.00 }
   ollama/llama3:8b: { in: 0.0, out: 0.0 }
 
 retry: { max_attempts: 3, backoff_s: [1, 2, 4] }

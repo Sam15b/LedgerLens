@@ -1,0 +1,7 @@
+data: {"id":"a1b2c3","object":"chat.completion.chunk","created":1794158500,"model":"mistral-small-2603","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"a1b2c3","object":"chat.completion.chunk","created":1794158500,"model":"mistral-small-2603","choices":[{"index":0,"delta":{"content":"Net"},"finish_reason":null}]}
+
+data: {"id":"a1b2c3","object":"chat.completion.chunk","created":1794158500,"model":"mistral-small-2603","choices":[{"index":0,"delta":{"content":" 30"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"total_tokens":14,"completion_tokens":3}}
+
+data: [DONE]

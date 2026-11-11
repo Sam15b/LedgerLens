@@ -1,0 +1,20 @@
+[
+  { "messageStart": { "role": "assistant" } },
+  {
+    "contentBlockDelta": {
+      "delta": { "reasoningContent": { "text": "Payment terms." } },
+      "contentBlockIndex": 0
+    }
+  },
+  { "contentBlockStop": { "contentBlockIndex": 0 } },
+  { "contentBlockDelta": { "delta": { "text": "Net" }, "contentBlockIndex": 1 } },
+  { "contentBlockDelta": { "delta": { "text": " 30" }, "contentBlockIndex": 1 } },
+  { "contentBlockStop": { "contentBlockIndex": 1 } },
+  { "messageStop": { "stopReason": "end_turn" } },
+  {
+    "metadata": {
+      "usage": { "inputTokens": 11, "outputTokens": 9, "totalTokens": 20 },
+      "metrics": { "latencyMs": 640 }
+    }
+  }
+]
