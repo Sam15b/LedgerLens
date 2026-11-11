@@ -20,6 +20,7 @@ from ledgerlens.llm.types import (
     Message,
     Usage,
 )
+from ledgerlens.observability.cost import CostLedger
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "llm"
 MESSAGES = [Message.user("Extract the invoice.")]
@@ -351,6 +352,43 @@ def test_stopping_early_closes_the_provider_stream() -> None:
     stream.close()
 
     assert openai.closed_streams == 1
+
+
+# --------------------------------------------------------------------------- cost ledger
+
+
+def test_completed_calls_are_recorded_in_the_ledger() -> None:
+    openai = FakeProvider("openai", "done", streams=[["a", "b"]])
+    ledger = CostLedger()
+    client = LLMClient(CONFIG, providers={"openai": openai}, factories={}, ledger=ledger)
+
+    client.complete(MESSAGES, model="smart")
+    drain(client.stream(MESSAGES, model="smart"))
+
+    first, second = ledger.records
+    assert (first.alias, first.provider, first.model, first.streamed) == (
+        "smart",
+        "openai",
+        "big",
+        False,
+    )
+    assert (first.tokens_in, first.tokens_out) == (1_000, 100)
+    assert first.cost_usd == pytest.approx(0.003)
+    assert first.latency_ms == 5.0
+    assert second.streamed is True
+
+
+def test_failed_attempts_are_not_recorded() -> None:
+    openai = FakeProvider("openai", LLMProviderError("no", provider="openai"))
+    ollama = FakeProvider("ollama", "ok")
+    ledger = CostLedger()
+    client = LLMClient(
+        CONFIG, providers={"openai": openai, "ollama": ollama}, factories={}, ledger=ledger
+    )
+
+    client.complete(MESSAGES, model="smart")
+
+    assert [(r.provider, r.cost_usd) for r in ledger.records] == [("ollama", 0.0)]
 
 
 # --------------------------------------------------------------------------- structured

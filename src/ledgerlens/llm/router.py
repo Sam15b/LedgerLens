@@ -48,6 +48,7 @@ from ledgerlens.llm.types import (
     Message,
     Usage,
 )
+from ledgerlens.observability.cost import CostLedger, LLMCallRecord
 
 logger = logging.getLogger(__name__)
 
@@ -89,14 +90,17 @@ class LLMClient:
         providers: Mapping[str, LLMProvider] | None = None,
         factories: Mapping[str, ProviderFactory] | None = None,
         prices: PriceTable | None = None,
+        ledger: CostLedger | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """``providers`` pins ready-made adapters (tests, custom clients); any other provider
-        is built on first use from ``factories``."""
+        is built on first use from ``factories``. Every completed call is recorded in
+        ``ledger`` (default: one writing to ``cost_log`` from ``models.yaml``, if set)."""
         self.config = config or get_config().models
         self._providers: dict[str, LLMProvider] = dict(providers or {})
         self._factories = dict(DEFAULT_PROVIDER_FACTORIES if factories is None else factories)
         self._prices = prices or PriceTable.from_config(self.config)
+        self.ledger = ledger if ledger is not None else CostLedger.from_config(self.config)
         self._sleep = sleep
 
     def complete(
@@ -178,7 +182,7 @@ class LLMClient:
                 usage=usage,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
             )
-            return self._finish(model, ref, response)
+            return self._finish(model, ref, response, streamed=True)
         raise AllProvidersFailedError(model, attempts)
 
     def structured(
@@ -290,9 +294,24 @@ class LLMClient:
         )
         self._sleep(delay)
 
-    def _finish(self, alias: str, ref: str, response: LLMResponse) -> LLMResponse:
+    def _finish(
+        self, alias: str, ref: str, response: LLMResponse, *, streamed: bool = False
+    ) -> LLMResponse:
+        """Price, log and record a completed call."""
         response = response.model_copy(
             update={"cost_usd": self._prices.cost_usd(ref, response.usage)}
+        )
+        self.ledger.record(
+            LLMCallRecord(
+                alias=alias,
+                provider=response.provider,
+                model=response.model,
+                tokens_in=response.usage.tokens_in,
+                tokens_out=response.usage.tokens_out,
+                cost_usd=response.cost_usd,
+                latency_ms=response.latency_ms,
+                streamed=streamed,
+            )
         )
         cost = "unknown" if response.cost_usd is None else f"{response.cost_usd:.6f}"
         logger.info(
