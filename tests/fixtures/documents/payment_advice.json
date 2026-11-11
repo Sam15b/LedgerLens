@@ -1,0 +1,16 @@
+{
+  "doc_type": "payment",
+  "payment_reference": "RA-5531",
+  "payer_name": "Northwind Traders",
+  "vendor_name": "Acme Supplies Ltd",
+  "paid_at": "2026-10-30",
+  "method": "bank_transfer",
+  "currency": "GBP",
+  "amount": "498.00",
+  "allocations": [
+    {
+      "invoice_number": "INV-2026-0417",
+      "amount": "498.00"
+    }
+  ]
+}

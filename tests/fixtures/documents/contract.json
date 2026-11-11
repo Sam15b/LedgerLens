@@ -1,0 +1,28 @@
+{
+  "doc_type": "contract",
+  "contract_number": "MSA-2026-07",
+  "title": "Master Supply Agreement",
+  "vendor_name": "Acme Supplies Ltd",
+  "customer_name": "Northwind Traders",
+  "start_date": "2026-01-01",
+  "end_date": "2026-12-31",
+  "payment_terms_days": 30,
+  "currency": "GBP",
+  "rate_card": [
+    {
+      "item": "Pallet wrap 500m",
+      "unit": "roll",
+      "unit_price": "45.00"
+    },
+    {
+      "item": "Shipping labels (box of 500)",
+      "unit": "box",
+      "unit_price": "32.50"
+    },
+    {
+      "item": "Courier",
+      "unit": "hour",
+      "unit_price": "38.00"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "doc_type": "invoice",
+  "invoice_number": "INV-2026-0417",
+  "vendor_name": "Acme Supplies Ltd",
+  "vendor_tax_id": "GB123456789",
+  "customer_name": "Northwind Traders",
+  "invoice_date": "2026-10-02",
+  "due_date": "2026-11-01",
+  "po_number": "PO-88231",
+  "currency": "GBP",
+  "subtotal": "415.00",
+  "tax": "83.00",
+  "total": "498.00",
+  "line_items": [
+    {
+      "description": "Pallet wrap 500m",
+      "quantity": "2",
+      "unit_price": "45.00",
+      "amount": "90.00"
+    },
+    {
+      "description": "Shipping labels (box of 500)",
+      "quantity": "10",
+      "unit_price": "32.50",
+      "amount": "325.00"
+    }
+  ]
+}
