@@ -239,6 +239,7 @@ class EmbeddingConfig(_Section):
 class ExtractionConfig(_Section):
     default: Literal["rules", "llm", "finetuned"] = "llm"
     model_alias: str = "extractor"
+    day_first: bool = True  # read 03/04/2026 as 3 April (most of the world), not March 4
 
 
 class IngestionConfig(_Section):

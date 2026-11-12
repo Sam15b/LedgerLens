@@ -33,3 +33,4 @@ embedding:
 extraction:
   default: llm             # rules | llm | finetuned
   model_alias: extractor
+  day_first: true          # 03/04/2026 = 3 April; set false for US-style month-first dates
