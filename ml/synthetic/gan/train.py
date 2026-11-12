@@ -135,7 +135,7 @@ def train(
             penalty = gradient_penalty(critic, real, fake, condition)
             loss_c = -wasserstein + config.gp_weight * penalty
             opt_c.zero_grad(set_to_none=True)
-            loss_c.backward()  # type: ignore[no-untyped-call]
+            torch.autograd.backward(loss_c)
             opt_c.step()
 
         # Generator step: conditions drawn from the data, so categories keep their mix.
@@ -144,7 +144,7 @@ def train(
         noise = torch.randn(cond.shape[0], config.noise_dim, device=device)
         loss_g = generator_loss(critic, generator(noise, condition), condition)
         opt_g.zero_grad(set_to_none=True)
-        loss_g.backward()  # type: ignore[no-untyped-call]
+        torch.autograd.backward(loss_g)
         opt_g.step()
 
         losses = {
