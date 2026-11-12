@@ -24,7 +24,7 @@ import json
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -33,6 +33,7 @@ import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledgerlens.core.config import EmbeddingConfig, get_config, repo_path
+from ledgerlens.ingestion.chunking import Chunk
 
 Vector = list[float]
 
@@ -309,3 +310,77 @@ def _params_path(path: Path | str | None) -> Path:
     if path is not None:
         return Path(path)
     return repo_path(get_config().ingestion.embedding.sparse_params_path)
+
+
+# --------------------------------------------------------------------------- chunks -> vectors
+
+MetadataValue = str | int | float | bool | list[str]
+
+
+class EmbeddedChunk(BaseModel):
+    """One chunk ready for the vector store: dense + sparse vectors and filterable metadata."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str  # "{document_id}#c{index}"
+    values: Vector
+    sparse: SparseVector
+    metadata: dict[str, MetadataValue]
+
+    def to_pinecone(self) -> dict[str, Any]:
+        """The record shape Pinecone's upsert takes (sparse part omitted when empty)."""
+        record: dict[str, Any] = {"id": self.id, "values": self.values, "metadata": self.metadata}
+        if self.sparse.indices:
+            record["sparse_values"] = {
+                "indices": self.sparse.indices,
+                "values": self.sparse.values,
+            }
+        return record
+
+
+def chunk_metadata(
+    document_id: str, chunk: Chunk, extra: Mapping[str, MetadataValue] | None = None
+) -> dict[str, MetadataValue]:
+    """Metadata stored with a chunk's vector. Pinecone rejects nulls, so unset fields are
+    left out, and list values must be strings."""
+    metadata: dict[str, MetadataValue] = {
+        "document_id": document_id,
+        "chunk_index": chunk.index,
+        "doc_type": chunk.doc_type.value,
+        "kind": chunk.kind,
+        "pages": [str(page) for page in chunk.pages],
+        "text": chunk.text,
+    }
+    if chunk.title:
+        metadata["title"] = chunk.title
+    if extra:
+        metadata.update({k: v for k, v in extra.items() if v is not None})
+    return metadata
+
+
+class ChunkEmbedder:
+    """Dense + sparse vectors for a document's chunks in one call."""
+
+    def __init__(self, dense: DenseEmbedder, sparse: BM25Encoder) -> None:
+        self.dense = dense
+        self.sparse = sparse
+
+    def embed(
+        self,
+        document_id: str,
+        chunks: Sequence[Chunk],
+        metadata: Mapping[str, MetadataValue] | None = None,
+    ) -> list[EmbeddedChunk]:
+        """Embed ``chunks`` of ``document_id``; ``metadata`` is added to every chunk's."""
+        texts = [chunk.text for chunk in chunks]
+        dense = self.dense.embed_documents(texts)
+        sparse = self.sparse.encode_documents(texts)
+        return [
+            EmbeddedChunk(
+                id=chunk.vector_id(document_id),
+                values=values,
+                sparse=sparse_vector,
+                metadata=chunk_metadata(document_id, chunk, metadata),
+            )
+            for chunk, values, sparse_vector in zip(chunks, dense, sparse, strict=True)
+        ]
