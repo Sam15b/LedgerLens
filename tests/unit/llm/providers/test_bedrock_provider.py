@@ -7,7 +7,7 @@ nothing is sent over the network.
 
 import json
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,16 @@ from ledgerlens.llm.types import (
 FIXTURES = Path(__file__).parents[3] / "fixtures" / "llm" / "bedrock"
 CLAUDE = "global.anthropic.claude-sonnet-5-5"
 NOVA = "us.amazon.nova-pro-v1:0"
+
+
+def drain(stream: Generator[str, None, Usage]) -> tuple[list[str], Usage]:
+    """Collect a provider stream's chunks and its returned usage."""
+    chunks: list[str] = []
+    while True:
+        try:
+            chunks.append(next(stream))
+        except StopIteration as stop:
+            return chunks, stop.value
 
 
 def recorded(name: str) -> Any:
@@ -275,9 +285,10 @@ def test_system_only_request_is_rejected() -> None:
 def test_stream_yields_text_deltas_only() -> None:
     client = FakeClient(events=recorded("converse_stream.json"))
 
-    chunks = list(BedrockProvider(client=client).stream(request()))
+    chunks, usage = drain(BedrockProvider(client=client).stream(request()))
 
     assert chunks == ["Net", " 30"]
+    assert usage == Usage(tokens_in=11, tokens_out=9)
     assert client.calls[0]["modelId"] == CLAUDE
 
 

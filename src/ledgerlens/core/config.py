@@ -25,6 +25,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILES = (_REPO_ROOT / ".env", Path(".env"))
 
 
+def repo_path(path: str | Path) -> Path:
+    """Resolve a path from a config file: relative paths are taken from the repo root."""
+    path = Path(path)
+    return path if path.is_absolute() else _REPO_ROOT / path
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILES, env_file_encoding="utf-8", extra="ignore")
 
@@ -131,6 +137,8 @@ class ModelsConfig(_Section):
     pricing_usd_per_1m_tokens: dict[str, ModelPrice] = Field(default_factory=dict)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     timeout_s: float = Field(default=60, gt=0)
+    cost_log: str | None = None
+    """JSONL file (relative to the repo root) that every priced call is appended to."""
 
     @field_validator("aliases")
     @classmethod

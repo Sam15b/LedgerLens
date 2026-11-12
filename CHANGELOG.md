@@ -8,6 +8,43 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
+Phase 2 — Model router: one interface for every LLM. Callers ask for an alias (`smart`,
+`fast`, `local`, `extractor`, `judge`) and the router falls back across OpenAI, Gemini,
+Mistral, AWS Bedrock and Ollama, pricing and recording every call. Built before Phase 1
+(see the daily plan) so extraction can use it from the start.
+
+### Added
+
+- `ledgerlens.llm` types: `Message`, `LLMRequest`, `LLMResponse`, `Usage`, the
+  `LLMProvider` protocol, and errors split by what the router does next (retry, fall back,
+  or raise).
+- Provider adapters with recorded-response contract tests:
+  - OpenAI and Mistral (Chat Completions, strict JSON-schema structured output),
+  - Gemini (`generateContent`, `responseJsonSchema`, thought tokens billed as output),
+  - Ollama (local Llama 3, `format` JSON schema, $0),
+  - AWS Bedrock (Converse API via boto3, standard credential chain, structured output
+    with the schema rewritten to Bedrock's subset).
+- `LLMClient.complete()`: alias → ordered fallback chain; transient errors retried with the
+  backoff from `models.yaml` (`Retry-After` honoured, capped at 30 s), provider errors fall
+  back, validation errors are raised.
+- `LLMClient.structured()`: returns a validated Pydantic instance, with one repair attempt
+  on the model that answered. The same schema parses from all five providers.
+- `LLMClient.stream()`: text deltas with retry/fallback until the first chunk; usage,
+  cost and latency recorded when the stream ends.
+- `configs/models.yaml`: aliases across all five providers and a USD-per-1M-token price
+  table (checked against provider pricing pages on 2026-11-11).
+- `observability/cost.py`: in-process cost ledger recording every call (alias, provider,
+  model, tokens, cost, latency, request id) to `data/interim/llm_calls.jsonl`.
+- `scripts/llm_smoke.py`: live smoke test — the same extraction and streaming prompts
+  through every configured model, with a latency / tokens / $ table.
+
+### Changed
+
+- Package version bumped to `0.2.0`.
+- `boto3` added to the `dev` extra so CI runs the Bedrock contract tests.
+
 ## [0.0.0] - 2026-11-04
 
 Phase 0 — Foundation: an empty-but-working skeleton where every service starts with one
@@ -40,5 +77,6 @@ command and reports its health.
 - Package version is read from `src/ledgerlens/__init__.py` (single source) and reset to
   `0.0.0` to match the roadmap's `v0.<phase>.0` scheme.
 
-[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.0.0...HEAD
+[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Sam15b/LedgerLens/compare/v0.0.0...v0.2.0
 [0.0.0]: https://github.com/Sam15b/LedgerLens/releases/tag/v0.0.0

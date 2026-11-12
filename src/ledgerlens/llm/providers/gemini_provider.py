@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from types import TracebackType
 from typing import Any
 
@@ -88,8 +88,12 @@ class GeminiProvider:
             finish_reason=finish_reason,
         )
 
-    def stream(self, req: LLMRequest) -> Iterator[str]:
-        """Yield text as it is generated (``streamGenerateContent`` with ``alt=sse``)."""
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        """Yield text as it is generated (``streamGenerateContent`` with ``alt=sse``).
+
+        Every chunk repeats the ``usageMetadata`` so far; the last one is returned.
+        """
+        usage = Usage()
         with (
             transport_errors(self.name),
             self._client.stream(
@@ -105,11 +109,14 @@ class GeminiProvider:
             for event in sse_data(self.name, response):
                 if "error" in event:
                     raise LLMProviderError(f"gemini: {event['error']}", provider=self.name)
+                if event.get("usageMetadata"):
+                    usage = _usage(event)
                 candidates = event.get("candidates") or []
                 if candidates and isinstance(candidates[0], dict):
                     text = _text(candidates[0])
                     if text:
                         yield text
+        return usage
 
     # ------------------------------------------------------------------ lifecycle
 

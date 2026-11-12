@@ -28,3 +28,7 @@ pricing_usd_per_1m_tokens:
 
 retry: { max_attempts: 3, backoff_s: [1, 2, 4] }
 timeout_s: 60
+
+# Every priced call (alias, provider, model, tokens, cost, latency) is appended here as one
+# JSON line; relative to the repo root, git-ignored. Remove to keep records in memory only.
+cost_log: data/interim/llm_calls.jsonl
