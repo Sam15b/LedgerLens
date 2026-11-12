@@ -21,11 +21,11 @@ dependencies = [
     # Scan clean-up before OCR (deskew, denoise, binarize).
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
+    "pytesseract>=0.3.10",  # needs the tesseract binary (see ingestion/ocr/tesseract.py)
 ]
 
 [project.optional-dependencies]
 ingestion = [
-    "pytesseract",
     "sentence-transformers",
     "pinecone-text",
 ]
@@ -125,6 +125,10 @@ untyped_calls_exclude = ["pymupdf"]
 # [[tool.mypy.overrides]]
 # module = ["pytesseract.*"]
 # ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pytesseract.*"]  # no type information
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
