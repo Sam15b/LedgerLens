@@ -57,6 +57,7 @@ class TrainConfig:
     log_every: int = 50
     checkpoint_every: int = 1000
     device: str = "cpu"
+    condition: str | None = None  # e.g. "vendor_category" for a conditional GAN
 
 
 @dataclass
@@ -97,11 +98,25 @@ def train(
     run_dir = run_dir or RUNS_DIR / f"{datetime.now(UTC):%Y%m%d-%H%M%S}-seed{config.seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    if dataset.condition != config.condition:
+        raise ValueError(
+            f"dataset is conditioned on {dataset.condition!r}, config on {config.condition!r}"
+        )
     spans = dataset.transformer.categorical_spans
+    condition_span = _condition_span(dataset.transformer, config.condition)
     generator = Generator(
-        dataset.feature_dim, spans, noise_dim=config.noise_dim, hidden=config.hidden
+        dataset.feature_dim,
+        spans,
+        noise_dim=config.noise_dim,
+        hidden=config.hidden,
+        condition_span=condition_span,
     ).to(device)
-    critic = Critic(dataset.feature_dim, hidden=config.hidden, dropout=config.dropout).to(device)
+    critic = Critic(
+        dataset.feature_dim,
+        hidden=config.hidden,
+        dropout=config.dropout,
+        cond_dim=dataset.condition_dim,
+    ).to(device)
     opt_g = torch.optim.Adam(generator.parameters(), lr=config.lr, betas=config.betas)
     opt_c = torch.optim.Adam(critic.parameters(), lr=config.lr, betas=config.betas)
 
@@ -110,20 +125,24 @@ def train(
     started, start = datetime.now(UTC), time.perf_counter()
     for step in range(1, config.steps + 1):
         for _ in range(config.n_critic):
-            real = next(batches)[0].to(device)
+            real, cond = (t.to(device) for t in next(batches))
+            condition = cond if dataset.condition_dim else None
             noise = torch.randn(real.shape[0], config.noise_dim, device=device)
-            fake = generator(noise)
-            fake_score: Tensor = critic(fake.detach())
-            real_score: Tensor = critic(real)
+            fake = generator(noise, condition)
+            fake_score: Tensor = critic(fake.detach(), condition)
+            real_score: Tensor = critic(real, condition)
             wasserstein = real_score.mean() - fake_score.mean()
-            penalty = gradient_penalty(critic, real, fake)
+            penalty = gradient_penalty(critic, real, fake, condition)
             loss_c = -wasserstein + config.gp_weight * penalty
             opt_c.zero_grad(set_to_none=True)
             loss_c.backward()  # type: ignore[no-untyped-call]
             opt_c.step()
 
-        noise = torch.randn(config.batch_size, config.noise_dim, device=device)
-        loss_g = generator_loss(critic, generator(noise))
+        # Generator step: conditions drawn from the data, so categories keep their mix.
+        _, cond = next(batches)
+        condition = cond.to(device) if dataset.condition_dim else None
+        noise = torch.randn(cond.shape[0], config.noise_dim, device=device)
+        loss_g = generator_loss(critic, generator(noise, condition), condition)
         opt_g.zero_grad(set_to_none=True)
         loss_g.backward()  # type: ignore[no-untyped-call]
         opt_g.step()
@@ -176,6 +195,7 @@ def _checkpoint(
             "config": asdict(config),
             "transformer": dataset.transformer.to_dict(),
             "categorical_spans": dataset.transformer.categorical_spans,
+            "condition_span": generator.condition_span,
             "generator": generator.state_dict(),
             "critic": critic.state_dict(),
         },
@@ -188,15 +208,32 @@ def load_generator(path: Path | str) -> tuple[Generator, TabularTransformer]:
     state = torch.load(path, map_location="cpu", weights_only=True)
     transformer = TabularTransformer.from_dict(state["transformer"])
     config = state["config"]
+    condition_span = state.get("condition_span")
     generator = Generator(
         transformer.output_dim,
         [tuple(span) for span in state["categorical_spans"]],
         noise_dim=config["noise_dim"],
         hidden=config["hidden"],
+        condition_span=tuple(condition_span) if condition_span else None,
     )
     generator.load_state_dict(state["generator"])
     generator.eval()
     return generator, transformer
+
+
+def _condition_span(transformer: TabularTransformer, name: str | None) -> tuple[int, int] | None:
+    if name is None:
+        return None
+    info = transformer.column(name)
+    return info.start, info.width
+
+
+def condition_vector(transformer: TabularTransformer, column: str, value: str) -> Tensor:
+    """The one-hot condition for ``column == value`` (for ``Generator.sample``)."""
+    info = transformer.column(column)
+    vector = torch.zeros(info.width)
+    vector[info.categories.index(value)] = 1.0
+    return vector
 
 
 def load_seed_rows(path: Path = SEED_CSV) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -223,15 +260,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seed-csv", type=Path, default=SEED_CSV)
     parser.add_argument("--runs", type=Path, default=RUNS_DIR)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--condition", choices=["vendor_category"], help="train a conditional GAN on this column"
+    )
     args = parser.parse_args(argv)
 
     rows, summary = load_seed_rows(args.seed_csv)
-    dataset = SeedDataset.from_rows(rows)
+    dataset = SeedDataset.from_rows(rows, condition=args.condition)
     config = TrainConfig(
         steps=args.steps,
         batch_size=args.batch_size,
         seed=args.seed,
         device=args.device,
+        condition=args.condition,
         log_every=max(1, min(TrainConfig.log_every, args.steps // 10 or 1)),
     )
     run_dir = args.runs / f"{datetime.now(UTC):%Y%m%d-%H%M%S}-seed{args.seed}"
