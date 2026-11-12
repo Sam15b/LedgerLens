@@ -29,6 +29,7 @@ repos:
           - pillow>=10.0
           - numpy>=1.26
           - opencv-python-headless>=4.9
+          - rapidfuzz>=3.9
           - pytest>=8
           - types-PyYAML
 

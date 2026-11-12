@@ -22,6 +22,7 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
     "pytesseract>=0.3.10",  # needs the tesseract binary (see ingestion/ocr/tesseract.py)
+    "rapidfuzz>=3.9",  # vendor name matching
 ]
 
 [project.optional-dependencies]

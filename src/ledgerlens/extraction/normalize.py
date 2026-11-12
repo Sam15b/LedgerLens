@@ -13,6 +13,10 @@ Amounts
     ``$1,234.50``, ``1.234,50``, ``1 234,50``, ``RM 9.50``, ``(12.00)`` and ``-12.00``.
     With both ``,`` and ``.`` the last one is the decimal point; with one of them, it is a
     decimal point when one or two digits follow it, otherwise a thousands separator.
+Vendors
+    :func:`canonical_vendor` gives a comparison key (case, punctuation and legal suffixes
+    such as Inc, Ltd, Sdn Bhd removed); :class:`VendorMatcher` maps printed names to known
+    vendors with ``rapidfuzz``.
 Currency
     ISO 4217 codes and common symbols (``RM`` -> MYR, ``£`` -> GBP, ...). A bare ``$`` is
     ambiguous and maps to ``default_dollar`` (USD).
@@ -23,6 +27,8 @@ from __future__ import annotations
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
+
+from rapidfuzz import fuzz, process
 
 from ledgerlens.core.config import get_config
 
@@ -229,3 +235,81 @@ def parse_currency(text: str, *, default_dollar: str = "USD") -> str | None:
         if pattern.search(text):
             return default_dollar if code == "$" else code
     return None
+
+
+# --------------------------------------------------------------------------- vendors
+
+# Legal-form words dropped when comparing names ("Acme Supplies Ltd" == "ACME SUPPLIES
+# LIMITED"). Multi-word forms first so "sdn bhd" goes before "bhd".
+LEGAL_SUFFIXES = (
+    "sdn bhd",
+    "pte ltd",
+    "pty ltd",
+    "co ltd",
+    "incorporated",
+    "corporation",
+    "limited",
+    "company",
+    "gmbh",
+    "corp",
+    "inc",
+    "ltd",
+    "llc",
+    "llp",
+    "plc",
+    "bhd",
+    "pte",
+    "pty",
+    "co",
+    "sa",
+    "ag",
+    "bv",
+    "nv",
+    "srl",
+)
+_LEGAL = re.compile(r"\b(?:" + "|".join(s.replace(" ", r"\s+") for s in LEGAL_SUFFIXES) + r")\b")
+_NON_WORD = re.compile(r"[^\w\s]")
+_SPACES = re.compile(r"\s+")
+
+
+def canonical_vendor(name: str) -> str:
+    """Comparison key for a vendor name: lower case, no punctuation or legal-form words.
+
+    ``"ACME Supplies, Ltd."``, ``"Acme Supplies Limited"`` and ``"acme supplies"`` all give
+    ``"acme supplies"``. ``&`` becomes ``and``. Not for display: keep the name as printed.
+    """
+    text = name.lower().replace("&", " and ")
+    text = _NON_WORD.sub(" ", text)
+    text = _LEGAL.sub(" ", _SPACES.sub(" ", text))
+    return _SPACES.sub(" ", text).strip()
+
+
+class VendorMatcher:
+    """Map vendor names as printed on documents to known vendors.
+
+    ``known`` maps each vendor's display name to its aliases (trading names, old names,
+    abbreviations). Names are compared on :func:`canonical_vendor` keys: an exact key match
+    wins; otherwise the closest key by ``rapidfuzz`` token-sort ratio, if it scores at least
+    ``threshold`` (0-100). Word order and OCR slips ("ACME SUPPLES") still match.
+    """
+
+    def __init__(self, known: dict[str, list[str]], *, threshold: float = 88.0) -> None:
+        self.threshold = threshold
+        self._keys: dict[str, str] = {}  # canonical key -> display name
+        for display, aliases in known.items():
+            for name in (display, *aliases):
+                key = canonical_vendor(name)
+                if key:
+                    self._keys.setdefault(key, display)
+
+    def match(self, name: str) -> str | None:
+        """The known vendor ``name`` refers to, or ``None``."""
+        key = canonical_vendor(name)
+        if not key:
+            return None
+        if key in self._keys:
+            return self._keys[key]
+        best = process.extractOne(
+            key, list(self._keys), scorer=fuzz.token_sort_ratio, score_cutoff=self.threshold
+        )
+        return self._keys[best[0]] if best else None
