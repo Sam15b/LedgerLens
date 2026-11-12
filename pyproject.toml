@@ -134,5 +134,11 @@ module = ["pytesseract.*", "tokenizers.*"]  # untyped, or not installed by every
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# The pre-commit mypy env has no PyTorch (a 2 GB wheel), so torch classes are Any there;
+# CI's full mypy run has torch installed and checks these modules fully.
+module = ["ml.synthetic.gan.*"]
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
 ignore_missing_imports = true
