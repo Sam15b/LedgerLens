@@ -5,8 +5,17 @@ doc_type                  chunks
 ========================  ==========================================================
 invoice, receipt, PO      one **header** chunk (parties, numbers, dates, totals) and one
                           **line_items** chunk (the item table as markdown)
+contract                  one **clause** chunk per clause heading (``1.``, ``Section 2``,
+                          ``ARTICLE IV``, ``Schedule 1`` ...); a clause longer than
+                          ``chunking.contract.max_tokens`` (512) is split recursively --
+                          paragraphs, then lines, sentences, words -- with up to
+                          ``overlap`` (50) tokens repeated between neighbours
 payment, unknown          one **body** chunk
 ========================  ==========================================================
+
+Tokens are counted with the embedding model's own tokenizer (``embedding.dense_model``),
+since its input limit is what the 512 protects; if that tokenizer cannot be loaded
+(offline, package missing) a word-and-punctuation count is used instead.
 
 Short, number-heavy documents retrieve better as a few coherent chunks than as fixed-size
 windows: a question about "the invoice for PO-88231" should hit the header chunk, one about
@@ -15,16 +24,23 @@ windows: a question about "the invoice for PO-88231" should hit the header chunk
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import functools
+import logging
+import re
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ledgerlens.core.config import ChunkingConfig, get_config
 from ledgerlens.core.ids import chunk_vector_id
 from ledgerlens.core.schemas import DocType
 from ledgerlens.ingestion.layout import BBox, Line, PageContent, Table
 
+logger = logging.getLogger(__name__)
+
 ChunkKind = Literal["header", "line_items", "clause", "body"]
+TokenCounter = Callable[[str], int]
 
 _ITEM_HEADER_WORDS = ("description", "item", "qty", "quantity", "unit price", "price", "amount")
 _TOTAL_WORDS = ("subtotal", "sub-total", "total", "tax", "vat", "gst", "sst", "discount")
@@ -54,11 +70,24 @@ class _Draft(BaseModel):
     title: str | None = None
 
 
-def chunk_document(pages: Sequence[PageContent], doc_type: DocType | str) -> list[Chunk]:
-    """Chunks for a document whose pages have been read (text layer or OCR)."""
+def chunk_document(
+    pages: Sequence[PageContent],
+    doc_type: DocType | str,
+    *,
+    config: ChunkingConfig | None = None,
+    count_tokens: TokenCounter | None = None,
+) -> list[Chunk]:
+    """Chunks for a document whose pages have been read (text layer or OCR).
+
+    ``count_tokens`` defaults to the embedding model's tokenizer; only contracts need it.
+    """
     kind = DocType(doc_type)
+    config = config or get_config().ingestion.chunking
     if kind in (DocType.INVOICE, DocType.RECEIPT, DocType.PURCHASE_ORDER):
         drafts = _itemized(pages)
+    elif kind is DocType.CONTRACT:
+        counter = count_tokens or default_token_counter()
+        drafts = _clauses(pages, config.contract.max_tokens, config.contract.overlap, counter)
     else:
         drafts = _single(pages)
     return _number(drafts, kind)
@@ -159,3 +188,129 @@ def _lines_text(lines: Sequence[Line]) -> str:
             out.append("")
         out.append(line.text)
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- contracts
+
+# "1. Term", "4.2 Fees", "Section 3", "ARTICLE IV", "Clause 7", "Schedule 1 - Rate card"
+CLAUSE_HEADING = re.compile(
+    r"^\s*(?:"
+    r"\d+(?:\.\d+)*\.?\s+[A-Z]"
+    r"|(?i:section|article|clause)\s+(?:\d+(?:\.\d+)*|[IVXLC]+)\b"
+    r"|(?i:schedule|exhibit|annex|appendix)\s+[\dA-Z]+\b"
+    r")"
+)
+SEPARATORS = ("\n\n", "\n", ". ", " ")
+
+
+def is_clause_heading(text: str) -> bool:
+    return CLAUSE_HEADING.match(text) is not None
+
+
+def _clauses(
+    pages: Sequence[PageContent], max_tokens: int, overlap: int, count: TokenCounter
+) -> list[_Draft]:
+    sections: list[tuple[str | None, list[tuple[int, Line]]]] = [(None, [])]
+    for page in pages:
+        for line in page.lines:
+            if is_clause_heading(line.text):
+                sections.append((line.text, []))
+            sections[-1][1].append((page.page_number, line))
+    drafts: list[_Draft] = []
+    for title, lines in sections:
+        if not lines:
+            continue
+        pages_used = sorted({number for number, _ in lines})
+        text = "\n\n".join(
+            _lines_text([line for number, line in lines if number == page_number])
+            for page_number in pages_used
+        )
+        for part in split_text(text, max_tokens, overlap, count):
+            drafts.append(_Draft(kind="clause", text=part, pages=pages_used, title=title))
+    return drafts
+
+
+def split_text(text: str, max_tokens: int, overlap: int, count: TokenCounter) -> list[str]:
+    """Split ``text`` into parts of at most ``max_tokens``, at the most natural boundary.
+
+    Tries paragraph breaks, then line breaks, sentence ends, and spaces. Consecutive parts
+    share up to ``overlap`` tokens: whole trailing pieces (sentences, lines) of the previous
+    part, so the overlap never starts mid-word.
+    """
+    if count(text) <= max_tokens:
+        return [text.strip()] if text.strip() else []
+    pieces = _pieces(text, max_tokens, count, 0)
+    sizes = [count(piece) for piece in pieces]
+    parts: list[str] = []
+    window: list[int] = []  # indices into pieces
+    for i, size in enumerate(sizes):
+        if window and sum(sizes[j] for j in window) + size > max_tokens:
+            parts.append("".join(pieces[j] for j in window).strip())
+            tail: list[int] = []
+            for j in reversed(window):
+                if sum(sizes[k] for k in tail) + sizes[j] > overlap:
+                    break
+                tail.insert(0, j)
+            window = tail if sum(sizes[k] for k in tail) + size <= max_tokens else []
+        window.append(i)
+    if window:
+        parts.append("".join(pieces[j] for j in window).strip())
+    return [part for part in parts if part]
+
+
+def _pieces(text: str, max_tokens: int, count: TokenCounter, level: int) -> list[str]:
+    """Cut ``text`` at ``SEPARATORS[level]`` (kept on the left piece); recurse on big pieces."""
+    if level >= len(SEPARATORS):
+        return _hard_split(text, max_tokens, count)
+    sep = SEPARATORS[level]
+    raw = text.split(sep)
+    pieces = [part + sep for part in raw[:-1]] + [raw[-1]]
+    out: list[str] = []
+    for piece in pieces:
+        if not piece:
+            continue
+        if count(piece) <= max_tokens:
+            out.append(piece)
+        else:
+            out.extend(_pieces(piece, max_tokens, count, level + 1))
+    return out
+
+
+def _hard_split(text: str, max_tokens: int, count: TokenCounter) -> list[str]:
+    """Last resort for a single 'word' longer than the limit: cut it by characters."""
+    tokens = max(count(text), 1)
+    step = max(1, len(text) * max_tokens // tokens)
+    return [text[i : i + step] for i in range(0, len(text), step)]
+
+
+# --------------------------------------------------------------------------- tokens
+
+_APPROX_TOKEN = re.compile(r"\w+|[^\w\s]")
+
+
+def approx_token_count(text: str) -> int:
+    """Words plus punctuation marks: close to, and never above, a WordPiece token count."""
+    return len(_APPROX_TOKEN.findall(text))
+
+
+@functools.lru_cache(maxsize=4)
+def default_token_counter(model_name: str | None = None) -> TokenCounter:
+    """Token counter for the embedding model (``embedding.dense_model``), loaded once.
+
+    Uses the Hugging Face ``tokenizers`` package (installed with sentence-transformers);
+    falls back to :func:`approx_token_count` if it is missing or the tokenizer cannot be
+    downloaded.
+    """
+    name = model_name or get_config().ingestion.embedding.dense_model
+    try:
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_pretrained(name)
+    except Exception as exc:  # ImportError, network / hub errors
+        logger.warning("tokenizer for %s unavailable (%s); approximating token counts", name, exc)
+        return approx_token_count
+
+    def count(text: str) -> int:
+        return len(tokenizer.encode(text, add_special_tokens=False).ids)
+
+    return count
