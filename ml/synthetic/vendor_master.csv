@@ -1,0 +1,51 @@
+vendor_id,name,category,country,currency,tax_id,payment_terms_days
+V001,Acme Supplies Ltd,packaging,GB,GBP,GB123456789,30
+V002,Brightline Packaging Ltd,packaging,GB,GBP,GB284615093,30
+V003,Corrugo Boxes GmbH,packaging,DE,EUR,DE281947365,30
+V004,Pakmas Industries Sdn Bhd,packaging,MY,MYR,W10-1808-32000415,60
+V005,Kemasan Prima PT,packaging,ID,IDR,01.738.214.5-062.000,30
+V006,Northgate Office Supplies Ltd,office_supplies,GB,GBP,GB602418735,30
+V007,Paperstack Inc,office_supplies,US,USD,47-2918364,30
+V008,Bureau Fournitures SARL,office_supplies,FR,EUR,FR41539172846,45
+V009,Kedai Buku Ilmu Sdn Bhd,office_supplies,MY,MYR,W10-1902-32000877,30
+V010,Inkwell Stationers Pte Ltd,office_supplies,SG,SGD,M2-0083142-7,30
+V011,Swiftway Couriers Ltd,logistics,GB,GBP,GB739152846,14
+V012,Harbourline Freight BV,logistics,NL,EUR,NL862014753B01,30
+V013,Crosstown Logistics LLC,logistics,US,USD,83-1047256,15
+V014,Lintas Kargo Ekspres PT,logistics,ID,IDR,02.415.937.1-041.000,14
+V015,Merlion Haulage Pte Ltd,logistics,SG,SGD,M2-0127753-1,30
+V016,Stackwise Cloud Services Ltd,it_services,GB,GBP,GB415830627,30
+V017,Bitforge Systems Inc,it_services,US,USD,26-5839102,30
+V018,Netzwerk Technik GmbH,it_services,DE,EUR,DE317204958,14
+V019,Kodmatik Solutions Sdn Bhd,it_services,MY,MYR,W10-2004-32001162,30
+V020,Lionbyte Technologies Pte Ltd,it_services,SG,SGD,M2-0094418-2,30
+V021,Greenleaf Catering Ltd,food_beverage,GB,GBP,GB528307194,14
+V022,Kopi Sentosa Trading,food_beverage,MY,MYR,W10-1711-32000239,7
+V023,Rasa Nusantara Catering PT,food_beverage,ID,IDR,03.612.408.9-015.000,14
+V024,Brewhouse Coffee Co,food_beverage,US,USD,91-3375120,15
+V025,Boulangerie Lefort SARL,food_beverage,FR,EUR,FR17824613905,30
+V026,Fixright Facilities Ltd,facilities,GB,GBP,GB846271503,30
+V027,Cleanpoint Services LLC,facilities,US,USD,58-4402917,30
+V028,Gebaeude Service Nord GmbH,facilities,DE,EUR,DE264918371,30
+V029,Kemas Bersih Sdn Bhd,facilities,MY,MYR,W10-1805-32000674,30
+V030,Sparkle Facility Management Pte Ltd,facilities,SG,SGD,M2-0106637-9,30
+V031,Hartley & Moss Accountants LLP,professional_services,GB,GBP,GB371064829,30
+V032,Calder Legal Partners LLP,professional_services,GB,GBP,GB903517462,30
+V033,Summit Advisory Group LLC,professional_services,US,USD,72-6150483,45
+V034,Conseil Duval SAS,professional_services,FR,EUR,FR86931057284,60
+V035,Tan & Rahman Consulting Sdn Bhd,professional_services,MY,MYR,W10-2101-32001548,30
+V036,Ironmonger Hardware Ltd,hardware,GB,GBP,GB194726380,30
+V037,Syarikat Perniagaan Gin Kee,hardware,MY,MYR,W10-1712-32000318,30
+V038,Toolhaus Werkzeuge GmbH,hardware,DE,EUR,DE349052716,30
+V039,Boltline Industrial Supply Inc,hardware,US,USD,36-7284015,30
+V040,Bangun Jaya Perkakas PT,hardware,ID,IDR,01.902.553.6-008.000,30
+V041,Gridpower Energy Ltd,utilities,GB,GBP,GB658204913,14
+V042,Clearwater Utilities Inc,utilities,US,USD,64-1938270,21
+V043,Stadtwerke Elbtal GmbH,utilities,DE,EUR,DE215873904,14
+V044,Tenaga Hijau Sdn Bhd,utilities,MY,MYR,W10-1909-32000951,21
+V045,Telekom Nusantara Bisnis PT,utilities,ID,IDR,02.004.716.3-091.000,21
+V046,Loudmouth Creative Ltd,marketing,GB,GBP,GB487391056,30
+V047,Pixelpeak Media LLC,marketing,US,USD,45-8821637,30
+V048,Atelier Graphique Moreau SARL,marketing,FR,EUR,FR52067391428,45
+V049,Redline Signage Sdn Bhd,marketing,MY,MYR,W10-2007-32001290,30
+V050,Gemilang Promosi PT,marketing,ID,IDR,03.247.861.0-027.000,30
