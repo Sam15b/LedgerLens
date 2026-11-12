@@ -16,7 +16,7 @@ classified by the shared helpers and tests replay recorded responses through
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from types import TracebackType
 from typing import Any
 
@@ -78,8 +78,10 @@ class MistralProvider:
             finish_reason=choice.get("finish_reason"),
         )
 
-    def stream(self, req: LLMRequest) -> Iterator[str]:
-        """Yield content deltas from the server-sent event stream."""
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        """Yield content deltas from the server-sent event stream; the last chunk
+        carries the usage, which is returned."""
+        usage = Usage()
         with (
             transport_errors(self.name),
             self._client.stream(
@@ -94,10 +96,13 @@ class MistralProvider:
             for event in sse_data(self.name, response):
                 if "error" in event:
                     raise LLMProviderError(f"mistral: {event['error']}", provider=self.name)
+                if event.get("usage"):
+                    usage = _usage(event)
                 choices = event.get("choices") or [{}]
                 text = _content_text((choices[0].get("delta") or {}).get("content"))
                 if text:
                     yield text
+        return usage
 
     # ------------------------------------------------------------------ lifecycle
 

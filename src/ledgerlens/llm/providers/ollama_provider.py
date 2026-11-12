@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from types import TracebackType
 from typing import Any
 
@@ -66,8 +66,12 @@ class OllamaProvider:
             finish_reason=data.get("done_reason"),
         )
 
-    def stream(self, req: LLMRequest) -> Iterator[str]:
-        """Yield the reply as it is generated (Ollama streams NDJSON, one chunk per line)."""
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        """Yield the reply as it is generated (Ollama streams NDJSON, one chunk per line).
+
+        The final ``done`` chunk carries the token counts, which are returned.
+        """
+        usage = Usage()
         with (
             transport_errors(self.name),
             self._client.stream(
@@ -85,7 +89,9 @@ class OllamaProvider:
                 if content:
                     yield content
                 if chunk.get("done"):
-                    return
+                    usage = _usage(chunk)
+                    break
+        return usage
 
     # ------------------------------------------------------------------ lifecycle
 

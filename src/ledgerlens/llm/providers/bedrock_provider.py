@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Generator, Iterator
 from contextlib import contextmanager
 from typing import Any, Protocol
 
@@ -147,16 +147,21 @@ class BedrockProvider:
             finish_reason=stop_reason,
         )
 
-    def stream(self, req: LLMRequest) -> Iterator[str]:
-        """Yield text deltas from ``ConverseStream``."""
+    def stream(self, req: LLMRequest) -> Generator[str, None, Usage]:
+        """Yield text deltas from ``ConverseStream``; the closing ``metadata`` event
+        carries the usage, which is returned."""
+        usage = Usage()
         with _bedrock_errors():
             events = self._runtime().converse_stream(**self._request(req)).get("stream") or []
             for event in events:
                 _raise_stream_error(event)
+                if "metadata" in event:
+                    usage = _usage((event["metadata"] or {}).get("usage"))
                 delta = (event.get("contentBlockDelta") or {}).get("delta") or {}
                 text = delta.get("text")
                 if isinstance(text, str) and text:
                     yield text
+        return usage
 
     # ------------------------------------------------------------------ helpers
 
