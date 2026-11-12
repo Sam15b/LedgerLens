@@ -18,6 +18,9 @@ dependencies = [
     # File loading on every upload: PDF page counts / text layer, image inspection.
     "pymupdf>=1.24",
     "pillow>=10.0",
+    # Scan clean-up before OCR (deskew, denoise, binarize).
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
 ]
 
 [project.optional-dependencies]

@@ -27,6 +27,8 @@ repos:
           - pinecone>=10.0
           - pymupdf>=1.24
           - pillow>=10.0
+          - numpy>=1.26
+          - opencv-python-headless>=4.9
           - pytest>=8
           - types-PyYAML
 
