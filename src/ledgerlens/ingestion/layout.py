@@ -3,7 +3,9 @@
 A digital PDF already carries its text, so those pages skip OCR entirely: a page whose
 text layer has at least ``layout.text_layer_min_chars`` characters (``configs/ingestion.yaml``)
 is read directly with PyMuPDF. Anything below that -- a scan saved as PDF, or a page
-with only a logo and a signature -- goes down the OCR path.
+with only a logo and a signature -- goes down the OCR path: it is rasterized at
+``ocr.dpi`` and handed over as a :class:`ScannedPage`. Images (PNG, JPEG, TIFF frames)
+always take the OCR path. :func:`layout_pages` makes that call for every page.
 
 Both paths produce a :class:`PageContent`: the page's words with their bounding boxes,
 grouped into lines, blocks and (heuristically) tables.
@@ -13,13 +15,19 @@ images.
 
 from __future__ import annotations
 
+import io
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, NamedTuple
 
 import pymupdf
+from PIL import Image, ImageSequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledgerlens.core.config import LayoutConfig, get_config
+
+PDF_POINTS_PER_INCH = 72
 
 PageSource = Literal["text_layer", "ocr"]
 
@@ -345,6 +353,99 @@ def read_text_page(page: pymupdf.Page) -> PageContent:
         height=page.rect.height,
         source="text_layer",
     )
+
+
+# --------------------------------------------------------------------------- OCR path
+
+
+@dataclass(frozen=True)
+class ScannedPage:
+    """A page with no usable text layer, rasterized for OCR.
+
+    ``scale`` converts OCR pixel coordinates to the page's units: ``72 / dpi`` for PDF
+    pages (so OCR boxes come back in PDF points, like text-layer pages), ``1.0`` for
+    images (which stay in pixels).
+    """
+
+    page_number: int
+    image: Image.Image
+    dpi: int
+    scale: float
+
+    def to_page_content(self, words: Sequence[Word]) -> PageContent:
+        """Wrap OCR ``words`` (in image pixels) as this page's :class:`PageContent`."""
+        scaled = [w.model_copy(update={"bbox": w.bbox.scaled(self.scale)}) for w in words]
+        return PageContent.from_words(
+            scaled,
+            page_number=self.page_number,
+            width=self.image.width * self.scale,
+            height=self.image.height * self.scale,
+            source="ocr",
+        )
+
+
+def rasterize(page: pymupdf.Page, dpi: int | None = None) -> Image.Image:
+    """Render ``page`` to an 8-bit grayscale image at ``dpi`` (default ``ocr.dpi``, 300)."""
+    if dpi is None:
+        dpi = get_config().ingestion.ocr.dpi
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False)
+    return Image.frombytes("L", (pix.width, pix.height), pix.samples)
+
+
+def layout_pages(
+    source: Path | bytes,
+    mime_type: str,
+    *,
+    min_chars: int | None = None,
+    dpi: int | None = None,
+) -> list[PageContent | ScannedPage]:
+    """Read every page of a loaded file, in order.
+
+    PDF pages with a text layer come back as :class:`PageContent`; scanned PDF pages and
+    image frames come back as :class:`ScannedPage` for OCR.
+    """
+    if mime_type == "application/pdf":
+        return _pdf_pages(source, min_chars, dpi)
+    return _image_pages(source)
+
+
+def _pdf_pages(
+    source: Path | bytes, min_chars: int | None, dpi: int | None
+) -> list[PageContent | ScannedPage]:
+    if dpi is None:
+        dpi = get_config().ingestion.ocr.dpi
+    doc = (
+        pymupdf.open(source)
+        if isinstance(source, Path)
+        else pymupdf.open(stream=source, filetype="pdf")
+    )
+    pages: list[PageContent | ScannedPage] = []
+    with doc:
+        for index in range(doc.page_count):
+            page = doc[index]
+            if has_text_layer(page, min_chars):
+                pages.append(read_text_page(page))
+            else:
+                image = rasterize(page, dpi)
+                pages.append(ScannedPage(index + 1, image, dpi, PDF_POINTS_PER_INCH / dpi))
+    return pages
+
+
+def _image_pages(source: Path | bytes) -> list[PageContent | ScannedPage]:
+    pages: list[PageContent | ScannedPage] = []
+    with Image.open(source if isinstance(source, Path) else io.BytesIO(source)) as image:
+        dpi = _image_dpi(image)
+        for number, frame in enumerate(ImageSequence.Iterator(image), start=1):
+            pages.append(ScannedPage(number, frame.convert("L"), dpi, 1.0))
+    return pages
+
+
+def _image_dpi(image: Image.Image) -> int:
+    """The DPI an image was saved with (scanners record it), else the OCR default."""
+    info = image.info.get("dpi")
+    if isinstance(info, tuple) and info and float(info[0]) > 1:
+        return round(float(info[0]))
+    return get_config().ingestion.ocr.dpi
 
 
 def _layout_config() -> LayoutConfig:
