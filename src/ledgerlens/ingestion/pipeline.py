@@ -12,19 +12,30 @@ date.
 Embedding needs a fitted BM25 encoder. :meth:`IngestionPipeline.run` handles a batch the
 way a first-time index build has to: every document is processed up to its chunks, BM25 is
 fit on all of them, then each document's chunks are embedded.
+
+Command line (also ``make ingest DATASET=sroie``)::
+
+    python -m ledgerlens.ingestion.pipeline data/raw/sroie --limit 100 --extractor rules
+
+writes ``data/processed/documents.jsonl`` and ``chunks.jsonl`` and prints the median time
+per step.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ledgerlens.core.config import IngestionConfig, get_config
+from ledgerlens.core.config import IngestionConfig, get_config, repo_path
+from ledgerlens.core.logging import configure_logging
 from ledgerlens.core.schemas import DocType, Document, DocumentStatus
 from ledgerlens.extraction.base import ExtractionError, ExtractionResult, Extractor
 from ledgerlens.ingestion.chunking import Chunk, chunk_document
@@ -258,3 +269,139 @@ def _step(result: IngestResult, step: str) -> Iterator[None]:
             yield
         except (OCRError, ExtractionError, OSError, ValueError, RuntimeError) as exc:
             raise _StepError(step, exc) from exc
+
+
+# --------------------------------------------------------------------------- sinks
+
+INPUT_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
+
+
+class IngestSink(Protocol):
+    """Where ingested documents go. JSONL for now; Postgres/Pinecone/Neo4j on Day 30."""
+
+    def write(self, result: IngestResult) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class JsonlSink:
+    """Appends to ``documents.jsonl`` (document, extraction, timings) and ``chunks.jsonl``
+    (one line per chunk, with its vectors when embedded) under ``out_dir``."""
+
+    def __init__(self, out_dir: Path | str) -> None:
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._documents = (self.out_dir / "documents.jsonl").open("a", encoding="utf-8")
+        self._chunks = (self.out_dir / "chunks.jsonl").open("a", encoding="utf-8")
+
+    def write(self, result: IngestResult) -> None:
+        extraction = result.extraction
+        row = {
+            "document": result.document.model_dump(mode="json"),
+            "duplicate": result.duplicate,
+            "classification": result.classification,
+            "extraction": None
+            if extraction is None
+            else {
+                "extractor": extraction.extractor,
+                "ok": extraction.ok,
+                "record": extraction.record.model_dump(mode="json") if extraction.record else None,
+                "missing": extraction.missing,
+                "errors": extraction.errors,
+            },
+            "chunks": len(result.chunks),
+            "timings_ms": {k: round(v, 2) for k, v in result.timings_ms.items()},
+        }
+        self._documents.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if result.embedded:
+            for embedded in result.embedded:
+                self._chunks.write(json.dumps(embedded.to_pinecone(), ensure_ascii=False) + "\n")
+        else:
+            for chunk in result.chunks:
+                line = {
+                    "id": chunk.vector_id(result.document.id),
+                    **chunk.model_dump(mode="json"),
+                }
+                self._chunks.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+    def close(self) -> None:
+        self._documents.close()
+        self._chunks.close()
+
+
+# --------------------------------------------------------------------------- CLI
+
+
+def find_inputs(root: Path, limit: int | None = None) -> list[Path]:
+    """Files under ``root`` (or ``root`` itself) that ingestion can read, sorted."""
+    if root.is_file():
+        return [root]
+    if not root.is_dir():
+        raise FileNotFoundError(f"{root} does not exist")
+    files = sorted(p for p in root.rglob("*") if p.suffix.lower() in INPUT_SUFFIXES)
+    return files[:limit] if limit is not None else files
+
+
+def summarize(results: Sequence[IngestResult]) -> str:
+    """Counts by status and median timings, one line per step."""
+    statuses: dict[str, int] = {}
+    for r in results:
+        key = "duplicate" if r.duplicate else r.document.status.value
+        statuses[key] = statuses.get(key, 0) + 1
+    processed = [r for r in results if not r.duplicate]
+    lines = [f"{len(results)} files: " + ", ".join(f"{n} {s}" for s, n in sorted(statuses.items()))]
+    if processed:
+        lines.append(f"median ingest time: {_median([r.total_ms for r in processed]):.0f} ms")
+        for step in STEPS:
+            times = [r.timings_ms[step] for r in processed if step in r.timings_ms]
+            if times:
+                lines.append(f"  {step:<9} median {_median(times):8.1f} ms  ({len(times)} docs)")
+    return "\n".join(lines)
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m ledgerlens.ingestion.pipeline",
+        description="Ingest every PDF/image under a folder into JSONL (data/processed).",
+    )
+    parser.add_argument("source", type=Path, help="file or folder, e.g. data/raw/sroie")
+    parser.add_argument("--limit", type=int, help="ingest at most N files (sorted by path)")
+    parser.add_argument("--out", type=Path, default=repo_path("data/processed"))
+    parser.add_argument(
+        "--extractor",
+        choices=["rules", "llm"],
+        help="override extraction.default from configs/ingestion.yaml",
+    )
+    parser.add_argument("--no-embed", action="store_true", help="skip dense + sparse vectors")
+    args = parser.parse_args(argv)
+
+    configure_logging()
+    config = get_config().ingestion
+    pipeline = IngestionPipeline(
+        config,
+        extractor=make_extractor(args.extractor) if args.extractor else None,
+        embedder=None if args.no_embed else default_embedder(config),
+    )
+    paths = find_inputs(args.source, args.limit)
+    sink = JsonlSink(args.out)
+    try:
+        results = list(
+            pipeline.run(paths, embed=not args.no_embed, bm25_path=args.out / "bm25.json")
+        )
+        for result in results:
+            sink.write(result)
+    finally:
+        sink.close()
+    print(summarize(results))
+    print(f"wrote {args.out / 'documents.jsonl'} and {args.out / 'chunks.jsonl'}")
+    return 0 if all(r.document.status is not DocumentStatus.FAILED for r in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
