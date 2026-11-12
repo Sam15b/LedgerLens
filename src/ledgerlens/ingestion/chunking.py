@@ -20,6 +20,11 @@ since its input limit is what the 512 protects; if that tokenizer cannot be load
 Short, number-heavy documents retrieve better as a few coherent chunks than as fixed-size
 windows: a question about "the invoice for PO-88231" should hit the header chunk, one about
 "shipping labels" the item table.
+
+With ``chunking.context_header`` on (the default), every chunk starts with a one-line
+header naming its document -- ``[INVOICE INV-889 | Vendor: Acme | Date: 2026-03-14]`` --
+taken from the extracted record. A line-item chunk on its own says nothing about which
+invoice it belongs to; the header puts that back into the embedded text.
 """
 
 from __future__ import annotations
@@ -34,7 +39,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ledgerlens.core.config import ChunkingConfig, get_config
 from ledgerlens.core.ids import chunk_vector_id
-from ledgerlens.core.schemas import DocType
+from ledgerlens.core.schemas import (
+    Contract,
+    DocType,
+    ExtractedRecord,
+    Invoice,
+    Payment,
+    PurchaseOrder,
+    Receipt,
+)
 from ledgerlens.ingestion.layout import BBox, Line, PageContent, Table
 
 logger = logging.getLogger(__name__)
@@ -54,7 +67,9 @@ class Chunk(BaseModel):
     index: int = Field(ge=0)
     doc_type: DocType
     kind: ChunkKind
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1)  # what is embedded: context header + body
+    body: str = Field(min_length=1)
+    header: str | None = None
     pages: list[int] = Field(min_length=1)
     title: str | None = None  # clause heading, for contract chunks
 
@@ -74,30 +89,107 @@ def chunk_document(
     pages: Sequence[PageContent],
     doc_type: DocType | str,
     *,
+    record: ExtractedRecord | None = None,
     config: ChunkingConfig | None = None,
     count_tokens: TokenCounter | None = None,
 ) -> list[Chunk]:
     """Chunks for a document whose pages have been read (text layer or OCR).
 
+    ``record`` (the extracted fields, if known) fills the context header.
     ``count_tokens`` defaults to the embedding model's tokenizer; only contracts need it.
     """
     kind = DocType(doc_type)
     config = config or get_config().ingestion.chunking
+    use_header = config.context_header
     if kind in (DocType.INVOICE, DocType.RECEIPT, DocType.PURCHASE_ORDER):
         drafts = _itemized(pages)
     elif kind is DocType.CONTRACT:
         counter = count_tokens or default_token_counter()
-        drafts = _clauses(pages, config.contract.max_tokens, config.contract.overlap, counter)
+        # Room for the header (with the longest clause title) inside the token limit.
+        longest = max(
+            (
+                context_header(kind, record, title=line.text)
+                for p in pages
+                for line in p.lines
+                if is_clause_heading(line.text)
+            ),
+            key=len,
+            default="",
+        )
+        budget = config.contract.max_tokens - (counter(longest) + 1 if use_header else 0)
+        drafts = _clauses(pages, max(budget, 1), config.contract.overlap, counter)
     else:
         drafts = _single(pages)
-    return _number(drafts, kind)
+    return _number(drafts, kind, record if use_header else None, use_header)
 
 
-def _number(drafts: Sequence[_Draft], doc_type: DocType) -> list[Chunk]:
-    return [
-        Chunk(index=i, doc_type=doc_type, kind=d.kind, text=d.text, pages=d.pages, title=d.title)
-        for i, d in enumerate(d for d in drafts if d.text.strip())
-    ]
+def _number(
+    drafts: Sequence[_Draft], doc_type: DocType, record: ExtractedRecord | None, use_header: bool
+) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    for draft in drafts:
+        body = draft.text.strip()
+        if not body:
+            continue
+        header = context_header(doc_type, record, title=draft.title) if use_header else None
+        chunks.append(
+            Chunk(
+                index=len(chunks),
+                doc_type=doc_type,
+                kind=draft.kind,
+                text=f"{header}\n{body}" if header else body,
+                body=body,
+                header=header,
+                pages=draft.pages,
+                title=draft.title,
+            )
+        )
+    return chunks
+
+
+# --------------------------------------------------------------------------- context header
+
+_LABELS = {
+    DocType.INVOICE: "INVOICE",
+    DocType.RECEIPT: "RECEIPT",
+    DocType.PURCHASE_ORDER: "PURCHASE ORDER",
+    DocType.PAYMENT: "PAYMENT",
+    DocType.CONTRACT: "CONTRACT",
+    DocType.UNKNOWN: "DOCUMENT",
+}
+
+
+def context_header(
+    doc_type: DocType | str, record: ExtractedRecord | None = None, *, title: str | None = None
+) -> str:
+    """``[INVOICE INV-889 | Vendor: Acme Corp | Date: 2026-03-14]``; fields that are not
+    known are left out, and contract chunks add their clause ``title``."""
+    kind = DocType(doc_type)
+    number, party, when = _identity(record)
+    first = " ".join(part for part in (_LABELS[kind], number) if part)
+    parts = [first]
+    if party:
+        parts.append(f"Vendor: {party}")
+    if when:
+        parts.append(f"Date: {when}")
+    if title:
+        parts.append(title)
+    return "[" + " | ".join(parts) + "]"
+
+
+def _identity(record: ExtractedRecord | None) -> tuple[str | None, str | None, str | None]:
+    """(document number, vendor, main date as ISO) for the context header."""
+    if isinstance(record, Invoice):
+        return record.invoice_number, record.vendor_name, record.invoice_date.isoformat()
+    if isinstance(record, Receipt):
+        return record.receipt_number, record.vendor_name, record.receipt_date.isoformat()
+    if isinstance(record, PurchaseOrder):
+        return record.po_number, record.vendor_name, record.order_date.isoformat()
+    if isinstance(record, Payment):
+        return record.payment_reference, record.vendor_name, record.paid_at.isoformat()
+    if isinstance(record, Contract):
+        return record.contract_number, record.vendor_name, record.start_date.isoformat()
+    return None, None, None
 
 
 def _single(pages: Sequence[PageContent]) -> list[_Draft]:
