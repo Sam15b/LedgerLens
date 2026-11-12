@@ -18,6 +18,7 @@ blur: exact invoice numbers, PO references, amounts.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib
 import json
@@ -63,8 +64,14 @@ def query_instruction_for(model_name: str) -> str:
     return ""
 
 
+@functools.lru_cache(maxsize=4)
 def load_sentence_transformer(model_name: str, device: str | None = None) -> SentenceEncoder:
-    """Load ``model_name`` with sentence-transformers (downloads it the first time)."""
+    """Load ``model_name`` with sentence-transformers (downloads it the first time).
+
+    Cached per ``(model_name, device)``: every :class:`DenseEmbedder` in the process --
+    API, worker, eval scripts -- shares one copy of the weights instead of reloading
+    ~440 MB each time.
+    """
     module = importlib.import_module("sentence_transformers")
     model: SentenceEncoder = module.SentenceTransformer(model_name, device=device)
     return model
@@ -120,20 +127,35 @@ class DenseEmbedder:
         return self._encode([self.query_instruction + text])[0]
 
     def _encode(self, texts: list[str]) -> list[Vector]:
+        """Encode in batches of similar length, then put the vectors back in input order.
+
+        A batch is padded to its longest text, so mixing a 10-token receipt header with a
+        500-token contract clause wastes most of the batch's compute; grouping by length
+        keeps the padding small.
+        """
         if not texts:
             return []
-        array: npt.NDArray[np.float32] = np.asarray(
-            self.model.encode(
-                texts,
-                batch_size=self.config.batch_size,
-                normalize_embeddings=self.config.normalize,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            ),
-            dtype=np.float32,
-        )
-        vectors: list[Vector] = array.tolist()
-        return vectors
+        out: list[Vector] = [[] for _ in texts]
+        for batch in length_sorted_batches(texts, self.config.batch_size):
+            array: npt.NDArray[np.float32] = np.asarray(
+                self.model.encode(
+                    [texts[i] for i in batch],
+                    batch_size=len(batch),
+                    normalize_embeddings=self.config.normalize,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                ),
+                dtype=np.float32,
+            )
+            for i, vector in zip(batch, array.tolist(), strict=True):
+                out[i] = vector
+        return out
+
+
+def length_sorted_batches(texts: Sequence[str], batch_size: int) -> list[list[int]]:
+    """Indices of ``texts`` grouped into batches of up to ``batch_size``, longest first."""
+    order = sorted(range(len(texts)), key=lambda i: len(texts[i]), reverse=True)
+    return [order[start : start + batch_size] for start in range(0, len(order), batch_size)]
 
 
 # --------------------------------------------------------------------------- sparse (BM25)
