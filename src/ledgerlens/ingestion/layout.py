@@ -5,14 +5,15 @@ text layer has at least ``layout.text_layer_min_chars`` characters (``configs/in
 is read directly with PyMuPDF. Anything below that -- a scan saved as PDF, or a page
 with only a logo and a signature -- goes down the OCR path.
 
-Both paths produce a :class:`PageContent`: the page's words with their bounding boxes.
+Both paths produce a :class:`PageContent`: the page's words with their bounding boxes,
+grouped into lines, blocks and (heuristically) tables.
 Coordinates are PDF points (1/72 inch, origin top-left) for PDF pages and pixels for
 images.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Literal, NamedTuple
 
 import pymupdf
@@ -64,6 +65,64 @@ class Word(BaseModel):
     conf: float | None = Field(default=None, ge=0, le=100)
 
 
+class Cell(BaseModel):
+    """Words of one line that sit together, separated from the next cell by a wide gap."""
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    bbox: BBox
+
+
+class Line(BaseModel):
+    """Words sharing a baseline, left to right, split into :class:`Cell` s at wide gaps."""
+
+    model_config = ConfigDict(frozen=True)
+
+    words: list[Word] = Field(min_length=1)
+    cells: list[Cell] = Field(min_length=1)
+    bbox: BBox
+
+    @property
+    def text(self) -> str:
+        """Cells joined by two spaces, so column gaps stay visible in plain text."""
+        return CELL_SEPARATOR.join(cell.text for cell in self.cells)
+
+
+class Block(BaseModel):
+    """Consecutive lines with no paragraph-sized gap between them."""
+
+    model_config = ConfigDict(frozen=True)
+
+    lines: list[Line] = Field(min_length=1)
+    bbox: BBox
+
+    @property
+    def text(self) -> str:
+        return "\n".join(line.text for line in self.lines)
+
+
+class Table(BaseModel):
+    """Consecutive multi-cell lines whose cells line up in columns. Row 0 is the header."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rows: list[list[str]] = Field(min_length=2)
+    bbox: BBox
+
+    @property
+    def n_columns(self) -> int:
+        return len(self.rows[0])
+
+    def to_markdown(self) -> str:
+        def row(cells: list[str]) -> str:
+            return "| " + " | ".join(cell.replace("|", r"\|") for cell in cells) + " |"
+
+        header, *body = self.rows
+        divider = "| " + " | ".join("---" for _ in header) + " |"
+        return "\n".join([row(header), divider, *(row(cells) for cells in body)])
+
+
 class PageContent(BaseModel):
     """Everything layout knows about one page, whichever path (text layer or OCR) read it."""
 
@@ -74,10 +133,163 @@ class PageContent(BaseModel):
     height: float = Field(gt=0)
     source: PageSource
     words: list[Word]
+    lines: list[Line] = Field(default_factory=list)
+    blocks: list[Block] = Field(default_factory=list)
+    tables: list[Table] = Field(default_factory=list)
+
+    @classmethod
+    def from_words(
+        cls,
+        words: Sequence[Word],
+        *,
+        page_number: int,
+        width: float,
+        height: float,
+        source: PageSource,
+    ) -> PageContent:
+        """Group ``words`` into lines, blocks and tables. Used by both the text and OCR paths."""
+        lines = group_lines(words)
+        return cls(
+            page_number=page_number,
+            width=width,
+            height=height,
+            source=source,
+            words=[word for line in lines for word in line.words],
+            lines=lines,
+            blocks=group_blocks(lines),
+            tables=find_tables(lines),
+        )
 
     @property
     def text(self) -> str:
-        return " ".join(word.text for word in self.words)
+        """The page as plain text: blocks separated by a blank line."""
+        return "\n\n".join(block.text for block in self.blocks)
+
+
+# --------------------------------------------------------------------------- grouping
+
+CELL_SEPARATOR = "  "
+# Thresholds are multiples of the text height, so they work for PDF points and OCR pixels.
+_SAME_LINE_OVERLAP = 0.5  # vertical overlap (of the shorter box) to share a line
+_CELL_GAP = 1.0  # horizontal gap that starts a new cell
+_BLOCK_GAP = 0.5  # vertical gap that starts a new block
+_COLUMN_TOLERANCE = 0.75  # how far cell edges may drift and still be one column
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def group_lines(words: Sequence[Word]) -> list[Line]:
+    """Group words into lines by vertical overlap, top to bottom, each left to right.
+
+    Uses geometry only (not PDF line numbers), so OCR words group the same way.
+    """
+    rows: list[list[Word]] = []
+    spans: list[tuple[float, float]] = []
+    for word in sorted(words, key=lambda w: (w.bbox.center_y, w.bbox.x0)):
+        y0, y1 = word.bbox.y0, word.bbox.y1
+        for i, (top, bottom) in enumerate(spans):
+            overlap = min(y1, bottom) - max(y0, top)
+            if overlap >= _SAME_LINE_OVERLAP * min(y1 - y0, bottom - top):
+                rows[i].append(word)
+                spans[i] = (min(top, y0), max(bottom, y1))
+                break
+        else:
+            rows.append([word])
+            spans.append((y0, y1))
+    lines = [_make_line(sorted(row, key=lambda w: w.bbox.x0)) for row in rows]
+    return sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
+
+
+def _make_line(words: list[Word]) -> Line:
+    height = _median([w.bbox.height for w in words])
+    groups: list[list[Word]] = [[words[0]]]
+    for prev, word in zip(words, words[1:], strict=False):
+        if word.bbox.x0 - prev.bbox.x1 > _CELL_GAP * height:
+            groups.append([word])
+        else:
+            groups[-1].append(word)
+    cells = [
+        Cell(text=" ".join(w.text for w in group), bbox=BBox.union(w.bbox for w in group))
+        for group in groups
+    ]
+    return Line(words=words, cells=cells, bbox=BBox.union(w.bbox for w in words))
+
+
+def _starts_new_block(prev: Line, line: Line) -> bool:
+    gap = line.bbox.y0 - prev.bbox.y1
+    return gap > _BLOCK_GAP * max(prev.bbox.height, line.bbox.height)
+
+
+def group_blocks(lines: Sequence[Line]) -> list[Block]:
+    """Split top-to-bottom ``lines`` into blocks wherever a paragraph-sized gap appears."""
+    runs: list[list[Line]] = []
+    for line in lines:
+        if runs and not _starts_new_block(runs[-1][-1], line):
+            runs[-1].append(line)
+        else:
+            runs.append([line])
+    return [Block(lines=run, bbox=BBox.union(line.bbox for line in run)) for run in runs]
+
+
+class _Column:
+    def __init__(self, box: BBox) -> None:
+        self.x0, self.x1 = box.x0, box.x1
+
+    def matches(self, box: BBox, tolerance: float) -> bool:
+        # left-aligned text shares x0, right-aligned amounts share x1
+        return abs(box.x0 - self.x0) <= tolerance or abs(box.x1 - self.x1) <= tolerance
+
+
+def find_tables(lines: Sequence[Line]) -> list[Table]:
+    """Find tables: runs of 2+ adjacent lines with 2+ cells whose cells line up in columns.
+
+    A heuristic for the simple ruled-less tables on invoices, POs and rate cards; the
+    first row of a run is taken as the header.
+    """
+    tables: list[Table] = []
+    run: list[Line] = []
+    columns: list[_Column] = []
+    for line in [*lines, None]:
+        if line is not None and len(line.cells) >= 2:
+            tolerance = _COLUMN_TOLERANCE * line.bbox.height
+            if run and not _starts_new_block(run[-1], line):
+                unmatched = [
+                    c
+                    for c in line.cells
+                    if not any(col.matches(c.bbox, tolerance) for col in columns)
+                ]
+                if len(line.cells) - len(unmatched) >= 2 and len(unmatched) <= 1:
+                    run.append(line)
+                    columns.extend(_Column(c.bbox) for c in unmatched)
+                    continue
+            _close(run, columns, tables)
+            run, columns = [line], [_Column(c.bbox) for c in line.cells]
+        else:
+            _close(run, columns, tables)
+            run, columns = [], []
+    return tables
+
+
+def _close(run: list[Line], columns: list[_Column], tables: list[Table]) -> None:
+    if len(run) < 2:
+        return
+    columns = sorted(columns, key=lambda col: col.x0)
+    rows: list[list[str]] = []
+    for line in run:
+        tolerance = _COLUMN_TOLERANCE * line.bbox.height
+        cells = [""] * len(columns)
+        for cell in line.cells:
+            index = next(
+                (i for i, col in enumerate(columns) if col.matches(cell.bbox, tolerance)),
+                min(range(len(columns)), key=lambda i: abs(columns[i].x0 - cell.bbox.x0)),
+            )
+            cells[index] = f"{cells[index]} {cell.text}".strip()
+        rows.append(cells)
+    tables.append(Table(rows=rows, bbox=BBox.union(line.bbox for line in run)))
 
 
 # --------------------------------------------------------------------------- text layer
@@ -126,12 +338,12 @@ def extract_words(page: pymupdf.Page) -> list[Word]:
 
 def read_text_page(page: pymupdf.Page) -> PageContent:
     """:class:`PageContent` for a page that has a text layer."""
-    return PageContent(
+    return PageContent.from_words(
+        extract_words(page),
         page_number=page.number + 1,
         width=page.rect.width,
         height=page.rect.height,
         source="text_layer",
-        words=extract_words(page),
     )
 
 
