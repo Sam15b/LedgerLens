@@ -17,7 +17,6 @@ pytesseract>=0.3.10            # needs Tesseract installed on the system
 pillow>=10.0
 opencv-python-headless>=4.9    # deskew / denoise before OCR
 sentence-transformers>=3.0     # Hugging Face embedding models (bge-base-en-v1.5)
-pinecone-text>=0.9             # BM25 sparse vectors for hybrid search
 tiktoken>=0.7                  # token counting for chunking / cost
 
 # --- Storage ---

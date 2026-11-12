@@ -9,18 +9,30 @@ retrieval, so :meth:`DenseEmbedder.embed_query` adds it and
 :meth:`DenseEmbedder.embed_documents` does not.
 
 ``sentence-transformers`` (and PyTorch) are only imported when a model is first loaded.
+
+Sparse vectors are BM25 term weights (:class:`BM25Encoder`), fit on the chunk corpus and
+saved to ``embedding.sparse_params_path`` (``data/processed/bm25.json``) so queries are
+weighted with the same statistics as the indexed chunks. They catch what dense vectors
+blur: exact invoice numbers, PO references, amounts.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib
-from collections.abc import Sequence
+import json
+import math
+import re
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
+from pydantic import BaseModel, ConfigDict, Field
 
-from ledgerlens.core.config import EmbeddingConfig, get_config
+from ledgerlens.core.config import EmbeddingConfig, get_config, repo_path
 
 Vector = list[float]
 
@@ -121,3 +133,179 @@ class DenseEmbedder:
         )
         vectors: list[Vector] = array.tolist()
         return vectors
+
+
+# --------------------------------------------------------------------------- sparse (BM25)
+
+# Lower-cased words and numbers; joiners inside a token are kept, so "INV-2026-0417",
+# "498.00", "1,234.50" and "14/03/2026" each stay one searchable token.
+_BM25_TOKEN = re.compile(r"[a-z0-9]+(?:[.,/\-][a-z0-9]+)*")
+STOPWORDS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "in",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "were",
+        "will",
+        "with",
+        "your",
+        "our",
+        "we",
+        "you",
+    ]
+)
+BM25_PARAMS_VERSION = 1
+
+
+def bm25_tokens(text: str) -> list[str]:
+    """BM25 terms of ``text``: lower-cased, stopwords and single letters dropped."""
+    return [
+        token
+        for token in _BM25_TOKEN.findall(text.lower())
+        if token not in STOPWORDS and (len(token) > 1 or token.isdigit())
+    ]
+
+
+def token_index(token: str) -> int:
+    """Stable 32-bit index for a term (the sparse vector dimension it lands in)."""
+    return int.from_bytes(hashlib.blake2b(token.encode("utf-8"), digest_size=4).digest(), "big")
+
+
+class SparseVector(BaseModel):
+    """Pinecone's sparse format: parallel lists of dimensions and weights."""
+
+    model_config = ConfigDict(frozen=True)
+
+    indices: list[int] = Field(default_factory=list)
+    values: list[float] = Field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+
+class BM25Encoder:
+    """Okapi BM25 term weights as sparse vectors, fit on the chunk corpus.
+
+    Documents get saturated, length-normalized term frequencies; queries get each term's
+    inverse document frequency (normalized to sum to 1), so the dot product of the two is
+    the BM25 score. Same scheme as ``pinecone-text``'s ``BM25Encoder``, but with a
+    tokenizer that keeps document numbers whole and needs no NLTK downloads.
+    """
+
+    def __init__(self, *, b: float = 0.75, k1: float = 1.2) -> None:
+        self.b = b
+        self.k1 = k1
+        self.n_docs = 0
+        self.avgdl = 0.0
+        self.doc_freq: dict[int, int] = {}
+
+    @property
+    def is_fitted(self) -> bool:
+        return self.n_docs > 0
+
+    def fit(self, corpus: Iterable[str]) -> BM25Encoder:
+        """Learn document frequencies and average length from ``corpus`` (replacing any)."""
+        doc_freq: Counter[int] = Counter()
+        n_docs = total_len = 0
+        for text in corpus:
+            tokens = bm25_tokens(text)
+            n_docs += 1
+            total_len += len(tokens)
+            doc_freq.update({token_index(t) for t in tokens})
+        if n_docs == 0:
+            raise ValueError("cannot fit BM25 on an empty corpus")
+        self.n_docs, self.avgdl, self.doc_freq = n_docs, total_len / n_docs, dict(doc_freq)
+        return self
+
+    def encode_documents(self, texts: Sequence[str]) -> list[SparseVector]:
+        self._require_fit()
+        return [self._encode_document(text) for text in texts]
+
+    def encode_query(self, text: str) -> SparseVector:
+        self._require_fit()
+        terms = sorted({token_index(t) for t in bm25_tokens(text)})
+        idf = [math.log((self.n_docs + 1) / (self.doc_freq.get(i, 0) + 0.5)) for i in terms]
+        total = sum(idf)
+        if total <= 0:
+            return SparseVector()
+        return SparseVector(indices=terms, values=[w / total for w in idf])
+
+    def _encode_document(self, text: str) -> SparseVector:
+        counts = Counter(token_index(t) for t in bm25_tokens(text))
+        length = sum(counts.values())
+        norm = self.k1 * (1 - self.b + self.b * length / self.avgdl)
+        indices = sorted(counts)
+        values = [counts[i] * (self.k1 + 1) / (counts[i] + norm) for i in indices]
+        return SparseVector(indices=indices, values=values)
+
+    def _require_fit(self) -> None:
+        if not self.is_fitted:
+            raise RuntimeError("BM25Encoder is not fitted: call fit() or load() first")
+
+    # ------------------------------------------------------------------ persistence
+
+    def to_params(self) -> dict[str, Any]:
+        indices = sorted(self.doc_freq)
+        return {
+            "version": BM25_PARAMS_VERSION,
+            "tokenizer": "ledgerlens-regex",
+            "hash": "blake2b-32",
+            "b": self.b,
+            "k1": self.k1,
+            "n_docs": self.n_docs,
+            "avgdl": self.avgdl,
+            "doc_freq": {"indices": indices, "values": [self.doc_freq[i] for i in indices]},
+        }
+
+    @classmethod
+    def from_params(cls, params: dict[str, Any]) -> BM25Encoder:
+        if params.get("version") != BM25_PARAMS_VERSION:
+            raise ValueError(f"unsupported BM25 params version {params.get('version')!r}")
+        encoder = cls(b=float(params["b"]), k1=float(params["k1"]))
+        encoder.n_docs = int(params["n_docs"])
+        encoder.avgdl = float(params["avgdl"])
+        df = params["doc_freq"]
+        encoder.doc_freq = {
+            int(i): int(v) for i, v in zip(df["indices"], df["values"], strict=True)
+        }
+        return encoder
+
+    def save(self, path: Path | str | None = None) -> Path:
+        """Write the fitted params (default: ``embedding.sparse_params_path``)."""
+        self._require_fit()
+        target = _params_path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.to_params()), encoding="utf-8")
+        return target
+
+    @classmethod
+    def load(cls, path: Path | str | None = None) -> BM25Encoder:
+        """Read params written by :meth:`save` (default: ``embedding.sparse_params_path``)."""
+        return cls.from_params(json.loads(_params_path(path).read_text(encoding="utf-8")))
+
+
+def _params_path(path: Path | str | None) -> Path:
+    if path is not None:
+        return Path(path)
+    return repo_path(get_config().ingestion.embedding.sparse_params_path)
