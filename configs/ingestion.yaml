@@ -13,7 +13,7 @@ ocr:
   preprocess:
     deskew: true
     denoise: true
-    binarize: true
+    binarize: false        # Tesseract binarizes internally; doing it first measured worse
 
 layout:
   text_layer_min_chars: 50 # fewer extractable chars than this on a page -> treat as scanned

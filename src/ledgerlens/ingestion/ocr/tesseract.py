@@ -62,11 +62,7 @@ class TesseractEngine:
     def run(self, image: Image.Image) -> list[OCRWord]:
         """Preprocess ``image`` (per ``ocr.preprocess``), OCR it, drop low-confidence words."""
         factor = upscale_factor(image.size)
-        if factor > 1:
-            image = image.resize(
-                (image.width * factor, image.height * factor), Image.Resampling.LANCZOS
-            )
-        cleaned = preprocess(image, self.config.preprocess).image
+        cleaned = preprocess(image, self.config.preprocess, scale=factor).image
         pytesseract.pytesseract.tesseract_cmd = self.command
         try:
             data: dict[str, list[Any]] = pytesseract.image_to_data(

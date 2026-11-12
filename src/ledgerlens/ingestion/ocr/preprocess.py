@@ -1,14 +1,26 @@
-"""Clean up a page image before OCR: grayscale, deskew, denoise, binarize.
+"""Clean up a page image before OCR: grayscale, deskew, denoise, upscale, binarize.
 
-Each step is switched on or off by ``ocr.preprocess`` in ``configs/ingestion.yaml``.
+Each step except upscaling is switched on or off by ``ocr.preprocess`` in
+``configs/ingestion.yaml``. The order matters and was measured with real Tesseract on the
+speckled receipt fixture (character error rate, lower is better):
+
+==========================================  =====
+deskew -> denoise -> upscale                0.053
+denoise -> deskew -> upscale                0.064
+... -> upscale -> binarize (Otsu)           0.117
+upscale -> deskew -> denoise -> binarize    0.632
+==========================================  =====
 
 - **Deskew** finds the rotation that makes text rows sharpest: rotate a downscaled
   binary copy through small angles and keep the one whose row sums vary most (text rows
   dark, gaps light). This is the projection-profile method; it is robust to stamps and
   logos that fool line detection, and searching on a ~1000 px copy keeps it fast.
 - **Denoise** is a 3x3 median filter, which removes scanner speckle without blurring
-  stroke edges the way Gaussian or non-local-means filters do.
-- **Binarize** uses Otsu's threshold on the denoised image.
+  stroke edges. It must run *before* upscaling: once a one-pixel speck is enlarged to a
+  3x3 blob, a 3x3 median no longer removes it.
+- **Upscale** (bicubic, whole factor) is requested by the engine for small images.
+- **Binarize** uses Otsu's threshold. Off by default: Tesseract already binarizes
+  internally, and thresholding the smooth upscaled image first loses stroke detail.
 """
 
 from __future__ import annotations
@@ -85,8 +97,19 @@ def binarize(gray: Gray) -> Gray:
     return _u8(cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1])
 
 
-def preprocess(image: Image.Image, config: PreprocessConfig | None = None) -> Preprocessed:
-    """Run the enabled steps in order (deskew, denoise, binarize) on a grayscale copy."""
+def upscale(gray: Gray, factor: int) -> Gray:
+    if factor <= 1:
+        return gray
+    return _u8(cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC))
+
+
+def preprocess(
+    image: Image.Image, config: PreprocessConfig | None = None, *, scale: int = 1
+) -> Preprocessed:
+    """Run the enabled steps on a grayscale copy: deskew, denoise, upscale x ``scale``, binarize.
+
+    The result is ``scale`` times the size of ``image``.
+    """
     config = config or get_config().ingestion.ocr.preprocess
     gray = to_gray(image)
     angle = 0.0
@@ -94,6 +117,7 @@ def preprocess(image: Image.Image, config: PreprocessConfig | None = None) -> Pr
         gray, angle = deskew(gray)
     if config.denoise:
         gray = denoise(gray)
+    gray = upscale(gray, scale)
     if config.binarize:
         gray = binarize(gray)
     return Preprocessed(Image.fromarray(gray), angle)

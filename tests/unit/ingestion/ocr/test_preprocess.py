@@ -62,10 +62,25 @@ def test_binarize_returns_only_black_and_white() -> None:
 def test_preprocess_runs_enabled_steps_only() -> None:
     tilted = text_page().rotate(2.0, resample=Image.Resampling.BICUBIC, fillcolor=255)
 
-    everything = preprocess(tilted, PreprocessConfig())
+    everything = preprocess(tilted, PreprocessConfig(binarize=True), scale=2)
     nothing = preprocess(tilted, PreprocessConfig(deskew=False, denoise=False, binarize=False))
 
     assert everything.skew_degrees == pytest.approx(2.0, abs=0.5)
+    assert everything.image.size == (1200, 800)
     assert set(np.unique(np.asarray(everything.image)).tolist()) <= {0, 255}
     assert nothing.skew_degrees == 0.0
     assert np.array_equal(np.asarray(nothing.image), to_gray(tilted))
+
+
+def test_binarization_is_off_by_default() -> None:
+    # Tesseract binarizes internally; thresholding first measured worse (see preprocess.py).
+    assert not PreprocessConfig().binarize
+
+
+def test_denoise_runs_before_upscaling() -> None:
+    page = np.full((40, 40), 255, dtype=np.uint8)
+    page[20, 20] = 0  # one-pixel speck
+
+    cleaned = preprocess(Image.fromarray(page), PreprocessConfig(deskew=False), scale=3)
+
+    assert np.asarray(cleaned.image).min() == 255  # removed, not enlarged into a blob
