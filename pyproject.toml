@@ -83,7 +83,7 @@ packages = ["src/ledgerlens"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]  # "." so tests can import eval/ and ml/
 # Integration tests need `docker compose up` and are excluded by default;
 # run them with `pytest -m integration` (or `make test-int`).
 addopts = "-ra -m 'not integration'"
