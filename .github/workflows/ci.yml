@@ -21,8 +21,16 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install Tesseract (OCR tests run against the real binary)
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tesseract-ocr
+      - name: Cache Hugging Face models (tiny test embedding model)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-v1
       - name: Install
-        run: pip install -e ".[dev,storage]"
+        run: |
+          # CPU-only PyTorch for sentence-transformers (the default wheel bundles CUDA, ~2 GB)
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,storage,ingestion]"
       - name: Lint
         run: ruff check .
       - name: Format check
