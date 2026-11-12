@@ -26,8 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ingestion = [
-    "sentence-transformers",
-    "pinecone-text",
+    "sentence-transformers>=3.0",  # dense embeddings (pulls in PyTorch)
 ]
 storage = [
     "pinecone>=10.0",
