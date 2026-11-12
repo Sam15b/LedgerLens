@@ -46,8 +46,8 @@ init:             ## Create Pinecone index, Neo4j schema, run DB migrations
 data:             ## Download public datasets into data/raw (DATASETS="funsd cuad" for a subset)
 	$(PY) scripts/download_datasets.py $(DATASETS)
 
-ingest:           ## Run ingestion pipeline (DATASET=sroie)
-	$(call todo,Phase 1: python -m ledgerlens.ingestion.pipeline data/raw/$(DATASET))
+ingest:           ## Ingest data/raw/$(DATASET) into data/processed (ARGS="--limit 100 --extractor rules")
+	$(PY) -m ledgerlens.ingestion.pipeline data/raw/$(DATASET) $(ARGS)
 
 # --- Run -----------------------------------------------------------------------------
 api:              ## Run FastAPI with reload on :8000

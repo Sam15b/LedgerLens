@@ -8,6 +8,57 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-12
+
+Phase 1 — Ingestion + extraction baseline: a PDF or scanned image goes in, a typed
+record, retrieval chunks and their vectors come out, with the time each step took.
+
+Version numbers follow roadmap phases, and Phase 2 (0.2.0, the model router) was built
+first so extraction could use it; this release therefore comes after 0.2.0, and the
+package version stays `0.2.0`.
+
+### Added
+
+- Domain schemas: `Document` (status lifecycle) and the extracted records `Invoice`,
+  `Receipt`, `PurchaseOrder`, `Payment`, `Contract`, as one `ExtractedDocument` union keyed
+  on `doc_type`; validation rejects malformed values, `consistency_issues()` reports
+  arithmetic that does not add up.
+- `ingestion/loaders.py`: SHA-256 dedupe (the same bytes under any name are ingested once),
+  MIME sniffed from content, page counts, size/type limits from `ingestion.yaml`.
+- Five sample documents that tell one story (contract → PO → invoice → payment, plus a
+  scanned cafe receipt), each with the JSON it should extract to.
+- `ingestion/layout.py`: per-page text-layer detection; words → lines → blocks → tables
+  (markdown) by geometry, shared by the text-layer and OCR paths; scanned pages rasterized
+  at 300 DPI.
+- OCR: `OCREngine` protocol, Tesseract (deskew → denoise → upscale before OCR; CER 0.053
+  on the scanned receipt), optional PaddleOCR, engine chosen by `ocr.engine`.
+- `ingestion/classify.py`: doc_type from weighted keyword rules, LLM (`fast` alias) when
+  unsure.
+- `ingestion/chunking.py`: header + line-item chunks for invoices/receipts/POs, clause
+  chunks for contracts (512 tokens, 50 overlap, embedding-model tokenizer), one chunk for
+  payments; every chunk prefixed with `[INVOICE INV-889 | Vendor: … | Date: …]`.
+- `ingestion/embedding.py`: dense `bge-base-en-v1.5` (normalized, query instruction,
+  cached model, length-sorted batches) and BM25 sparse vectors with persisted params;
+  `EmbeddedChunk` records ready for Pinecone.
+- Extraction: `Extractor` protocol; normalizers for dates (day-first configurable),
+  amounts, currencies and vendor names (`rapidfuzz` matching); the regex baseline
+  `RulesExtractor`; `LLMExtractor` with the versioned `extract_invoice` prompt and
+  structured output through the router.
+- `ingestion/pipeline.py`: load → layout/OCR → classify → extract → chunk → embed with
+  per-step timings; `python -m ledgerlens.ingestion.pipeline <folder>` / `make ingest`
+  writes `documents.jsonl` and `chunks.jsonl`.
+- Evaluation: character error rate and an OCR benchmark runner, a SROIE adapter, and
+  field-level extraction F1 with JSON-validity rate.
+
+### Changed
+
+- PyMuPDF, Pillow, NumPy, OpenCV (headless), pytesseract and rapidfuzz are core
+  dependencies; `pinecone-text` is no longer used (BM25 is implemented in-house without
+  NLTK downloads).
+- CI installs Tesseract and CPU-only PyTorch, so OCR and a tiny embedding model run for
+  real in tests.
+- `ocr.preprocess.binarize` defaults to `false` (Tesseract binarizes better itself).
+
 ## [0.2.0] - 2026-11-11
 
 Phase 2 — Model router: one interface for every LLM. Callers ask for an alias (`smart`,
@@ -77,6 +128,7 @@ command and reports its health.
 - Package version is read from `src/ledgerlens/__init__.py` (single source) and reset to
   `0.0.0` to match the roadmap's `v0.<phase>.0` scheme.
 
-[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Sam15b/LedgerLens/compare/v0.2.0...v0.1.0
 [0.2.0]: https://github.com/Sam15b/LedgerLens/compare/v0.0.0...v0.2.0
 [0.0.0]: https://github.com/Sam15b/LedgerLens/releases/tag/v0.0.0
