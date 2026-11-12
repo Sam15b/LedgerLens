@@ -1,0 +1,24 @@
+{
+  "doc_type": "receipt",
+  "vendor_name": "Kedai Kopi Sentosa",
+  "vendor_address": "12 Jalan Bunga, 50450 Kuala Lumpur",
+  "receipt_number": "R-000732",
+  "receipt_date": "2026-03-14",
+  "currency": "MYR",
+  "tax": "0.54",
+  "total": "9.50",
+  "line_items": [
+    {
+      "description": "Kopi O",
+      "quantity": "2",
+      "unit_price": "2.20",
+      "amount": "4.40"
+    },
+    {
+      "description": "Roti bakar",
+      "quantity": "1",
+      "unit_price": "5.10",
+      "amount": "5.10"
+    }
+  ]
+}
