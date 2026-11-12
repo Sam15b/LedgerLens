@@ -12,6 +12,8 @@
 The fitted transformer saves to JSON, so generated vectors can be turned back into rows
 long after training; :attr:`TabularTransformer.columns` tells the generator where each
 categorical block sits, for its Gumbel-softmax heads.
+
+:class:`SeedDataset` / :func:`make_loader` wrap the transformed matrix for PyTorch.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
+import torch
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset
 
 Kind = Literal["amount", "continuous", "integer", "categorical"]
 Matrix = npt.NDArray[np.float32]
@@ -218,3 +223,79 @@ class TabularTransformer:
     def _require_fit(self) -> None:
         if not self.columns:
             raise NotFittedError("TabularTransformer is not fitted: call fit() or load()")
+
+
+# --------------------------------------------------------------------------- torch
+
+
+class SeedDataset(Dataset[tuple[Tensor, Tensor]]):
+    """Transformed seed rows as tensors, each paired with its condition vector.
+
+    With ``condition="vendor_category"`` the condition is that column's one-hot block (for
+    the conditional GAN); without, it is an empty tensor, so training code can always
+    unpack ``(features, condition)``.
+    """
+
+    def __init__(
+        self,
+        matrix: npt.NDArray[np.floating[Any]],
+        transformer: TabularTransformer,
+        *,
+        condition: str | None = None,
+    ) -> None:
+        self.features = torch.as_tensor(np.asarray(matrix, dtype=np.float32))
+        self.transformer = transformer
+        self.condition = condition
+        if condition is not None:
+            info = transformer.column(condition)
+            if info.kind != "categorical":
+                raise ValueError(f"can only condition on a categorical column, not {condition}")
+            self.conditions = self.features[:, info.start : info.stop].clone()
+        else:
+            self.conditions = torch.zeros((len(self.features), 0))
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        transformer: TabularTransformer | None = None,
+        *,
+        condition: str | None = None,
+    ) -> SeedDataset:
+        """Fit a transformer on ``rows`` (unless one is given) and wrap the result."""
+        transformer = transformer or TabularTransformer().fit(rows)
+        return cls(transformer.transform(rows), transformer, condition=condition)
+
+    @property
+    def feature_dim(self) -> int:
+        return int(self.features.shape[1])
+
+    @property
+    def condition_dim(self) -> int:
+        return int(self.conditions.shape[1])
+
+    def __len__(self) -> int:
+        return int(self.features.shape[0])
+
+    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
+        return self.features[index], self.conditions[index]
+
+
+def make_loader(
+    dataset: SeedDataset,
+    *,
+    batch_size: int = 256,
+    shuffle: bool = True,
+    seed: int = 0,
+    drop_last: bool = True,
+) -> DataLoader[tuple[Tensor, Tensor]]:
+    """Batches for training. Seeded, so a run's batch order is reproducible; incomplete
+    last batches are dropped by default (WGAN-GP's penalty assumes full batches)."""
+    generator = torch.Generator().manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=min(batch_size, len(dataset)),
+        shuffle=shuffle,
+        drop_last=drop_last,
+        generator=generator,
+    )
