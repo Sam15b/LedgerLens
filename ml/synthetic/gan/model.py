@@ -7,6 +7,10 @@ categories while staying differentiable.
 
     noise (128) -> Linear 256 -> LeakyReLU -> Linear 256 -> LeakyReLU -> Linear features
         features: tanh on numeric columns, Gumbel-softmax on each categorical block
+
+The critic scores rows with an MLP (LeakyReLU + dropout, no batch norm) and is trained as a
+Wasserstein critic with a gradient penalty (WGAN-GP), which keeps GAN training on small,
+mixed-type tables stable.
 """
 
 from __future__ import annotations
@@ -79,3 +83,63 @@ class Generator(nn.Module):
         with torch.no_grad():
             noise = torch.randn(n, self.noise_dim, generator=generator, device=device)
             return self.forward(noise, hard=True)
+
+
+class Critic(nn.Module):
+    """Row -> realness score (a WGAN critic: unbounded, no sigmoid).
+
+    No batch normalization: the gradient penalty is computed per sample, and batch norm
+    would couple the samples in a batch.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int,
+        *,
+        hidden: Sequence[int] = HIDDEN,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.body = _mlp([feature_dim, *hidden], dropout=dropout)
+        self.head = nn.Linear(hidden[-1], 1)
+
+    def forward(self, rows: Tensor) -> Tensor:
+        score: Tensor = self.head(self.body(rows)).squeeze(-1)
+        return score
+
+
+GP_WEIGHT = 10.0
+
+
+def gradient_penalty(critic: Critic, real: Tensor, fake: Tensor) -> Tensor:
+    """WGAN-GP penalty (Gulrajani et al., 2017): ``E[(||grad critic(x_hat)||_2 - 1)^2]``
+    on random interpolations ``x_hat`` between real and generated rows, which keeps the
+    critic close to 1-Lipschitz without weight clipping."""
+    alpha = torch.rand(real.shape[0], 1, device=real.device)
+    mixed = (alpha * real + (1 - alpha) * fake.detach()).requires_grad_(True)
+    scores: Tensor = critic(mixed)
+    grad: Tensor
+    (grad,) = torch.autograd.grad(
+        outputs=scores,
+        inputs=mixed,
+        grad_outputs=torch.ones_like(scores),
+        create_graph=True,
+    )
+    slopes: Tensor = grad.norm(2, dim=1)
+    return ((slopes - 1) ** 2).mean()
+
+
+def critic_loss(
+    critic: Critic, real: Tensor, fake: Tensor, *, gp_weight: float = GP_WEIGHT
+) -> Tensor:
+    """Wasserstein critic loss ``E[D(fake)] - E[D(real)]`` plus the gradient penalty."""
+    fake_score: Tensor = critic(fake.detach())
+    real_score: Tensor = critic(real)
+    wasserstein = fake_score.mean() - real_score.mean()
+    return wasserstein + gp_weight * gradient_penalty(critic, real, fake)
+
+
+def generator_loss(critic: Critic, fake: Tensor) -> Tensor:
+    score: Tensor = critic(fake)
+    return -score.mean()
