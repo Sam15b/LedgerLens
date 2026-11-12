@@ -18,11 +18,14 @@ dependencies = [
     # File loading on every upload: PDF page counts / text layer, image inspection.
     "pymupdf>=1.24",
     "pillow>=10.0",
+    # Scan clean-up before OCR (deskew, denoise, binarize).
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "pytesseract>=0.3.10",  # needs the tesseract binary (see ingestion/ocr/tesseract.py)
 ]
 
 [project.optional-dependencies]
 ingestion = [
-    "pytesseract",
     "sentence-transformers",
     "pinecone-text",
 ]
@@ -80,7 +83,7 @@ packages = ["src/ledgerlens"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]  # "." so tests can import eval/ and ml/
 # Integration tests need `docker compose up` and are excluded by default;
 # run them with `pytest -m integration` (or `make test-int`).
 addopts = "-ra -m 'not integration'"
@@ -110,6 +113,9 @@ extend-exclude = ["*.md"]  # keep code samples in docs as written
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["ledgerlens", "eval", "ml", "scripts"]
+
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"
@@ -122,6 +128,10 @@ untyped_calls_exclude = ["pymupdf"]
 # [[tool.mypy.overrides]]
 # module = ["pytesseract.*"]
 # ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pytesseract.*"]  # no type information
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra

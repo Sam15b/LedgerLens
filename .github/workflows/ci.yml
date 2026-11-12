@@ -19,6 +19,8 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: pyproject.toml
+      - name: Install Tesseract (OCR tests run against the real binary)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tesseract-ocr
       - name: Install
         run: pip install -e ".[dev,storage]"
       - name: Lint

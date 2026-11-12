@@ -202,7 +202,7 @@ class LoaderConfig(_Section):
 class PreprocessConfig(_Section):
     deskew: bool = True
     denoise: bool = True
-    binarize: bool = True
+    binarize: bool = False
 
 
 class OCRConfig(_Section):
