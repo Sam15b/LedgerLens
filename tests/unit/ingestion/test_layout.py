@@ -190,6 +190,27 @@ def test_a_single_multi_cell_line_is_not_a_table() -> None:
     assert find_tables(lines) == []
 
 
+def test_a_tall_heading_does_not_merge_the_two_lines_beside_it() -> None:
+    # A PO header: 13 pt buyer name over an address line, a 20 pt title on the right that
+    # overlaps both (word boxes taken from a rendered synthetic PO).
+    lines = group_lines(
+        [
+            word("Northwind", 55.5, 52.3, 119.8, 70.2),
+            word("Traders", 123.4, 52.3, 171.1, 70.2),
+            word("1", 55.5, 71.5, 60.8, 84.5),
+            word("Market", 63.4, 71.5, 92.5, 84.5),
+            word("Street", 95.1, 71.5, 120.4, 84.5),
+            word("PURCHASE", 349.5, 51.1, 461.7, 78.6),
+            word("ORDER", 467.3, 51.1, 539.5, 78.6),
+        ]
+    )
+
+    assert [line.text for line in lines] == [
+        "Northwind Traders  PURCHASE ORDER",
+        "1 Market Street",
+    ]
+
+
 def test_markdown_escapes_pipes() -> None:
     table = Table(rows=[["a|b", "c"], ["1", "2"]], bbox=BBox(0, 0, 1, 1))
 
