@@ -64,6 +64,9 @@ synthetic = [
     # Synthetic documents (ml/synthetic/render): HTML templates -> PDF via PyMuPDF's Story.
     # WeasyPrint renders them too when installed with its GTK/Pango libraries (Linux/WSL).
     "jinja2>=3.1",
+    # Classical scan degradations (ml/synthetic/diffusion/augment.py); Stable Diffusion
+    # img2img (diffusers) runs on a GPU from requirements-ml.txt, not here.
+    "albumentations>=1.4",
 ]
 eval = [
     "ragas",
@@ -143,6 +146,10 @@ ignore_missing_imports = true
 # CI's full mypy run has torch installed and checks these modules fully.
 module = ["ml.synthetic.gan.*"]
 disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = ["albumentations.*", "diffusers.*"]  # no inline types
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
