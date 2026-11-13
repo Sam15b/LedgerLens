@@ -324,11 +324,19 @@ def vendors_by_id(records: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str
 def select(
     records: Sequence[Mapping[str, Any]], doc_types: Sequence[str], limit: int | None
 ) -> list[Mapping[str, Any]]:
-    """Records of ``doc_types``, at most ``limit`` of each type, in file order."""
+    """Records of ``doc_types``, at most ``limit`` of each type.
+
+    A limited selection is spread evenly over the file (which is in date order, with
+    duplicate invoices appended last), so a sample covers the whole period and every
+    kind of anomaly rather than the first weeks only.
+    """
     chosen: list[Mapping[str, Any]] = []
     for kind in doc_types:
         of_kind = [r for r in records if r["record_type"] == kind]
-        chosen += of_kind[:limit] if limit is not None else of_kind
+        if limit is not None and limit < len(of_kind):
+            step = len(of_kind) / limit
+            of_kind = [of_kind[int(i * step)] for i in range(limit)]
+        chosen += of_kind
     return chosen
 
 

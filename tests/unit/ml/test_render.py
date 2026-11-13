@@ -230,3 +230,15 @@ def test_cli_renders_a_limited_set_with_manifest(
         "contract": 2,
     }
     assert all((tmp_path / "out" / m["pdf"]).is_file() and m["pages"] == [] for m in manifest)
+
+
+def test_a_limited_selection_spreads_over_the_whole_file(records: list[Record]) -> None:
+    invoices = of_type(records, "invoice")
+
+    chosen = rd.select(records, ["invoice"], 40)
+
+    assert len(chosen) == 40 and len({r["id"] for r in chosen}) == 40
+    assert chosen[0] is invoices[0]
+    assert chosen[-1]["id"] in {r["id"] for r in invoices[-len(invoices) // 40 :]}
+    assert any(r["anomalies"] == ["exact_duplicate"] for r in invoices[-20:])
+    assert rd.select(records, ["contract"], None) == of_type(records, "contract")
