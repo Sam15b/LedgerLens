@@ -197,7 +197,8 @@ def first_line_vendor(lines: Sequence[str]) -> str | None:
     """The first line that is not a title, cut after its legal suffix or before a comma.
 
     Wide gaps inside the name (OCR often leaves them) are closed up; the name stops at the
-    first gap-separated part with a digit or a colon ("Tel: ...", "GST No ...").
+    first gap-separated part with a digit or a colon ("Tel: ...", "GST No ...") or that is
+    the document's title (a "PURCHASE ORDER" heading printed beside the buyer's name).
     """
     index = _vendor_line(lines)
     if index is None:
@@ -207,7 +208,7 @@ def first_line_vendor(lines: Sequence[str]) -> str | None:
     name = legal["name"] if legal else line.split(",")[0]
     parts: list[str] = []
     for part in re.split(r"\s{2,}", name):
-        if parts and re.search(r"[\d:]", part):
+        if parts and (re.search(r"[\d:]", part) or _TITLE_WORDS.match(part)):
             break
         parts.append(part)
     return " ".join(parts).strip(" ,.-") or None

@@ -60,6 +60,11 @@ ml = [
     "tensorflow",
     "scikit-learn",
 ]
+synthetic = [
+    # Synthetic documents (ml/synthetic/render): HTML templates -> PDF via PyMuPDF's Story.
+    # WeasyPrint renders them too when installed with its GTK/Pango libraries (Linux/WSL).
+    "jinja2>=3.1",
+]
 eval = [
     "ragas",
     "langsmith",

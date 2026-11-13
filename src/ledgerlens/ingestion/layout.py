@@ -178,7 +178,7 @@ class PageContent(BaseModel):
 
 CELL_SEPARATOR = "  "
 # Thresholds are multiples of the text height, so they work for PDF points and OCR pixels.
-_SAME_LINE_OVERLAP = 0.5  # vertical overlap (of the shorter box) to share a line
+_SAME_LINE_OFFSET = 0.5  # centre offset (of the shorter height) still on the same line
 _CELL_GAP = 1.0  # horizontal gap that starts a new cell
 _BLOCK_GAP = 0.5  # vertical gap that starts a new block
 _COLUMN_TOLERANCE = 0.75  # how far cell edges may drift and still be one column
@@ -191,23 +191,35 @@ def _median(values: Sequence[float]) -> float:
 
 
 def group_lines(words: Sequence[Word]) -> list[Line]:
-    """Group words into lines by vertical overlap, top to bottom, each left to right.
+    """Group words into lines, top to bottom, each left to right.
+
+    A word joins the row whose centre line (the mean of its words' vertical centres) is
+    within half a text height of the word's own centre -- for words of equal height, the
+    same as "boxes overlap by at least half". Rows are compared by centre, not by the
+    union of their boxes: a tall heading beside two lines of small text (a 20 pt
+    "PURCHASE ORDER" next to a name and an address) would otherwise grow one row's box
+    over both lines and merge them, interleaving their words.
 
     Uses geometry only (not PDF line numbers), so OCR words group the same way.
     """
     rows: list[list[Word]] = []
-    spans: list[tuple[float, float]] = []
+    centres: list[float] = []  # mean vertical centre of each row's words
+    heights: list[float] = []  # mean height of each row's words
     for word in sorted(words, key=lambda w: (w.bbox.center_y, w.bbox.x0)):
-        y0, y1 = word.bbox.y0, word.bbox.y1
-        for i, (top, bottom) in enumerate(spans):
-            overlap = min(y1, bottom) - max(y0, top)
-            if overlap >= _SAME_LINE_OVERLAP * min(y1 - y0, bottom - top):
-                rows[i].append(word)
-                spans[i] = (min(top, y0), max(bottom, y1))
-                break
-        else:
+        best, best_offset = None, float("inf")
+        for i, (centre, height) in enumerate(zip(centres, heights, strict=True)):
+            offset = abs(word.bbox.center_y - centre)
+            if offset <= _SAME_LINE_OFFSET * min(word.bbox.height, height) and offset < best_offset:
+                best, best_offset = i, offset
+        if best is None:
             rows.append([word])
-            spans.append((y0, y1))
+            centres.append(word.bbox.center_y)
+            heights.append(word.bbox.height)
+            continue
+        rows[best].append(word)
+        n = len(rows[best])
+        centres[best] += (word.bbox.center_y - centres[best]) / n
+        heights[best] += (word.bbox.height - heights[best]) / n
     lines = [_make_line(sorted(row, key=lambda w: w.bbox.x0)) for row in rows]
     return sorted(lines, key=lambda line: (line.bbox.y0, line.bbox.x0))
 
@@ -302,10 +314,16 @@ def _close(run: list[Line], columns: list[_Column], tables: list[Table]) -> None
 
 # --------------------------------------------------------------------------- text layer
 
+# PyMuPDF keeps typographic ligatures by default, so "files" comes out as "ﬁles" when
+# the font set it with an fi ligature. Label patterns, amounts and vendor matching all
+# compare plain letters, so ligatures are expanded on the way out.
+_TEXT_FLAGS = pymupdf.TEXTFLAGS_TEXT & ~pymupdf.TEXT_PRESERVE_LIGATURES
+_WORD_FLAGS = pymupdf.TEXTFLAGS_WORDS & ~pymupdf.TEXT_PRESERVE_LIGATURES
+
 
 def text_layer_chars(page: pymupdf.Page) -> int:
     """Non-whitespace characters in the page's text layer."""
-    text: str = page.get_text("text")
+    text: str = page.get_text("text", flags=_TEXT_FLAGS)
     return sum(not ch.isspace() for ch in text)
 
 
@@ -333,9 +351,11 @@ def extract_words(page: pymupdf.Page) -> list[Word]:
     """Words of the page's text layer with their boxes, in the order the PDF wrote them.
 
     PyMuPDF returns ``(x0, y0, x1, y1, text, block, line, word)`` tuples; sorting by
-    ``(block, line, word)`` keeps the PDF's own order.
+    ``(block, line, word)`` keeps the PDF's own order. Ligatures are expanded.
     """
-    raw: list[tuple[float, float, float, float, str, int, int, int]] = page.get_text("words")
+    raw: list[tuple[float, float, float, float, str, int, int, int]] = page.get_text(
+        "words", flags=_WORD_FLAGS
+    )
     raw.sort(key=lambda w: (w[5], w[6], w[7]))
     return [
         Word(text=text, bbox=BBox(x0, y0, x1, y1))

@@ -215,4 +215,6 @@ def test_vendor_heuristics() -> None:
     assert first_line_vendor(["TAX INVOICE", "Globex  Tel: 555-0100"]) == "Globex"
     assert first_line_vendor(["Northwind Traders, 80 Market Street"]) == "Northwind Traders"
     assert first_line_vendor(["Supplier: Acme Ltd"]) is None  # labelled: someone else's name
+    # A title printed beside the name on the same line is not part of it.
+    assert first_line_vendor(["Northwind Traders  PURCHASE ORDER"]) == "Northwind Traders"
     assert receipt_address(["SHOP", "Order: 12"]) is None

@@ -1,0 +1,39 @@
+/* Shared styles for the synthetic document templates.
+   Kept to the CSS subset both renderers support (WeasyPrint and PyMuPDF's Story):
+   no flexbox/grid, layout with tables. */
+body { font-family: sans-serif; font-size: 9.5pt; color: #222; }
+h1 { font-size: 20pt; margin: 0 0 6pt 0; }
+h2 { font-size: 13pt; margin: 0 0 4pt 0; }
+p { margin: 0 0 6pt 0; }
+table { width: 100%; border-collapse: collapse; margin: 0 0 8pt 0; }
+td, th { padding: 3pt 4pt; vertical-align: top; }
+th { text-align: left; }
+.right { text-align: right; }
+.center { text-align: center; }
+.muted { color: #666; font-size: 8pt; }
+.half { width: 50%; }
+.lines th { background-color: #e4e8ef; }
+.lines td { border-bottom: 1px solid #ccc; }
+.num { text-align: right; }
+
+/* invoice_classic */
+.classic h1 { color: #1f3a5f; }
+.classic .totals td { text-align: right; }
+
+/* invoice_modern */
+.modern .brand { color: #ffffff; background-color: #2d6a4f; padding: 8pt; }
+.modern h1 { color: #2d6a4f; font-size: 16pt; }
+.modern .meta th { background-color: #d8f3dc; font-size: 8pt; }
+.modern .due td { background-color: #2d6a4f; color: #ffffff; font-weight: bold; }
+
+/* invoice_compact: a till-style bill in monospace */
+.compact { font-family: monospace; font-size: 9pt; }
+.compact h2 { font-size: 11pt; }
+.compact .rule { color: #999; }
+
+/* purchase order, payment advice, contract */
+.po h1 { color: #5a189a; }
+.advice h1 { color: #9d0208; font-size: 16pt; }
+.contract { font-family: serif; font-size: 10.5pt; }
+.contract h1 { font-size: 15pt; text-align: center; }
+.contract h2 { font-size: 11pt; margin-top: 8pt; }

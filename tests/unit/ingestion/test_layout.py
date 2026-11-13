@@ -57,6 +57,31 @@ def test_digital_fixtures_have_a_text_layer_on_every_page(name: str) -> None:
         assert pages_needing_ocr(doc) == []
 
 
+def ligature_pdf() -> pymupdf.Document:
+    """A digital PDF whose font sets "fi" and "ffi" as ligatures (PyMuPDF's Story does)."""
+    rect = pymupdf.paper_rect("a5")
+    story = pymupdf.Story("<p>Archive files for the office: 5 boxes</p>")
+    buffer = io.BytesIO()
+    writer = pymupdf.DocumentWriter(buffer)
+    device = writer.begin_page(rect)
+    story.place(rect + (20, 20, -20, -20))
+    story.draw(device)
+    writer.end_page()
+    writer.close()
+    return pymupdf.open(stream=buffer.getvalue(), filetype="pdf")
+
+
+def test_text_layer_expands_ligatures() -> None:
+    page = ligature_pdf()[0]
+    assert "ﬁ" in page.get_text()  # PyMuPDF's default keeps the ligature
+
+    words = [w.text for w in extract_words(page)]
+
+    assert "files" in words and "office:" in words
+    assert not any(ch in w for w in words for ch in "ﬀﬁﬂﬃﬄ")
+    assert "Archive files" in read_text_page(page).text
+
+
 def test_scanned_pdf_has_no_text_layer() -> None:
     with pymupdf.open(stream=scanned_pdf(), filetype="pdf") as doc:
         assert text_layer_chars(doc[0]) == 0
@@ -163,6 +188,27 @@ def test_a_single_multi_cell_line_is_not_a_table() -> None:
     lines = group_lines([word("Total", 10, 0, 40, 10), word("9.50", 200, 0, 230, 10)])
 
     assert find_tables(lines) == []
+
+
+def test_a_tall_heading_does_not_merge_the_two_lines_beside_it() -> None:
+    # A PO header: 13 pt buyer name over an address line, a 20 pt title on the right that
+    # overlaps both (word boxes taken from a rendered synthetic PO).
+    lines = group_lines(
+        [
+            word("Northwind", 55.5, 52.3, 119.8, 70.2),
+            word("Traders", 123.4, 52.3, 171.1, 70.2),
+            word("1", 55.5, 71.5, 60.8, 84.5),
+            word("Market", 63.4, 71.5, 92.5, 84.5),
+            word("Street", 95.1, 71.5, 120.4, 84.5),
+            word("PURCHASE", 349.5, 51.1, 461.7, 78.6),
+            word("ORDER", 467.3, 51.1, 539.5, 78.6),
+        ]
+    )
+
+    assert [line.text for line in lines] == [
+        "Northwind Traders  PURCHASE ORDER",
+        "1 Market Street",
+    ]
 
 
 def test_markdown_escapes_pipes() -> None:

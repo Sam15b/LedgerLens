@@ -1,0 +1,28 @@
+{#- Remittance advice sent by the payer with a payment. -#}
+<div class="advice">
+<h1>REMITTANCE ADVICE</h1>
+<table>
+  <tr>
+    <td class="half">
+      From: {{ doc.payer_name }}<br/>
+      {% for line in customer_address %}{{ line }}<br/>{% endfor %}
+    </td>
+    <td class="half right">
+      Payment Reference: {{ doc.payment_reference }}<br/>
+      Payment Date: {{ doc.paid_at | date("long") }}<br/>
+      Method: {{ doc.method | method }}
+    </td>
+  </tr>
+</table>
+<p>To: {{ doc.vendor_name }}<br/>
+{% for line in vendor_address %}{{ line }}<br/>{% endfor %}</p>
+<p>We have today made the payment below. Please allocate it as shown.</p>
+<table class="lines">
+  <tr><th>Your invoice</th><th class="num">Amount paid ({{ doc.currency }})</th></tr>
+  {% for allocation in doc.allocations %}
+  <tr><td>{{ allocation.invoice_number }}</td><td class="num">{{ allocation.amount | amount(doc.currency) }}</td></tr>
+  {% endfor %}
+</table>
+<p class="right"><b>Total Paid: {{ doc.currency }} {{ doc.amount | amount(doc.currency) }}</b></p>
+<p class="muted">Queries: accounts.payable@northwind.example</p>
+</div>
