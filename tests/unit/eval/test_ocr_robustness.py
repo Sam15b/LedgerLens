@@ -201,3 +201,27 @@ def test_cli_writes_report_and_json(
     rows = json.loads((tmp_path / "r.json").read_text("utf-8"))
     assert [r["strength"] for r in rows] == [0.0, 0.5, 1.0]
     capsys.readouterr()
+
+
+ROWS = [
+    {"engine": "tesseract", "method": "clean", "strength": 0.0, "cer": 0.02, "f1": 0.8},
+    {"engine": "tesseract", "method": "classical", "strength": 1.0, "cer": 0.45, "f1": 0.35},
+    {"engine": "tesseract", "method": "classical", "strength": 0.5, "cer": 0.14, "f1": 0.73},
+    {"engine": "tesseract", "method": "sd_img2img", "strength": 0.2, "cer": 0.05, "f1": 0.78},
+]
+
+
+def test_curves_start_from_the_clean_score_and_sort_by_strength() -> None:
+    lines = rob.curves(ROWS)
+
+    assert set(lines) == {("tesseract", "classical"), ("tesseract", "sd_img2img")}
+    assert [p["strength"] for p in lines[("tesseract", "classical")]] == [0.0, 0.5, 1.0]
+    assert lines[("tesseract", "sd_img2img")][0]["method"] == "clean"
+
+
+def test_plot_writes_a_png(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+
+    path = rob.plot_curves(ROWS, tmp_path / "curve.png", title="t")
+
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

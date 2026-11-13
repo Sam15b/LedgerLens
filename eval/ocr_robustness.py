@@ -282,6 +282,49 @@ def summary_json(runs: Sequence[EngineRun]) -> list[dict[str, Any]]:
     ]
 
 
+def curves(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], list[Mapping[str, Any]]]:
+    """Per ``(engine, method)``: its points by strength, starting from the engine's clean
+    score at strength 0 (every degradation curve starts from the same clean page)."""
+    clean = {r["engine"]: r for r in rows if r["method"] == "clean"}
+    out: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if row["method"] == "clean":
+            continue
+        out.setdefault((row["engine"], row["method"]), []).append(row)
+    for (engine, _), points in out.items():
+        points.sort(key=lambda r: float(r["strength"]))
+        if engine in clean:
+            points.insert(0, clean[engine])
+    return out
+
+
+def plot_curves(rows: Sequence[Mapping[str, Any]], path: Path, *, title: str = "") -> Path:
+    """Strength -> corpus CER (left) and -> extraction F1 (right), one line per engine and
+    degradation method. Needs ``matplotlib`` (the ``eval`` extra)."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # files only, no display
+    import matplotlib.pyplot as plt
+
+    fig, (ax_cer, ax_f1) = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+    for (engine, method), points in sorted(curves(rows).items()):
+        x = [float(p["strength"]) for p in points]
+        label = f"{engine} · {method}"
+        ax_cer.plot(x, [float(p["cer"]) for p in points], marker="o", label=label)
+        ax_f1.plot(x, [float(p["f1"]) for p in points], marker="o", label=label)
+    ax_cer.set(xlabel="degradation strength (0 = clean)", ylabel="corpus CER", ylim=(0, None))
+    ax_f1.set(xlabel="degradation strength (0 = clean)", ylabel="extraction F1", ylim=(0, 1))
+    for ax in (ax_cer, ax_f1):
+        ax.grid(alpha=0.3)
+    ax_cer.legend(fontsize=8)
+    if title:
+        fig.suptitle(title)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     from ml.synthetic.build import read_records
 
@@ -294,6 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--json", type=Path, help="also write the per-condition numbers")
+    parser.add_argument("--plot", type=Path, help="write the strength -> CER/F1 curve (PNG)")
     args = parser.parse_args(argv)
 
     items = load_items(args.variants, limit=args.limit, kept_only=args.kept_only)
@@ -316,6 +360,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(summary_json(runs), indent=1) + "\n", encoding="utf-8")
+    if args.plot:
+        plot_curves(summary_json(runs), args.plot, title="OCR robustness: strength -> CER / F1")
     return 0
 
 
