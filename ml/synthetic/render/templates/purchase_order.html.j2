@@ -1,0 +1,41 @@
+{#- Purchase order from the buyer (Northwind Traders) to a supplier. -#}
+<div class="po">
+<table>
+  <tr>
+    <td class="half"><h2>{{ doc.buyer_name }}</h2>{% for line in customer_address %}{{ line }}<br/>{% endfor %}</td>
+    <td class="half right"><h1>PURCHASE ORDER</h1></td>
+  </tr>
+</table>
+<table>
+  <tr>
+    <td class="half">
+      <b>Supplier:</b> {{ doc.vendor_name }}<br/>
+      {% for line in vendor_address %}{{ line }}<br/>{% endfor %}
+      {% if doc.vendor_tax_id %}Tax ID: {{ doc.vendor_tax_id }}{% endif %}
+    </td>
+    <td class="half right">
+      PO Number: {{ doc.po_number }}<br/>
+      Order Date: {{ doc.order_date | date("long") }}<br/>
+      {% if doc.delivery_date %}Deliver By: {{ doc.delivery_date | date("long") }}<br/>{% endif %}
+      {% if doc.contract_number %}Under contract: {{ doc.contract_number }}{% endif %}
+    </td>
+  </tr>
+</table>
+<table class="lines">
+  <tr><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr>
+  {% for line in doc.line_items %}
+  <tr>
+    <td>{{ line.description }}</td>
+    <td class="num">{{ line.quantity | qty }}</td>
+    <td class="num">{{ line.unit_price | amount(doc.currency) }}</td>
+    <td class="num">{{ line.amount | amount(doc.currency) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<table>
+  {% if doc.subtotal is not none %}<tr><td class="right">Subtotal: {{ doc.currency }} {{ doc.subtotal | amount(doc.currency) }}</td></tr>{% endif %}
+  {% if doc.tax is not none %}<tr><td class="right">Tax ({{ tax_rate }}): {{ doc.tax | amount(doc.currency) }}</td></tr>{% endif %}
+  <tr><td class="right"><b>Order Total: {{ doc.currency }} {{ doc.total | amount(doc.currency) }}</b></td></tr>
+</table>
+<p class="muted">Please quote the PO number on every invoice. Goods are accepted subject to inspection.</p>
+</div>

@@ -1,0 +1,25 @@
+{#- Framework supply agreement with a rate card. -#}
+<div class="contract">
+<h1>{{ (doc.title or "Supply Agreement") | upper }}</h1>
+<p class="center">Contract No: {{ doc.contract_number }}</p>
+<p>This agreement is made between {{ doc.vendor_name }} (the Supplier) and {{ doc.customer_name }} (the Customer).</p>
+<h2>1. Term</h2>
+<p>This agreement runs from {{ doc.start_date | date("long") }}{% if doc.end_date %} to {{ doc.end_date | date("long") }}{% endif %}.</p>
+<h2>2. Prices</h2>
+<p>The Supplier will charge the following rates in {{ doc.currency }}, exclusive of tax, for the term of this agreement.</p>
+<table class="lines">
+  <tr><th>Item</th><th>Unit</th><th class="num">Rate ({{ doc.currency }})</th></tr>
+  {% for entry in doc.rate_card %}
+  <tr><td>{{ entry.item }}</td><td>{{ entry.unit or "" }}</td><td class="num">{{ entry.unit_price | amount(doc.currency) }}</td></tr>
+  {% endfor %}
+</table>
+<h2>3. Payment</h2>
+<p>{% if doc.payment_terms_days is not none %}The Customer will pay each undisputed invoice within {{ doc.payment_terms_days }} days of the invoice date.{% else %}Payment terms as agreed per order.{% endif %} Invoices must quote a valid purchase order number.</p>
+<h2>4. Signatures</h2>
+<table>
+  <tr>
+    <td class="half">For the Supplier<br/><br/>____________________<br/>{{ doc.vendor_name }}</td>
+    <td class="half">For the Customer<br/><br/>____________________<br/>{{ doc.customer_name }}</td>
+  </tr>
+</table>
+</div>
