@@ -24,19 +24,30 @@ Settings (``docs/layers/07-synthetic-data.md``):
   run, and resized back, so outputs line up with the clean page;
 * a fixed seed per variant (``torch.Generator``), so runs are reproducible;
 * the pipeline's safety checker stays on; a page it blanks out fails the validity filter.
+
+**Validity filter** (``filter``, for classical and SD variants alike): each variant is
+OCR'd and kept only if every *key field* printed on the page -- document number, PO
+reference, total -- can still be read exactly (case and spacing ignored). Exactly, not
+fuzzily: a diffusion model that turns one digit of a total into another has made the label
+wrong, and that is precisely the failure to catch. The character error rate against the
+clean PDF's text layer is recorded too, and ``--max-cer`` can drop variants above a cap.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import json
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from PIL import Image
 
+from eval.ocr_cer import cer
 from ml.synthetic.diffusion.augment import Variant, variant_name, write_manifest
+from ml.synthetic.render.render_documents import format_amount, pdf_text
 
 MODEL_ID = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 PROMPTS = (
@@ -180,6 +191,114 @@ def degrade_pages(
     return variants
 
 
+# --------------------------------------------------------------------------- validity filter
+
+
+def key_fields(record: Mapping[str, Any]) -> dict[str, str]:
+    """The values a degraded page must still show, as the templates print them."""
+    data = record["data"]
+    currency = str(data.get("currency", ""))
+    kind = record["record_type"]
+    fields: dict[str, str | None] = {}
+    if kind == "invoice":
+        fields = {
+            "invoice_number": data["invoice_number"],
+            "po_number": data.get("po_number"),
+            "total": format_amount(data["total"], currency),
+        }
+    elif kind == "purchase_order":
+        fields = {"po_number": data["po_number"], "total": format_amount(data["total"], currency)}
+    elif kind == "payment":
+        fields = {
+            "payment_reference": data["payment_reference"],
+            "amount": format_amount(data["amount"], currency),
+        }
+    elif kind == "contract":
+        fields = {"contract_number": data.get("contract_number")}
+    return {name: str(value) for name, value in fields.items() if value}
+
+
+_SPACE = re.compile(r"\s+")
+
+
+def _squash(text: str) -> str:
+    return _SPACE.sub("", text).casefold()
+
+
+def missing_fields(fields: Mapping[str, str], text: str) -> list[str]:
+    """Names of ``fields`` whose value does not appear in ``text`` (spacing/case ignored)."""
+    haystack = _squash(text)
+    return [name for name, value in fields.items() if _squash(value) not in haystack]
+
+
+@dataclass
+class Validity:
+    cer: float
+    missing: list[str] = field(default_factory=list)
+    kept: bool = True
+
+
+def check_variant(
+    image: Path,
+    *,
+    reference_text: str,
+    fields: Mapping[str, str],
+    ocr: Callable[[Path], str],
+    max_cer: float | None = None,
+) -> Validity:
+    """OCR ``image`` and decide whether it is still a valid example of its record."""
+    text = ocr(image)
+    missing = missing_fields(fields, text)
+    score = cer(reference_text, text)
+    kept = not missing and (max_cer is None or score <= max_cer)
+    return Validity(round(score, 4), missing, kept)
+
+
+def record_id_of(page: Path) -> str:
+    """``SINV-000001-p1.png`` -> ``SINV-000001``."""
+    return page.stem.rsplit("-p", 1)[0]
+
+
+def filter_variants(
+    variants: Sequence[Mapping[str, Any]],
+    records: Mapping[str, Mapping[str, Any]],
+    *,
+    root: Path,
+    ocr: Callable[[Path], str],
+    max_cer: float | None = None,
+) -> list[dict[str, Any]]:
+    """Each manifest entry with its validity (``cer``, ``missing``, ``kept``) added.
+
+    The reference text is the text layer of the PDF the clean page was rendered from
+    (``<root>/pdf/<doc type>/<record id>.pdf``).
+    """
+    references: dict[str, str] = {}
+    out = []
+    for variant in variants:
+        source = Path(variant["source"])
+        record_id = record_id_of(source)
+        if record_id not in references:
+            pdf = root / "pdf" / source.parent.name / f"{record_id}.pdf"
+            references[record_id] = pdf_text(pdf.read_bytes())
+        validity = check_variant(
+            Path(variant["image"]),
+            reference_text=references[record_id],
+            fields=key_fields(records[record_id]),
+            ocr=ocr,
+            max_cer=max_cer,
+        )
+        out.append({**variant, **asdict(validity), "record_id": record_id})
+    return out
+
+
+def tesseract_ocr() -> Callable[[Path], str]:
+    from eval.ocr_benchmark import ocr_text
+    from ledgerlens.ingestion.ocr import get_engine
+
+    engine = get_engine(name="tesseract")
+    return lambda path: ocr_text(engine, path)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Stable Diffusion img2img scan degradation")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -193,8 +312,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--steps", type=int, default=SDConfig.steps)
     run.add_argument("--device", default="cuda")
     run.add_argument("--fp32", action="store_true", help="full precision (CPU / old GPUs)")
+    check = commands.add_parser("filter", help="OCR variants and drop unreadable ones")
+    check.add_argument("manifest", type=Path, help="a degraded set's manifest.jsonl")
+    check.add_argument("--root", type=Path, default=Path("data/synthetic"))
+    check.add_argument("--records", type=Path, help="default: <root>/records.jsonl")
+    check.add_argument("--max-cer", type=float, help="also drop variants above this CER")
     args = parser.parse_args(argv)
 
+    if args.command == "filter":
+        return _filter(args)
     config = SDConfig(model_id=args.model, steps=args.steps, fp16=not args.fp32, device=args.device)
     sources = sorted(args.pages.glob("*.png"))[: args.limit]
     variants = degrade_pages(
@@ -213,3 +339,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _filter(args: argparse.Namespace) -> int:
+    from ml.synthetic.build import read_records
+
+    lines = args.manifest.read_text(encoding="utf-8").splitlines()
+    variants = [json.loads(line) for line in lines if line]
+    records = {r["id"]: r for r in read_records(args.records or args.root / "records.jsonl")}
+    checked = filter_variants(
+        variants, records, root=args.root, ocr=tesseract_ocr(), max_cer=args.max_cer
+    )
+    out = args.manifest.with_name("validity.jsonl")
+    out.write_text("".join(json.dumps(v) + "\n" for v in checked), encoding="utf-8")
+    kept = sum(v["kept"] for v in checked)
+    print(f"kept {kept} / {len(checked)} variants -> {out}")
+    return 0
