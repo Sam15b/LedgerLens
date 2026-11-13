@@ -19,6 +19,7 @@ datasets>=2.20
 
 # --- Synthetic data (PyTorch GAN + Stable Diffusion img2img) ---
 diffusers>=0.30
+jinja2>=3.1                    # document templates (rendered with PyMuPDF or WeasyPrint)
 albumentations>=1.4            # classical scan degradations
 
 # --- Anomaly detection (TensorFlow / Keras autoencoder) ---
