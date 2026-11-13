@@ -21,6 +21,18 @@ it matches its PO line for line, its prices match the contract, it adds up
 Identifiers: ``SINV-000001`` is the record id (unique, even for duplicate invoices);
 ``invoice_number`` is the vendor's own number (``INV-004213``, increasing per vendor with
 gaps, as a vendor billing other customers too would have); POs are ``PO-2025-00042``.
+
+**Payments** (:func:`make_payments`, run after anomaly injection so duplicates can be paid
+too) put every invoice in one state as of ``AS_OF``:
+
+=========  =================================================================
+paid       one payment of exactly the total, around the due date
+partial    one payment of 30-90 % of the total
+unpaid     no payment (most invoices not yet due as of ``AS_OF`` are here)
+overpaid   one payment of 101-110 % of the total
+=========  =================================================================
+
+Each payment advice is allocated to the invoice it settles (``PaymentAllocation``).
 """
 
 from __future__ import annotations
@@ -33,13 +45,26 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from ledgerlens.core.schemas import Contract, Invoice, LineItem, PurchaseOrder, RateCardEntry
+from ledgerlens.core.schemas import (
+    Contract,
+    Invoice,
+    LineItem,
+    Payment,
+    PaymentAllocation,
+    PurchaseOrder,
+    RateCardEntry,
+)
+from ledgerlens.core.schemas.payment import PaymentMethod
 from ml.synthetic.seed import BUYER, CATALOG, CENTS, FX, SEED, VAT, Vendor
 
 START = date(2025, 1, 6)  # first invoice date
 DAYS = 640  # invoice dates fall in [START, START + DAYS)
 CONTRACT_YEARS = 3
 MAX_QTY = 9999
+AS_OF = date(2026, 10, 31)  # payment state is "as of" this day
+PAYMENT_STATES = {"paid": 0.75, "partial": 0.10, "unpaid": 0.10, "overpaid": 0.05}
+METHODS: list[PaymentMethod] = ["bank_transfer", "card", "check"]
+NOT_YET_DUE_PAID = 0.15  # share of invoices due after AS_OF that are paid early
 
 
 def money(value: float | Decimal, currency: str) -> Decimal:
@@ -116,11 +141,32 @@ class LinkedInvoice:
 
 
 @dataclass
+class LinkedPayment:
+    payment: Payment
+    vendor_id: str | None
+    invoice_ids: list[str]
+
+    @property
+    def id(self) -> str:
+        return self.payment.payment_reference
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "record_type": "payment",
+            "id": self.id,
+            "vendor_id": self.vendor_id,
+            "invoice_ids": self.invoice_ids,
+            "data": self.payment.model_dump(mode="json"),
+        }
+
+
+@dataclass
 class Ledger:
     vendors: list[Vendor]
     contracts: dict[str, Contract]  # by vendor_id
     purchase_orders: list[LinkedPO] = field(default_factory=list)
     invoices: list[LinkedInvoice] = field(default_factory=list)
+    payments: list[LinkedPayment] = field(default_factory=list)
 
     def vendor(self, vendor_id: str) -> Vendor:
         return next(v for v in self.vendors if v.vendor_id == vendor_id)
@@ -144,6 +190,7 @@ class Ledger:
         ]
         out += [p.to_record() for p in self.purchase_orders]
         out += [i.to_record() for i in self.invoices]
+        out += [p.to_record() for p in self.payments]
         return out
 
 
@@ -297,3 +344,52 @@ def link_rows(
         ledger.purchase_orders.append(LinkedPO(po, vendor.vendor_id, number, [invoice_id]))
         ledger.invoices.append(LinkedInvoice(invoice_id, invoice, vendor.vendor_id, number))
     return ledger
+
+
+# --------------------------------------------------------------------------- payments
+
+
+def _payment_state(invoice: Invoice, rng: random.Random, as_of: date) -> str:
+    due = invoice.due_date or invoice.invoice_date
+    if due > as_of:
+        return "paid" if rng.random() < NOT_YET_DUE_PAID else "unpaid"
+    states = list(PAYMENT_STATES)
+    return rng.choices(states, weights=[PAYMENT_STATES[s] for s in states])[0]
+
+
+def make_payments(ledger: Ledger, *, seed: int = SEED, as_of: date = AS_OF) -> None:
+    """Pay (or not) every invoice in ``ledger`` and record the payment advices."""
+    rng = random.Random(seed + 3)
+    planned: list[tuple[date, LinkedInvoice, Decimal]] = []
+    for linked in ledger.invoices:
+        invoice = linked.invoice
+        state = _payment_state(invoice, rng, as_of)
+        linked.payment_status = state
+        if state == "unpaid":
+            continue
+        share = {"paid": 1.0, "partial": rng.uniform(0.3, 0.9), "overpaid": rng.uniform(1.01, 1.1)}
+        amount = money(invoice.total * Decimal(str(share[state])), invoice.currency)
+        if state == "partial":
+            amount = min(amount, invoice.total - CENTS.get(invoice.currency, Decimal("0.01")))
+        elif state == "overpaid":
+            amount = max(amount, invoice.total + CENTS.get(invoice.currency, Decimal("0.01")))
+        due = invoice.due_date or invoice.invoice_date
+        paid_at = business_day(due + timedelta(days=rng.randint(-10, 10)))
+        paid_at = min(max(paid_at, invoice.invoice_date), as_of)
+        planned.append((paid_at, linked, amount))
+
+    planned.sort(key=lambda p: (p[0], p[1].id))
+    ledger.payments = []
+    for i, (paid_at, linked, amount) in enumerate(planned, start=1):
+        invoice = linked.invoice
+        payment = Payment(
+            payment_reference=f"PAY-{paid_at.year}-{i:06d}",
+            payer_name=BUYER,
+            vendor_name=invoice.vendor_name,
+            paid_at=paid_at,
+            method=rng.choices(METHODS, weights=[90, 7, 3])[0],
+            currency=invoice.currency,
+            amount=amount,
+            allocations=[PaymentAllocation(invoice_number=invoice.invoice_number, amount=amount)],
+        )
+        ledger.payments.append(LinkedPayment(payment, linked.vendor_id, [linked.id]))
