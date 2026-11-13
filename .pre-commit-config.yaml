@@ -31,6 +31,7 @@ repos:
           - opencv-python-headless>=4.9
           - rapidfuzz>=3.9
           - jinja2>=3.1
+          - albumentations>=1.4
           - pytest>=8
           - types-PyYAML
 
