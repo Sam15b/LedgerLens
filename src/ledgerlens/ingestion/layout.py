@@ -302,10 +302,16 @@ def _close(run: list[Line], columns: list[_Column], tables: list[Table]) -> None
 
 # --------------------------------------------------------------------------- text layer
 
+# PyMuPDF keeps typographic ligatures by default, so "files" comes out as "ﬁles" when
+# the font set it with an fi ligature. Label patterns, amounts and vendor matching all
+# compare plain letters, so ligatures are expanded on the way out.
+_TEXT_FLAGS = pymupdf.TEXTFLAGS_TEXT & ~pymupdf.TEXT_PRESERVE_LIGATURES
+_WORD_FLAGS = pymupdf.TEXTFLAGS_WORDS & ~pymupdf.TEXT_PRESERVE_LIGATURES
+
 
 def text_layer_chars(page: pymupdf.Page) -> int:
     """Non-whitespace characters in the page's text layer."""
-    text: str = page.get_text("text")
+    text: str = page.get_text("text", flags=_TEXT_FLAGS)
     return sum(not ch.isspace() for ch in text)
 
 
@@ -333,9 +339,11 @@ def extract_words(page: pymupdf.Page) -> list[Word]:
     """Words of the page's text layer with their boxes, in the order the PDF wrote them.
 
     PyMuPDF returns ``(x0, y0, x1, y1, text, block, line, word)`` tuples; sorting by
-    ``(block, line, word)`` keeps the PDF's own order.
+    ``(block, line, word)`` keeps the PDF's own order. Ligatures are expanded.
     """
-    raw: list[tuple[float, float, float, float, str, int, int, int]] = page.get_text("words")
+    raw: list[tuple[float, float, float, float, str, int, int, int]] = page.get_text(
+        "words", flags=_WORD_FLAGS
+    )
     raw.sort(key=lambda w: (w[5], w[6], w[7]))
     return [
         Word(text=text, bbox=BBox(x0, y0, x1, y1))

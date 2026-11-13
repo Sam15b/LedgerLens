@@ -260,8 +260,10 @@ def page_images(pdf: bytes, *, dpi: int = 150) -> list[bytes]:
 
 
 def pdf_text(pdf: bytes) -> str:
+    """The text layer as ingestion reads it (ligatures such as "ﬁ" expanded to "fi")."""
+    flags = pymupdf.TEXTFLAGS_TEXT & ~pymupdf.TEXT_PRESERVE_LIGATURES
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
-        return "\n".join(str(page.get_text()) for page in doc)
+        return "\n".join(str(page.get_text("text", flags=flags)) for page in doc)
 
 
 # --------------------------------------------------------------------------- records -> files

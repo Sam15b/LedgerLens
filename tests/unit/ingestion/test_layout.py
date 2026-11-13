@@ -57,6 +57,31 @@ def test_digital_fixtures_have_a_text_layer_on_every_page(name: str) -> None:
         assert pages_needing_ocr(doc) == []
 
 
+def ligature_pdf() -> pymupdf.Document:
+    """A digital PDF whose font sets "fi" and "ffi" as ligatures (PyMuPDF's Story does)."""
+    rect = pymupdf.paper_rect("a5")
+    story = pymupdf.Story("<p>Archive files for the office: 5 boxes</p>")
+    buffer = io.BytesIO()
+    writer = pymupdf.DocumentWriter(buffer)
+    device = writer.begin_page(rect)
+    story.place(rect + (20, 20, -20, -20))
+    story.draw(device)
+    writer.end_page()
+    writer.close()
+    return pymupdf.open(stream=buffer.getvalue(), filetype="pdf")
+
+
+def test_text_layer_expands_ligatures() -> None:
+    page = ligature_pdf()[0]
+    assert "ﬁ" in page.get_text()  # PyMuPDF's default keeps the ligature
+
+    words = [w.text for w in extract_words(page)]
+
+    assert "files" in words and "office:" in words
+    assert not any(ch in w for w in words for ch in "ﬀﬁﬂﬃﬄ")
+    assert "Archive files" in read_text_page(page).text
+
+
 def test_scanned_pdf_has_no_text_layer() -> None:
     with pymupdf.open(stream=scanned_pdf(), filetype="pdf") as doc:
         assert text_layer_chars(doc[0]) == 0
