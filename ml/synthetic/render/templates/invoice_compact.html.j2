@@ -1,0 +1,18 @@
+{#- Layout 3: a till-style bill in monospace, ISO dates, upper-case labels. -#}
+<div class="compact">
+<h2>{{ doc.vendor_name | upper }}</h2>
+<p>{% for line in vendor_address %}{{ line }}<br/>{% endfor %}
+{% if doc.vendor_tax_id %}TAX REG {{ doc.vendor_tax_id }}{% endif %}</p>
+<p class="rule">----------------------------------------------</p>
+<p>BILL NO. {{ doc.invoice_number }}<br/>
+DATE {{ doc.invoice_date | date("iso") }}<br/>
+{% if doc.po_number %}ORDER REF {{ doc.po_number }}<br/>{% endif %}
+{% if doc.due_date %}PAY BY {{ doc.due_date | date("iso") }}{% if terms_days is not none %} (NET {{ terms_days }}){% endif %}{% endif %}</p>
+<p class="rule">----------------------------------------------</p>
+<p>{% for line in doc.line_items %}{{ line.quantity | qty }} x {{ line.description }} @ {{ line.unit_price | amount(doc.currency) }} = {{ line.amount | amount(doc.currency) }}<br/>{% else %}AS AGREED<br/>{% endfor %}</p>
+<p class="rule">----------------------------------------------</p>
+<p>{% if doc.subtotal is not none %}SUB-TOTAL {{ doc.subtotal | amount(doc.currency) }}<br/>{% endif %}
+{% if doc.tax is not none %}TAX {{ tax_rate }} {{ doc.tax | amount(doc.currency) }}<br/>{% endif %}
+<b>AMOUNT PAYABLE {{ doc.currency }} {{ doc.total | amount(doc.currency) }}</b></p>
+<p>CUSTOMER {{ doc.customer_name | upper }}</p>
+</div>

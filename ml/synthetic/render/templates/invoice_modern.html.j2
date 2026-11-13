@@ -1,0 +1,40 @@
+{#- Layout 2: brand banner, then a header-row grid: labels and values sit in different
+    cells, so they come out of the text layer on different lines. -#}
+<div class="modern">
+<p class="brand"><b>{{ doc.vendor_name }}</b><br/>
+{{ vendor_address | join(", ") }}{% if doc.vendor_tax_id %} · Tax ID {{ doc.vendor_tax_id }}{% endif %}</p>
+<h1>Tax Invoice</h1>
+<table class="meta">
+  <tr><th>Invoice #</th><th>Issued</th><th>Payment due</th><th>Your order</th></tr>
+  <tr>
+    <td>{{ doc.invoice_number }}</td>
+    <td>{{ doc.invoice_date | date("us") }}</td>
+    <td>{% if doc.due_date %}{{ doc.due_date | date("us") }}{% else %}On receipt{% endif %}</td>
+    <td>{{ doc.po_number or "—" }}</td>
+  </tr>
+</table>
+<p>Billed to<br/><b>{{ doc.customer_name }}</b><br/>{{ customer_address | join(", ") }}</p>
+
+{% if doc.line_items %}
+<table class="lines">
+  <tr><th>Item</th><th class="num">Units</th><th class="num">Rate</th><th class="num">Line total</th></tr>
+  {% for line in doc.line_items %}
+  <tr>
+    <td>{{ line.description }}</td>
+    <td class="num">{{ line.quantity | qty }}</td>
+    <td class="num">{{ line.unit_price | amount(doc.currency) }}</td>
+    <td class="num">{{ line.amount | amount(doc.currency) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>Services rendered — see agreement.</p>
+{% endif %}
+
+<table>
+  {% if doc.subtotal is not none %}<tr><td class="right">Net amount</td><td class="num">{{ doc.subtotal | amount(doc.currency) }}</td></tr>{% endif %}
+  {% if doc.tax is not none %}<tr><td class="right">Tax {{ tax_rate }}</td><td class="num">{{ doc.tax | amount(doc.currency) }}</td></tr>{% endif %}
+  <tr class="due"><td class="right">Amount due ({{ doc.currency }})</td><td class="num">{{ doc.total | amount(doc.currency) }}</td></tr>
+</table>
+<p class="muted">Thank you for your business.</p>
+</div>
