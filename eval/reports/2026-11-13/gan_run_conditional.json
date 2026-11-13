@@ -1,0 +1,747 @@
+{
+ "run_id": "20261113-131707-seed1",
+ "started_at": "2026-11-13T13:17:09.484382+00:00",
+ "seconds": 559.25,
+ "config": {
+  "steps": 5000,
+  "batch_size": 256,
+  "lr": 0.0002,
+  "betas": [
+   0.5,
+   0.9
+  ],
+  "n_critic": 5,
+  "gp_weight": 10.0,
+  "noise_dim": 128,
+  "hidden": [
+   256,
+   256
+  ],
+  "dropout": 0.2,
+  "seed": 1,
+  "log_every": 50,
+  "checkpoint_every": 1000,
+  "device": "cpu",
+  "condition": "vendor_category"
+ },
+ "data": {
+  "rows": 1462,
+  "feature_dim": 24,
+  "condition_dim": 10,
+  "seed_csv": "data\\synthetic\\seed\\seed_invoices.csv",
+  "sha256": "e69aa824673e4457",
+  "by_source": {
+   "seed_po": 500,
+   "cord": 962
+  }
+ },
+ "history": [
+  {
+   "step": 1,
+   "critic_loss": 6.6298370361328125,
+   "generator_loss": -0.06685248762369156,
+   "wasserstein": -0.009547237306833267,
+   "gradient_penalty": 0.662028968334198
+  },
+  {
+   "step": 50,
+   "critic_loss": -0.6999421715736389,
+   "generator_loss": -0.26074567437171936,
+   "wasserstein": 0.8053523302078247,
+   "gradient_penalty": 0.010541016235947609
+  },
+  {
+   "step": 100,
+   "critic_loss": -0.6948992609977722,
+   "generator_loss": 0.5215310454368591,
+   "wasserstein": 0.8670892715454102,
+   "gradient_penalty": 0.017218999564647675
+  },
+  {
+   "step": 150,
+   "critic_loss": -0.5167543888092041,
+   "generator_loss": 0.45096176862716675,
+   "wasserstein": 0.6435362100601196,
+   "gradient_penalty": 0.012678185477852821
+  },
+  {
+   "step": 200,
+   "critic_loss": -0.47864681482315063,
+   "generator_loss": 0.5398136377334595,
+   "wasserstein": 0.5819864273071289,
+   "gradient_penalty": 0.010333962738513947
+  },
+  {
+   "step": 250,
+   "critic_loss": -0.5381062030792236,
+   "generator_loss": 0.3514876961708069,
+   "wasserstein": 0.6293565034866333,
+   "gradient_penalty": 0.009125029668211937
+  },
+  {
+   "step": 300,
+   "critic_loss": -0.4580228626728058,
+   "generator_loss": 0.158638596534729,
+   "wasserstein": 0.5389876961708069,
+   "gradient_penalty": 0.008096483536064625
+  },
+  {
+   "step": 350,
+   "critic_loss": -0.3160596191883087,
+   "generator_loss": -0.030396759510040283,
+   "wasserstein": 0.40618160367012024,
+   "gradient_penalty": 0.009012198075652122
+  },
+  {
+   "step": 400,
+   "critic_loss": -0.2445523589849472,
+   "generator_loss": 0.020600082352757454,
+   "wasserstein": 0.3373018503189087,
+   "gradient_penalty": 0.009274949319660664
+  },
+  {
+   "step": 450,
+   "critic_loss": -0.28061091899871826,
+   "generator_loss": 0.029349640011787415,
+   "wasserstein": 0.36537158489227295,
+   "gradient_penalty": 0.008476067334413528
+  },
+  {
+   "step": 500,
+   "critic_loss": -0.16560842096805573,
+   "generator_loss": 0.1136292889714241,
+   "wasserstein": 0.26387354731559753,
+   "gradient_penalty": 0.00982651300728321
+  },
+  {
+   "step": 550,
+   "critic_loss": -0.08022456616163254,
+   "generator_loss": 0.020550351589918137,
+   "wasserstein": 0.16925431787967682,
+   "gradient_penalty": 0.008902975358068943
+  },
+  {
+   "step": 600,
+   "critic_loss": -0.16617825627326965,
+   "generator_loss": 0.05870956927537918,
+   "wasserstein": 0.2534046769142151,
+   "gradient_penalty": 0.008722642436623573
+  },
+  {
+   "step": 650,
+   "critic_loss": -0.24083822965621948,
+   "generator_loss": 0.19093047082424164,
+   "wasserstein": 0.3178718686103821,
+   "gradient_penalty": 0.007703364361077547
+  },
+  {
+   "step": 700,
+   "critic_loss": -0.09326324611902237,
+   "generator_loss": 0.1406055986881256,
+   "wasserstein": 0.16994008421897888,
+   "gradient_penalty": 0.007667683530598879
+  },
+  {
+   "step": 750,
+   "critic_loss": -0.25542449951171875,
+   "generator_loss": 0.20219428837299347,
+   "wasserstein": 0.34545212984085083,
+   "gradient_penalty": 0.009002761915326118
+  },
+  {
+   "step": 800,
+   "critic_loss": -0.15065467357635498,
+   "generator_loss": -0.0013402856420725584,
+   "wasserstein": 0.22100654244422913,
+   "gradient_penalty": 0.007035186514258385
+  },
+  {
+   "step": 850,
+   "critic_loss": -0.24680188298225403,
+   "generator_loss": 0.2215465009212494,
+   "wasserstein": 0.33871299028396606,
+   "gradient_penalty": 0.009191110730171204
+  },
+  {
+   "step": 900,
+   "critic_loss": -0.10162442922592163,
+   "generator_loss": 0.1312890350818634,
+   "wasserstein": 0.1970883309841156,
+   "gradient_penalty": 0.009546389803290367
+  },
+  {
+   "step": 950,
+   "critic_loss": -0.30136749148368835,
+   "generator_loss": 0.2720385193824768,
+   "wasserstein": 0.3742188513278961,
+   "gradient_penalty": 0.007285136263817549
+  },
+  {
+   "step": 1000,
+   "critic_loss": -0.0732000544667244,
+   "generator_loss": 0.15326029062271118,
+   "wasserstein": 0.1621694564819336,
+   "gradient_penalty": 0.008896940387785435
+  },
+  {
+   "step": 1050,
+   "critic_loss": -0.1941288709640503,
+   "generator_loss": 0.19786587357521057,
+   "wasserstein": 0.27289581298828125,
+   "gradient_penalty": 0.00787669513374567
+  },
+  {
+   "step": 1100,
+   "critic_loss": -0.1702808290719986,
+   "generator_loss": 0.2569819688796997,
+   "wasserstein": 0.25204533338546753,
+   "gradient_penalty": 0.008176450617611408
+  },
+  {
+   "step": 1150,
+   "critic_loss": -0.1254427582025528,
+   "generator_loss": 0.22038809955120087,
+   "wasserstein": 0.1963263899087906,
+   "gradient_penalty": 0.007088363170623779
+  },
+  {
+   "step": 1200,
+   "critic_loss": -0.2412928342819214,
+   "generator_loss": 0.35350358486175537,
+   "wasserstein": 0.31738919019699097,
+   "gradient_penalty": 0.007609636057168245
+  },
+  {
+   "step": 1250,
+   "critic_loss": -0.0881885513663292,
+   "generator_loss": 0.22238776087760925,
+   "wasserstein": 0.1703590303659439,
+   "gradient_penalty": 0.008217047899961472
+  },
+  {
+   "step": 1300,
+   "critic_loss": -0.12365272641181946,
+   "generator_loss": 0.3086255192756653,
+   "wasserstein": 0.19805195927619934,
+   "gradient_penalty": 0.007439923472702503
+  },
+  {
+   "step": 1350,
+   "critic_loss": -0.24738110601902008,
+   "generator_loss": 0.41318246722221375,
+   "wasserstein": 0.3310862183570862,
+   "gradient_penalty": 0.00837051123380661
+  },
+  {
+   "step": 1400,
+   "critic_loss": -0.08721531927585602,
+   "generator_loss": 0.25647205114364624,
+   "wasserstein": 0.1701594889163971,
+   "gradient_penalty": 0.008294416591525078
+  },
+  {
+   "step": 1450,
+   "critic_loss": -0.22327005863189697,
+   "generator_loss": 0.4295172393321991,
+   "wasserstein": 0.3005490005016327,
+   "gradient_penalty": 0.0077278935350477695
+  },
+  {
+   "step": 1500,
+   "critic_loss": -0.1552254557609558,
+   "generator_loss": 0.34261953830718994,
+   "wasserstein": 0.2313448190689087,
+   "gradient_penalty": 0.007611936889588833
+  },
+  {
+   "step": 1550,
+   "critic_loss": -0.0913650244474411,
+   "generator_loss": 0.3738779127597809,
+   "wasserstein": 0.16347528994083405,
+   "gradient_penalty": 0.007211026735603809
+  },
+  {
+   "step": 1600,
+   "critic_loss": -0.13911974430084229,
+   "generator_loss": 0.4661870002746582,
+   "wasserstein": 0.23142103850841522,
+   "gradient_penalty": 0.009230128489434719
+  },
+  {
+   "step": 1650,
+   "critic_loss": -0.1943548172712326,
+   "generator_loss": 0.404974102973938,
+   "wasserstein": 0.24787485599517822,
+   "gradient_penalty": 0.005352003965526819
+  },
+  {
+   "step": 1700,
+   "critic_loss": -0.09210635721683502,
+   "generator_loss": 0.38380783796310425,
+   "wasserstein": 0.15955954790115356,
+   "gradient_penalty": 0.006745319347828627
+  },
+  {
+   "step": 1750,
+   "critic_loss": -0.13786490261554718,
+   "generator_loss": 0.4516170918941498,
+   "wasserstein": 0.203950434923172,
+   "gradient_penalty": 0.006608553230762482
+  },
+  {
+   "step": 1800,
+   "critic_loss": -0.22976461052894592,
+   "generator_loss": 0.5658302307128906,
+   "wasserstein": 0.29549917578697205,
+   "gradient_penalty": 0.006573457270860672
+  },
+  {
+   "step": 1850,
+   "critic_loss": -0.1403389573097229,
+   "generator_loss": 0.43218234181404114,
+   "wasserstein": 0.2049793303012848,
+   "gradient_penalty": 0.006464037112891674
+  },
+  {
+   "step": 1900,
+   "critic_loss": -0.0023817047476768494,
+   "generator_loss": 0.5293203592300415,
+   "wasserstein": 0.07609856128692627,
+   "gradient_penalty": 0.007371685467660427
+  },
+  {
+   "step": 1950,
+   "critic_loss": -0.09330198168754578,
+   "generator_loss": 0.5574711561203003,
+   "wasserstein": 0.16202974319458008,
+   "gradient_penalty": 0.0068727764301002026
+  },
+  {
+   "step": 2000,
+   "critic_loss": -0.12210427969694138,
+   "generator_loss": 0.6414963006973267,
+   "wasserstein": 0.17781749367713928,
+   "gradient_penalty": 0.005571321584284306
+  },
+  {
+   "step": 2050,
+   "critic_loss": -0.17275288701057434,
+   "generator_loss": 0.6369636654853821,
+   "wasserstein": 0.24023407697677612,
+   "gradient_penalty": 0.0067481184378266335
+  },
+  {
+   "step": 2100,
+   "critic_loss": -0.15024018287658691,
+   "generator_loss": 0.7338907122612,
+   "wasserstein": 0.20668929815292358,
+   "gradient_penalty": 0.005644912365823984
+  },
+  {
+   "step": 2150,
+   "critic_loss": -0.12183064222335815,
+   "generator_loss": 0.7785641551017761,
+   "wasserstein": 0.18658417463302612,
+   "gradient_penalty": 0.006475353147834539
+  },
+  {
+   "step": 2200,
+   "critic_loss": -0.09591604769229889,
+   "generator_loss": 0.7897092700004578,
+   "wasserstein": 0.1509382128715515,
+   "gradient_penalty": 0.0055022165179252625
+  },
+  {
+   "step": 2250,
+   "critic_loss": -0.09874425828456879,
+   "generator_loss": 0.7439734935760498,
+   "wasserstein": 0.1512318253517151,
+   "gradient_penalty": 0.00524875707924366
+  },
+  {
+   "step": 2300,
+   "critic_loss": -0.09046678245067596,
+   "generator_loss": 0.6818088293075562,
+   "wasserstein": 0.1467527151107788,
+   "gradient_penalty": 0.005628592800348997
+  },
+  {
+   "step": 2350,
+   "critic_loss": -0.1291326880455017,
+   "generator_loss": 0.7900437712669373,
+   "wasserstein": 0.20094621181488037,
+   "gradient_penalty": 0.007181352935731411
+  },
+  {
+   "step": 2400,
+   "critic_loss": -0.18598462641239166,
+   "generator_loss": 0.8371995091438293,
+   "wasserstein": 0.23961800336837769,
+   "gradient_penalty": 0.005363337229937315
+  },
+  {
+   "step": 2450,
+   "critic_loss": -0.23065750300884247,
+   "generator_loss": 0.8904379606246948,
+   "wasserstein": 0.2926061749458313,
+   "gradient_penalty": 0.006194867193698883
+  },
+  {
+   "step": 2500,
+   "critic_loss": -0.13127408921718597,
+   "generator_loss": 0.8573553562164307,
+   "wasserstein": 0.1885082721710205,
+   "gradient_penalty": 0.005723418667912483
+  },
+  {
+   "step": 2550,
+   "critic_loss": -0.10148070007562637,
+   "generator_loss": 0.8572938442230225,
+   "wasserstein": 0.16213089227676392,
+   "gradient_penalty": 0.006065019406378269
+  },
+  {
+   "step": 2600,
+   "critic_loss": -0.2349698543548584,
+   "generator_loss": 0.8653700947761536,
+   "wasserstein": 0.291229784488678,
+   "gradient_penalty": 0.005625993013381958
+  },
+  {
+   "step": 2650,
+   "critic_loss": -0.1050531268119812,
+   "generator_loss": 0.7791494131088257,
+   "wasserstein": 0.15551966428756714,
+   "gradient_penalty": 0.005046653561294079
+  },
+  {
+   "step": 2700,
+   "critic_loss": -0.09630836546421051,
+   "generator_loss": 0.8012192845344543,
+   "wasserstein": 0.1471976637840271,
+   "gradient_penalty": 0.005088930018246174
+  },
+  {
+   "step": 2750,
+   "critic_loss": -0.13676717877388,
+   "generator_loss": 0.7369645833969116,
+   "wasserstein": 0.18392765522003174,
+   "gradient_penalty": 0.004716047551482916
+  },
+  {
+   "step": 2800,
+   "critic_loss": -0.10436242818832397,
+   "generator_loss": 0.7508668899536133,
+   "wasserstein": 0.1577398180961609,
+   "gradient_penalty": 0.005337738897651434
+  },
+  {
+   "step": 2850,
+   "critic_loss": -0.15961158275604248,
+   "generator_loss": 0.8181597590446472,
+   "wasserstein": 0.21567291021347046,
+   "gradient_penalty": 0.0056061334908008575
+  },
+  {
+   "step": 2900,
+   "critic_loss": -0.1081937849521637,
+   "generator_loss": 0.7445572018623352,
+   "wasserstein": 0.1645558476448059,
+   "gradient_penalty": 0.005636206362396479
+  },
+  {
+   "step": 2950,
+   "critic_loss": -0.09899821132421494,
+   "generator_loss": 0.6467130184173584,
+   "wasserstein": 0.147806316614151,
+   "gradient_penalty": 0.004880810622125864
+  },
+  {
+   "step": 3000,
+   "critic_loss": -0.19104650616645813,
+   "generator_loss": 0.7128509879112244,
+   "wasserstein": 0.25072821974754333,
+   "gradient_penalty": 0.005968171171844006
+  },
+  {
+   "step": 3050,
+   "critic_loss": -0.17033246159553528,
+   "generator_loss": 0.7956725358963013,
+   "wasserstein": 0.23231929540634155,
+   "gradient_penalty": 0.006198684219270945
+  },
+  {
+   "step": 3100,
+   "critic_loss": -0.1735096573829651,
+   "generator_loss": 0.6179570555686951,
+   "wasserstein": 0.2197968065738678,
+   "gradient_penalty": 0.004628714174032211
+  },
+  {
+   "step": 3150,
+   "critic_loss": -0.1973533183336258,
+   "generator_loss": 0.6590863466262817,
+   "wasserstein": 0.2516181468963623,
+   "gradient_penalty": 0.005426483228802681
+  },
+  {
+   "step": 3200,
+   "critic_loss": -0.15110552310943604,
+   "generator_loss": 0.6378852128982544,
+   "wasserstein": 0.21164044737815857,
+   "gradient_penalty": 0.006053493358194828
+  },
+  {
+   "step": 3250,
+   "critic_loss": -0.0898977592587471,
+   "generator_loss": 0.5191671252250671,
+   "wasserstein": 0.14368098974227905,
+   "gradient_penalty": 0.005378323141485453
+  },
+  {
+   "step": 3300,
+   "critic_loss": -0.12227176874876022,
+   "generator_loss": 0.6187120079994202,
+   "wasserstein": 0.1758967638015747,
+   "gradient_penalty": 0.005362499505281448
+  },
+  {
+   "step": 3350,
+   "critic_loss": -0.08697760850191116,
+   "generator_loss": 0.6257330179214478,
+   "wasserstein": 0.14506113529205322,
+   "gradient_penalty": 0.005808352492749691
+  },
+  {
+   "step": 3400,
+   "critic_loss": -0.12994664907455444,
+   "generator_loss": 0.5842123627662659,
+   "wasserstein": 0.19436535239219666,
+   "gradient_penalty": 0.006441870704293251
+  },
+  {
+   "step": 3450,
+   "critic_loss": -0.10056200623512268,
+   "generator_loss": 0.5723235011100769,
+   "wasserstein": 0.1492326259613037,
+   "gradient_penalty": 0.00486706243827939
+  },
+  {
+   "step": 3500,
+   "critic_loss": -0.10429463535547256,
+   "generator_loss": 0.5160354375839233,
+   "wasserstein": 0.15027928352355957,
+   "gradient_penalty": 0.0045984648168087006
+  },
+  {
+   "step": 3550,
+   "critic_loss": -0.12441582977771759,
+   "generator_loss": 0.5088676810264587,
+   "wasserstein": 0.17786568403244019,
+   "gradient_penalty": 0.00534498505294323
+  },
+  {
+   "step": 3600,
+   "critic_loss": -0.13960611820220947,
+   "generator_loss": 0.5322608947753906,
+   "wasserstein": 0.19889366626739502,
+   "gradient_penalty": 0.005928754340857267
+  },
+  {
+   "step": 3650,
+   "critic_loss": -0.14405618607997894,
+   "generator_loss": 0.4653744399547577,
+   "wasserstein": 0.19419768452644348,
+   "gradient_penalty": 0.005014149472117424
+  },
+  {
+   "step": 3700,
+   "critic_loss": -0.11849386990070343,
+   "generator_loss": 0.5104308724403381,
+   "wasserstein": 0.17816883325576782,
+   "gradient_penalty": 0.005967496428638697
+  },
+  {
+   "step": 3750,
+   "critic_loss": -0.10050258040428162,
+   "generator_loss": 0.5286142230033875,
+   "wasserstein": 0.15509679913520813,
+   "gradient_penalty": 0.005459421779960394
+  },
+  {
+   "step": 3800,
+   "critic_loss": -0.14191581308841705,
+   "generator_loss": 0.5813744068145752,
+   "wasserstein": 0.19740229845046997,
+   "gradient_penalty": 0.005548649001866579
+  },
+  {
+   "step": 3850,
+   "critic_loss": -0.20864109694957733,
+   "generator_loss": 0.6438630819320679,
+   "wasserstein": 0.26061633229255676,
+   "gradient_penalty": 0.005197523627430201
+  },
+  {
+   "step": 3900,
+   "critic_loss": -0.11587280035018921,
+   "generator_loss": 0.6574496626853943,
+   "wasserstein": 0.17244744300842285,
+   "gradient_penalty": 0.0056574647314846516
+  },
+  {
+   "step": 3950,
+   "critic_loss": -0.09377792477607727,
+   "generator_loss": 0.5399501919746399,
+   "wasserstein": 0.13981473445892334,
+   "gradient_penalty": 0.004603681154549122
+  },
+  {
+   "step": 4000,
+   "critic_loss": -0.0014409571886062622,
+   "generator_loss": 0.5478565692901611,
+   "wasserstein": 0.05848956108093262,
+   "gradient_penalty": 0.005704860202968121
+  },
+  {
+   "step": 4050,
+   "critic_loss": -0.07254833728075027,
+   "generator_loss": 0.4679066240787506,
+   "wasserstein": 0.12852877378463745,
+   "gradient_penalty": 0.00559804355725646
+  },
+  {
+   "step": 4100,
+   "critic_loss": -0.07123740762472153,
+   "generator_loss": 0.45468369126319885,
+   "wasserstein": 0.1181199848651886,
+   "gradient_penalty": 0.004688257817178965
+  },
+  {
+   "step": 4150,
+   "critic_loss": -0.056387245655059814,
+   "generator_loss": 0.5329253673553467,
+   "wasserstein": 0.10273906588554382,
+   "gradient_penalty": 0.004635182209312916
+  },
+  {
+   "step": 4200,
+   "critic_loss": -0.07019200176000595,
+   "generator_loss": 0.6019006967544556,
+   "wasserstein": 0.11481696367263794,
+   "gradient_penalty": 0.004462496377527714
+  },
+  {
+   "step": 4250,
+   "critic_loss": -0.0728500634431839,
+   "generator_loss": 0.5378333330154419,
+   "wasserstein": 0.12376078963279724,
+   "gradient_penalty": 0.005091072991490364
+  },
+  {
+   "step": 4300,
+   "critic_loss": -0.12201330810785294,
+   "generator_loss": 0.5898072123527527,
+   "wasserstein": 0.16757410764694214,
+   "gradient_penalty": 0.004556079860776663
+  },
+  {
+   "step": 4350,
+   "critic_loss": -0.16289791464805603,
+   "generator_loss": 0.5512551069259644,
+   "wasserstein": 0.2087700366973877,
+   "gradient_penalty": 0.004587212577462196
+  },
+  {
+   "step": 4400,
+   "critic_loss": -0.12783505022525787,
+   "generator_loss": 0.5205995440483093,
+   "wasserstein": 0.17898312211036682,
+   "gradient_penalty": 0.005114806815981865
+  },
+  {
+   "step": 4450,
+   "critic_loss": -0.13808253407478333,
+   "generator_loss": 0.45780885219573975,
+   "wasserstein": 0.18389718234539032,
+   "gradient_penalty": 0.004581465385854244
+  },
+  {
+   "step": 4500,
+   "critic_loss": -0.10371121019124985,
+   "generator_loss": 0.5397197008132935,
+   "wasserstein": 0.15473872423171997,
+   "gradient_penalty": 0.005102751310914755
+  },
+  {
+   "step": 4550,
+   "critic_loss": -0.15039122104644775,
+   "generator_loss": 0.39192119240760803,
+   "wasserstein": 0.20072291791439056,
+   "gradient_penalty": 0.005033170338720083
+  },
+  {
+   "step": 4600,
+   "critic_loss": -0.07169570028781891,
+   "generator_loss": 0.4278292655944824,
+   "wasserstein": 0.11684295535087585,
+   "gradient_penalty": 0.004514725413173437
+  },
+  {
+   "step": 4650,
+   "critic_loss": -0.10470404475927353,
+   "generator_loss": 0.4016152322292328,
+   "wasserstein": 0.15563058853149414,
+   "gradient_penalty": 0.005092654377222061
+  },
+  {
+   "step": 4700,
+   "critic_loss": -0.012971777468919754,
+   "generator_loss": 0.33645257353782654,
+   "wasserstein": 0.06233587861061096,
+   "gradient_penalty": 0.004936410114169121
+  },
+  {
+   "step": 4750,
+   "critic_loss": -0.039825983345508575,
+   "generator_loss": 0.27010032534599304,
+   "wasserstein": 0.08935728669166565,
+   "gradient_penalty": 0.0049531301483511925
+  },
+  {
+   "step": 4800,
+   "critic_loss": -0.022632688283920288,
+   "generator_loss": 0.32508453726768494,
+   "wasserstein": 0.06261783838272095,
+   "gradient_penalty": 0.003998515196144581
+  },
+  {
+   "step": 4850,
+   "critic_loss": -0.05346602201461792,
+   "generator_loss": 0.33096569776535034,
+   "wasserstein": 0.08970814943313599,
+   "gradient_penalty": 0.0036242129281163216
+  },
+  {
+   "step": 4900,
+   "critic_loss": 0.0013867095112800598,
+   "generator_loss": 0.24484968185424805,
+   "wasserstein": 0.04779423773288727,
+   "gradient_penalty": 0.004918094724416733
+  },
+  {
+   "step": 4950,
+   "critic_loss": 0.011524513363838196,
+   "generator_loss": 0.22822746634483337,
+   "wasserstein": 0.034911349415779114,
+   "gradient_penalty": 0.004643586464226246
+  },
+  {
+   "step": 5000,
+   "critic_loss": -0.03974011540412903,
+   "generator_loss": 0.3341978192329407,
+   "wasserstein": 0.07659715414047241,
+   "gradient_penalty": 0.003685703966766596
+  }
+ ]
+}
