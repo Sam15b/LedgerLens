@@ -1,8 +1,8 @@
-"""Clean up a page image before OCR: grayscale, deskew, denoise, upscale, binarize.
+"""Clean up a page image before OCR: grayscale, denoise, deskew, upscale, binarize.
 
 Each step except upscaling is switched on or off by ``ocr.preprocess`` in
-``configs/ingestion.yaml``. The order matters and was measured with real Tesseract on the
-speckled receipt fixture (character error rate, lower is better):
+``configs/ingestion.yaml``. Order and settings were measured with real Tesseract
+(character error rate, lower is better). First on the speckled receipt fixture:
 
 ==========================================  =====
 deskew -> denoise -> upscale                0.053
@@ -11,13 +11,40 @@ denoise -> deskew -> upscale                0.064
 upscale -> deskew -> denoise -> binarize    0.632
 ==========================================  =====
 
+then on 40 rendered synthetic invoices (150 dpi) and their classical degradations at
+severity 0.25-1.0, 200 page images (``eval/ocr_robustness.py``; full 1,500-image
+run in ``eval/reports/2026-11-14/ocr_degraded.md``):
+
+==========================================  =====  =====  =====  =====  =======
+corpus CER at severity                      clean  0.50   0.75   1.00   receipt
+==========================================  =====  =====  =====  =====  =======
+deskew -> median (always)                   0.047  0.134  0.252  0.442  0.053
+deskew -> median (only if speckled)         0.008  0.134  0.252  0.442  0.053
+median (only if speckled) -> deskew         0.008  0.072  0.200  0.320  0.064
+despeckle (only if speckled) -> deskew      0.008  0.066  0.359  0.613  0.012
+despeckle, or median if heavy -> deskew     0.008  0.067  0.200  0.320  0.012
+==========================================  =====  =====  =====  =====  =======
+
+The last row is the pipeline. On the receipt the full median, run before deskew, eroded
+"Receipt" into "Recemt", which turned the classification to ``unknown``.
+
+- **Denoise** removes scanner speckle, and runs only when the page *has* speckle
+  (:func:`speckle_fraction` at least ``denoise_min_speckle``):
+
+  * light speckle (below ``median_min_speckle``) gets :func:`despeckle`: only the
+    isolated pixels are replaced by their 3x3 median, so strokes are not touched at all;
+  * heavy speckle gets the full 3x3 median (:func:`denoise`). Specks then touch each
+    other, are no longer isolated, and despeckling misses them. The median costs some
+    stroke detail, which is worth it at that noise level.
+
+  A full median on a clean 150-dpi page eats thin strokes (clean CER 0.008 -> 0.047).
+  Denoise runs *before* deskew, because rotating with interpolation smears each
+  one-pixel speck into a grey 2x2 blob that neither filter removes -- and before
+  upscaling for the same reason.
 - **Deskew** finds the rotation that makes text rows sharpest: rotate a downscaled
   binary copy through small angles and keep the one whose row sums vary most (text rows
   dark, gaps light). This is the projection-profile method; it is robust to stamps and
   logos that fool line detection, and searching on a ~1000 px copy keeps it fast.
-- **Denoise** is a 3x3 median filter, which removes scanner speckle without blurring
-  stroke edges. It must run *before* upscaling: once a one-pixel speck is enlarged to a
-  3x3 blob, a 3x3 median no longer removes it.
 - **Upscale** (bicubic, whole factor) is requested by the engine for small images.
 - **Binarize** uses Otsu's threshold. Off by default: Tesseract already binarizes
   internally, and thresholding the smooth upscaled image first loses stroke detail.
@@ -90,7 +117,31 @@ def deskew(gray: Gray, max_degrees: float = MAX_SKEW_DEGREES) -> tuple[Gray, flo
 
 
 def denoise(gray: Gray) -> Gray:
+    """Full 3x3 median filter (for heavy speckle; it also thins strokes)."""
     return _u8(cv2.medianBlur(gray, 3))
+
+
+_NEIGHBOURS = np.ones((3, 3), dtype=np.float32)
+_NEIGHBOURS[1, 1] = 0
+
+
+def isolated_pixels(gray: Gray) -> npt.NDArray[np.bool_]:
+    """Pixels that are dark with no dark neighbour, or light with only dark neighbours."""
+    dark = (gray < 128).astype(np.uint8)
+    neighbours = cv2.filter2D(dark, cv2.CV_16S, _NEIGHBOURS, borderType=cv2.BORDER_REPLICATE)
+    return np.asarray(((dark == 1) & (neighbours == 0)) | ((dark == 0) & (neighbours == 8)))
+
+
+def speckle_fraction(gray: Gray) -> float:
+    """Share of isolated pixels. Salt-and-pepper noise is made of them; anti-aliased print
+    almost never is (clean 150-dpi renders: < 2e-5; 0.5 % pepper noise: > 2e-3)."""
+    return float(isolated_pixels(gray).mean())
+
+
+def despeckle(gray: Gray) -> Gray:
+    """Replace only the isolated pixels by their 3x3 median; every other pixel -- every
+    stroke -- is left exactly as it was."""
+    return _u8(np.where(isolated_pixels(gray), cv2.medianBlur(gray, 3), gray))
 
 
 def binarize(gray: Gray) -> Gray:
@@ -106,17 +157,22 @@ def upscale(gray: Gray, factor: int) -> Gray:
 def preprocess(
     image: Image.Image, config: PreprocessConfig | None = None, *, scale: int = 1
 ) -> Preprocessed:
-    """Run the enabled steps on a grayscale copy: deskew, denoise, upscale x ``scale``, binarize.
+    """Run the enabled steps on a grayscale copy: denoise (if speckled), deskew, upscale x
+    ``scale``, binarize.
 
     The result is ``scale`` times the size of ``image``.
     """
     config = config or get_config().ingestion.ocr.preprocess
     gray = to_gray(image)
     angle = 0.0
+    if config.denoise:
+        speckle = speckle_fraction(gray)
+        if speckle >= config.median_min_speckle:
+            gray = denoise(gray)
+        elif speckle >= config.denoise_min_speckle:
+            gray = despeckle(gray)
     if config.deskew:
         gray, angle = deskew(gray)
-    if config.denoise:
-        gray = denoise(gray)
     gray = upscale(gray, scale)
     if config.binarize:
         gray = binarize(gray)

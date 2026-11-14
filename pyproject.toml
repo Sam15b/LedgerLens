@@ -71,6 +71,7 @@ synthetic = [
 eval = [
     "ragas",
     "langsmith",
+    "matplotlib",  # eval/ocr_robustness.py --plot
 ]
 dev = [
     "boto3",  # Bedrock contract tests check requests against botocore's service model
@@ -148,7 +149,7 @@ module = ["ml.synthetic.gan.*"]
 disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
-module = ["albumentations.*", "diffusers.*"]  # no inline types
+module = ["albumentations.*", "diffusers.*", "matplotlib.*"]  # untyped, or not in CI
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
