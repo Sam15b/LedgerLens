@@ -12,7 +12,8 @@ upscale -> deskew -> denoise -> binarize    0.632
 ==========================================  =====
 
 then on 40 rendered synthetic invoices (150 dpi) and their classical degradations at
-severity 0.25-1.0, 200 page images (``eval/ocr_robustness.py``, report 2026-11-13):
+severity 0.25-1.0, 200 page images (``eval/ocr_robustness.py``; full 1,500-image
+run in ``eval/reports/2026-11-14/ocr_degraded.md``):
 
 ==========================================  =====  =====  =====  =====
 corpus CER at severity                      clean  0.50   0.75   1.00

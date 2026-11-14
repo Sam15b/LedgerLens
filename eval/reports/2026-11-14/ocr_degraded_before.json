@@ -1,0 +1,52 @@
+[
+ {
+  "engine": "tesseract",
+  "method": "clean",
+  "strength": 0.0,
+  "pages": 300,
+  "cer": 0.05016036866359447,
+  "median_cer": 0.03161619677456781,
+  "f1": 0.7762906309751434,
+  "readable": 0.7733333333333333
+ },
+ {
+  "engine": "tesseract",
+  "method": "classical",
+  "strength": 0.25,
+  "pages": 300,
+  "cer": 0.018735483870967743,
+  "median_cer": 0.01709403251058795,
+  "f1": 0.8519471607479843,
+  "readable": 0.97
+ },
+ {
+  "engine": "tesseract",
+  "method": "classical",
+  "strength": 0.5,
+  "pages": 300,
+  "cer": 0.11542857142857142,
+  "median_cer": 0.050991672878559095,
+  "f1": 0.7815761065131341,
+  "readable": 0.72
+ },
+ {
+  "engine": "tesseract",
+  "method": "classical",
+  "strength": 0.75,
+  "pages": 300,
+  "cer": 0.22203870967741934,
+  "median_cer": 0.19802536577391494,
+  "f1": 0.6596622889305817,
+  "readable": 0.4666666666666667
+ },
+ {
+  "engine": "tesseract",
+  "method": "classical",
+  "strength": 1.0,
+  "pages": 300,
+  "cer": 0.4256663594470046,
+  "median_cer": 0.4484476688360184,
+  "f1": 0.41249736119907116,
+  "readable": 0.14333333333333334
+ }
+]
