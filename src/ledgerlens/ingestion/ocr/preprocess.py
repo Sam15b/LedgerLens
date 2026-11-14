@@ -15,23 +15,32 @@ then on 40 rendered synthetic invoices (150 dpi) and their classical degradation
 severity 0.25-1.0, 200 page images (``eval/ocr_robustness.py``; full 1,500-image
 run in ``eval/reports/2026-11-14/ocr_degraded.md``):
 
-==========================================  =====  =====  =====  =====
-corpus CER at severity                      clean  0.50   0.75   1.00
-==========================================  =====  =====  =====  =====
-deskew -> denoise (always)                  0.047  0.134  0.252  0.442
-deskew -> denoise (only if speckled)        0.008  0.134  0.252  0.442
-denoise (only if speckled) -> deskew        0.008  0.072  0.200  0.320
-==========================================  =====  =====  =====  =====
+==========================================  =====  =====  =====  =====  =======
+corpus CER at severity                      clean  0.50   0.75   1.00   receipt
+==========================================  =====  =====  =====  =====  =======
+deskew -> median (always)                   0.047  0.134  0.252  0.442  0.053
+deskew -> median (only if speckled)         0.008  0.134  0.252  0.442  0.053
+median (only if speckled) -> deskew         0.008  0.072  0.200  0.320  0.064
+despeckle (only if speckled) -> deskew      0.008  0.066  0.359  0.613  0.012
+despeckle, or median if heavy -> deskew     0.008  0.067  0.200  0.320  0.012
+==========================================  =====  =====  =====  =====  =======
 
-The last row is the pipeline: it costs the receipt fixture 0.011 CER (still inside its
-0.10 budget) and halves the error on degraded pages.
+The last row is the pipeline. On the receipt the full median, run before deskew, eroded
+"Receipt" into "Recemt", which turned the classification to ``unknown``.
 
-- **Denoise** is a 3x3 median filter, which removes scanner speckle. It runs only when
-  the page *has* speckle (:func:`speckle_fraction` at least ``denoise_min_speckle``): on
-  a clean 150-dpi page the median eats thin strokes (clean CER 0.008 -> 0.047). It runs
-  *before* deskew, because rotating with interpolation smears each one-pixel speck into a
-  grey 2x2 blob that a 3x3 median no longer removes -- and before upscaling for the same
-  reason.
+- **Denoise** removes scanner speckle, and runs only when the page *has* speckle
+  (:func:`speckle_fraction` at least ``denoise_min_speckle``):
+
+  * light speckle (below ``median_min_speckle``) gets :func:`despeckle`: only the
+    isolated pixels are replaced by their 3x3 median, so strokes are not touched at all;
+  * heavy speckle gets the full 3x3 median (:func:`denoise`). Specks then touch each
+    other, are no longer isolated, and despeckling misses them. The median costs some
+    stroke detail, which is worth it at that noise level.
+
+  A full median on a clean 150-dpi page eats thin strokes (clean CER 0.008 -> 0.047).
+  Denoise runs *before* deskew, because rotating with interpolation smears each
+  one-pixel speck into a grey 2x2 blob that neither filter removes -- and before
+  upscaling for the same reason.
 - **Deskew** finds the rotation that makes text rows sharpest: rotate a downscaled
   binary copy through small angles and keep the one whose row sums vary most (text rows
   dark, gaps light). This is the projection-profile method; it is robust to stamps and
@@ -108,6 +117,7 @@ def deskew(gray: Gray, max_degrees: float = MAX_SKEW_DEGREES) -> tuple[Gray, flo
 
 
 def denoise(gray: Gray) -> Gray:
+    """Full 3x3 median filter (for heavy speckle; it also thins strokes)."""
     return _u8(cv2.medianBlur(gray, 3))
 
 
@@ -115,15 +125,23 @@ _NEIGHBOURS = np.ones((3, 3), dtype=np.float32)
 _NEIGHBOURS[1, 1] = 0
 
 
-def speckle_fraction(gray: Gray) -> float:
-    """Share of pixels that are isolated: dark with no dark neighbour, or light with only
-    dark neighbours. Salt-and-pepper noise is made of them; anti-aliased print almost never
-    is (clean 150-dpi renders: < 2e-5; 0.5 % pepper noise: > 8e-4)."""
+def isolated_pixels(gray: Gray) -> npt.NDArray[np.bool_]:
+    """Pixels that are dark with no dark neighbour, or light with only dark neighbours."""
     dark = (gray < 128).astype(np.uint8)
     neighbours = cv2.filter2D(dark, cv2.CV_16S, _NEIGHBOURS, borderType=cv2.BORDER_REPLICATE)
-    lone_dark = (dark == 1) & (neighbours == 0)
-    lone_light = (dark == 0) & (neighbours == 8)
-    return float(lone_dark.mean() + lone_light.mean())
+    return np.asarray(((dark == 1) & (neighbours == 0)) | ((dark == 0) & (neighbours == 8)))
+
+
+def speckle_fraction(gray: Gray) -> float:
+    """Share of isolated pixels. Salt-and-pepper noise is made of them; anti-aliased print
+    almost never is (clean 150-dpi renders: < 2e-5; 0.5 % pepper noise: > 2e-3)."""
+    return float(isolated_pixels(gray).mean())
+
+
+def despeckle(gray: Gray) -> Gray:
+    """Replace only the isolated pixels by their 3x3 median; every other pixel -- every
+    stroke -- is left exactly as it was."""
+    return _u8(np.where(isolated_pixels(gray), cv2.medianBlur(gray, 3), gray))
 
 
 def binarize(gray: Gray) -> Gray:
@@ -147,8 +165,12 @@ def preprocess(
     config = config or get_config().ingestion.ocr.preprocess
     gray = to_gray(image)
     angle = 0.0
-    if config.denoise and speckle_fraction(gray) >= config.denoise_min_speckle:
-        gray = denoise(gray)
+    if config.denoise:
+        speckle = speckle_fraction(gray)
+        if speckle >= config.median_min_speckle:
+            gray = denoise(gray)
+        elif speckle >= config.denoise_min_speckle:
+            gray = despeckle(gray)
     if config.deskew:
         gray, angle = deskew(gray)
     gray = upscale(gray, scale)

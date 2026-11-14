@@ -7,6 +7,7 @@ from ledgerlens.ingestion.ocr.preprocess import (
     binarize,
     denoise,
     deskew,
+    despeckle,
     estimate_skew,
     preprocess,
     speckle_fraction,
@@ -89,7 +90,8 @@ def test_clean_pages_are_not_median_filtered() -> None:
 
     kept = preprocess(Image.fromarray(page), PreprocessConfig(deskew=False))
     forced = preprocess(
-        Image.fromarray(page), PreprocessConfig(deskew=False, denoise_min_speckle=0)
+        Image.fromarray(page),
+        PreprocessConfig(deskew=False, denoise_min_speckle=0, median_min_speckle=0),
     )
 
     assert np.array_equal(np.asarray(kept.image), page)  # stroke survives
@@ -98,15 +100,40 @@ def test_clean_pages_are_not_median_filtered() -> None:
 
 def test_speckle_is_removed_before_deskew_can_smear_it() -> None:
     tilted = np.asarray(text_page().rotate(2.0, fillcolor=255), dtype=np.uint8).copy()
-    tilted[5, 5] = tilted[390, 590] = 0  # specks in the margins
-    tilted[200:202, 590:592] = 0  # ...and enough of them to count as a speckled page
-    rng = np.random.default_rng(1)
-    ys, xs = rng.integers(0, 30, 40), rng.integers(0, 590, 40)
-    tilted[ys, xs] = 0
+    tilted[5:30:6, 5:590:12] = 0  # 250 isolated specks in the top margin
 
     cleaned = np.asarray(preprocess(Image.fromarray(tilted), PreprocessConfig()).image)
 
-    assert cleaned[:30, :].min() == 255  # deskew-then-denoise leaves grey smudges (~229)
+    assert cleaned[:30, :].min() == 255  # deskew-then-denoise leaves grey smudges
+
+
+def test_despeckle_removes_isolated_pixels_and_leaves_strokes_alone() -> None:
+    page = np.full((60, 60), 255, dtype=np.uint8)
+    page[10:50, 30] = 0  # a one-pixel-wide stroke
+    page[5, 5] = page[55, 50] = 0  # pepper
+    page[20:23, 40:43] = 0
+    page[21, 41] = 255  # salt inside a dark blob
+
+    cleaned = despeckle(page)
+
+    assert (cleaned[10:50, 30] == 0).all()  # the stroke is untouched
+    assert cleaned[5, 5] == cleaned[55, 50] == 255
+    assert cleaned[21, 41] == 0
+
+
+def test_light_speckle_is_despeckled_heavy_speckle_gets_the_median() -> None:
+    page = np.full((100, 100), 255, dtype=np.uint8)
+    page[10:90, 50] = 0  # a thin stroke
+    page[3, 3] = 0  # one speck: 1e-4 of the pixels
+
+    def run(median_min_speckle: float) -> np.ndarray:
+        config = PreprocessConfig(deskew=False, median_min_speckle=median_min_speckle)
+        return np.asarray(preprocess(Image.fromarray(page), config).image)
+
+    light, heavy = run(0.005), run(1e-4)
+
+    assert light[3, 3] == 255 and (light[10:90, 50] == 0).all()
+    assert heavy[3, 3] == 255 and (heavy[10:90, 50] == 255).all()  # the median erases it
 
 
 def test_binarization_is_off_by_default() -> None:

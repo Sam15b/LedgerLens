@@ -8,6 +8,8 @@ from PIL import Image
 
 from eval.ocr_cer import cer
 from ledgerlens.core.config import OCRConfig
+from ledgerlens.core.schemas import DocType
+from ledgerlens.ingestion.classify import classify
 from ledgerlens.ingestion.layout import BBox, ScannedPage, layout_pages
 from ledgerlens.ingestion.ocr.base import OCREngine, OCRError, OCRUnavailableError, OCRWord
 from ledgerlens.ingestion.ocr.tesseract import TesseractEngine, upscale_factor
@@ -121,5 +123,9 @@ def test_scanned_receipt_ocr_is_below_agreed_cer() -> None:
 
     score = cer(RECEIPT_TEXT, text)
     assert score <= MAX_RECEIPT_CER, f"CER {score:.3f}\n{text}"
+    # The words classification keys on must survive preprocessing: a full median filter
+    # once eroded "Receipt" into "Recemt" and the receipt was classified unknown.
+    assert "Receipt" in text
+    assert classify(text).doc_type is DocType.RECEIPT
     assert content.source == "ocr"
     assert all(0 <= w.bbox.x0 < w.bbox.x1 <= page.image.width for w in content.words)

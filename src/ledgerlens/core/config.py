@@ -204,6 +204,8 @@ class PreprocessConfig(_Section):
     denoise: bool = True
     denoise_min_speckle: float = Field(default=1e-4, ge=0)
     """Denoise only pages with at least this share of isolated pixels (0: always)."""
+    median_min_speckle: float = Field(default=0.005, ge=0)
+    """From this share of isolated pixels on, use the full median instead of despeckling."""
     binarize: bool = False
 
 

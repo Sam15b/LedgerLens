@@ -13,7 +13,8 @@ ocr:
   preprocess:
     deskew: true
     denoise: true
-    denoise_min_speckle: 0.0001  # median-filter only speckled pages (isolated-pixel share); 0 = always
+    denoise_min_speckle: 0.0001  # denoise only speckled pages (isolated-pixel share); 0 = always
+    median_min_speckle: 0.005    # heavy speckle: full 3x3 median; below this, despeckle isolated pixels only
     binarize: false        # Tesseract binarizes internally; doing it first measured worse
 
 layout:
