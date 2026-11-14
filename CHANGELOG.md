@@ -8,6 +8,71 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+### Synthetic data milestone (Phase 6b: GAN + diffusion)
+
+A labelled synthetic ledger, rendered to real-looking documents and degraded scans, so
+ingestion, extraction and (next) anomaly detection can be measured against known truth.
+
+#### Added
+
+- `ml/synthetic/seed.py`: GAN seed rows from CORD receipts and a hand-made vendor master
+  (50 vendors, 10 categories, 7 countries) with seed POs.
+- Tabular **WGAN-GP** (`ml/synthetic/gan/`):
+  - reversible preprocessing (log amounts, min-max, one-hot);
+  - a generator with Gumbel-softmax categorical heads and a critic with gradient penalty;
+  - optional `vendor_category` conditioning;
+  - a training loop with checkpoints and `run.json`, plus a Colab notebook.
+- `gan/sample.py`: samples with business-rule post-processing (currency rounding,
+  `total = subtotal × (1 + tax_rate)` recomputed). `gan/evaluate.py`: per-column KS and
+  Wasserstein, TVD, correlation-matrix difference, all against a real-vs-real baseline.
+- `ml/synthetic/link.py`, `anomalies.py`, `build.py`:
+  - a contract (rate card, terms) per vendor, one PO per invoice, and payments in paid /
+    partial / unpaid / over-paid states;
+  - six labelled anomaly types at exact rates: exact and near duplicate, price inflation,
+    round amount, unknown vendor, rush terms;
+  - `python -m ml.synthetic.build` writes `data/synthetic/records.jsonl`.
+- `ml/synthetic/render/`:
+  - Jinja2 templates: three invoice layouts, purchase order, remittance advice and contract;
+  - rendering to PDF (WeasyPrint, or PyMuPDF's Story on Windows) plus page images;
+  - output is deterministic, and exact duplicates are byte-identical.
+- `ml/synthetic/diffusion/`:
+  - classical scan augmentations (albumentations; one severity knob);
+  - Stable Diffusion img2img degradation (SD 1.5, fp16, strength 0.2–0.45, fixed seeds)
+    with a Colab notebook;
+  - an OCR validity filter that keeps a variant only if every key field is read exactly.
+- Evaluation:
+  - `eval/extraction_synthetic.py` ingests rendered PDFs and scores extraction per type,
+    layout and field;
+  - `eval/ocr_robustness.py` measures CER, extraction F1 and key-field readability on
+    clean vs degraded scans per OCR engine, with a strength → CER/F1 curve.
+- Reports in `eval/reports/`:
+  - GAN quality: 0 % rule violations; the conditional GAN's amounts are at the real-data
+    baseline;
+  - extraction on 950 rendered PDFs: 0 ingestion failures;
+  - degraded-scan CER table: clean 0.011 → 0.288 at full severity.
+- Extras: `synthetic` (jinja2, albumentations; installed in CI); matplotlib in `eval`.
+
+#### Fixed
+
+- Text-layer extraction expands ligatures. "ﬁles" now reads as "files", as label and
+  vendor matching expect.
+- Line grouping compares row centre lines instead of growing boxes. A tall heading no
+  longer merges the two lines beside it ("Northwind 1 Market Street Traders …").
+- `first_line_vendor` stops at a document title printed on the name's line. PO
+  `buyer_name` F1 went from 0.00 to 1.00 on rendered POs.
+
+#### Changed
+
+- OCR preprocessing runs the median denoise only on speckled pages
+  (`ocr.preprocess.denoise_min_speckle`), and before deskew. Synthetic invoice CER went
+  from 0.050 to 0.011 on clean pages and from 0.426 to 0.288 at full severity. The
+  speckled receipt fixture went from 0.053 to 0.064, within its 0.10 budget.
+
+#### Not done yet
+
+- The Stable Diffusion run on a GPU, and with it the SD strength → CER curve.
+- PaddleOCR in the robustness benchmark: no wheels for the local environment.
+
 ## [0.1.0] - 2026-11-12
 
 Phase 1 — Ingestion + extraction baseline: a PDF or scanned image goes in, a typed
