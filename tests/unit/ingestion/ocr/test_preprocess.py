@@ -9,6 +9,7 @@ from ledgerlens.ingestion.ocr.preprocess import (
     deskew,
     estimate_skew,
     preprocess,
+    speckle_fraction,
     to_gray,
 )
 
@@ -70,6 +71,42 @@ def test_preprocess_runs_enabled_steps_only() -> None:
     assert set(np.unique(np.asarray(everything.image)).tolist()) <= {0, 255}
     assert nothing.skew_degrees == 0.0
     assert np.array_equal(np.asarray(nothing.image), to_gray(tilted))
+
+
+def test_speckle_fraction_separates_noise_from_print() -> None:
+    clean = to_gray(text_page())
+    rng = np.random.default_rng(0)
+    noisy = clean.copy()
+    flip = rng.random(noisy.shape) < 0.005
+    noisy[flip] = 255 - noisy[flip]
+
+    assert speckle_fraction(clean) < 1e-4 <= speckle_fraction(noisy)
+
+
+def test_clean_pages_are_not_median_filtered() -> None:
+    page = np.full((60, 60), 255, dtype=np.uint8)
+    page[10:50, 30] = 0  # a one-pixel-wide stroke, as small print renders at 150 dpi
+
+    kept = preprocess(Image.fromarray(page), PreprocessConfig(deskew=False))
+    forced = preprocess(
+        Image.fromarray(page), PreprocessConfig(deskew=False, denoise_min_speckle=0)
+    )
+
+    assert np.array_equal(np.asarray(kept.image), page)  # stroke survives
+    assert np.asarray(forced.image).min() == 255  # an unconditional median erases it
+
+
+def test_speckle_is_removed_before_deskew_can_smear_it() -> None:
+    tilted = np.asarray(text_page().rotate(2.0, fillcolor=255), dtype=np.uint8).copy()
+    tilted[5, 5] = tilted[390, 590] = 0  # specks in the margins
+    tilted[200:202, 590:592] = 0  # ...and enough of them to count as a speckled page
+    rng = np.random.default_rng(1)
+    ys, xs = rng.integers(0, 30, 40), rng.integers(0, 590, 40)
+    tilted[ys, xs] = 0
+
+    cleaned = np.asarray(preprocess(Image.fromarray(tilted), PreprocessConfig()).image)
+
+    assert cleaned[:30, :].min() == 255  # deskew-then-denoise leaves grey smudges (~229)
 
 
 def test_binarization_is_off_by_default() -> None:

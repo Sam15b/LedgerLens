@@ -202,6 +202,8 @@ class LoaderConfig(_Section):
 class PreprocessConfig(_Section):
     deskew: bool = True
     denoise: bool = True
+    denoise_min_speckle: float = Field(default=1e-4, ge=0)
+    """Denoise only pages with at least this share of isolated pixels (0: always)."""
     binarize: bool = False
 
 
