@@ -63,10 +63,15 @@ ingestion, extraction and (next) anomaly detection can be measured against known
 
 #### Changed
 
-- OCR preprocessing runs the median denoise only on speckled pages
-  (`ocr.preprocess.denoise_min_speckle`), and before deskew. Synthetic invoice CER went
-  from 0.050 to 0.011 on clean pages and from 0.426 to 0.288 at full severity. The
-  speckled receipt fixture went from 0.053 to 0.064, within its 0.10 budget.
+- OCR preprocessing now denoises only speckled pages (`ocr.preprocess.denoise_min_speckle`),
+  and does so before deskew.
+  - Light speckle is despeckled: only isolated pixels are replaced, strokes are untouched.
+  - Heavy speckle (`median_min_speckle`, 0.005) gets the full 3×3 median.
+  - Results: synthetic invoice CER went from 0.050 to 0.011 on clean pages and from
+    0.426 to 0.288 at full severity. The scanned receipt fixture went from 0.053 to
+    0.012, and is still classified as a receipt.
+  - Trade-off: at light synthetic noise (severity 0.25), fully readable key fields dropped
+    from 97 % to 89 % of pages.
 
 #### Not done yet
 
