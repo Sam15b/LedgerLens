@@ -17,14 +17,41 @@ the transaction, usually with :func:`~ledgerlens.storage.postgres.db.session_sco
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Table, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from ledgerlens.core.schemas import DocType, Document, DocumentStatus
-from ledgerlens.storage.postgres.models import Base, ChunkRow, DocumentRow
+from ledgerlens.core.schemas import (
+    ROUNDING_TOLERANCE,
+    Contract,
+    DocType,
+    Document,
+    DocumentStatus,
+    ExtractedRecord,
+    Invoice,
+    LineItem,
+    Payment,
+    PurchaseOrder,
+    Receipt,
+)
+from ledgerlens.storage.postgres.models import (
+    Base,
+    ChunkRow,
+    ContractRow,
+    DocumentRow,
+    InvoiceLineItemRow,
+    InvoiceRow,
+    PaymentAllocationRow,
+    PaymentRow,
+    POLineItemRow,
+    PurchaseOrderRow,
+    VendorRow,
+)
 
 if TYPE_CHECKING:
     from ledgerlens.ingestion.chunking import Chunk
@@ -53,6 +80,7 @@ def upsert(
     columns = [c for c in batch[0] if c not in skip]
     if not columns:
         session.execute(stmt.on_conflict_do_nothing(index_elements=list(conflict)))
+        _expire(session, model)
         return
     changes: dict[str, Any] = {c: stmt.excluded[c] for c in columns}
     if "updated_at" in table.c:
@@ -61,6 +89,14 @@ def upsert(
     session.execute(
         stmt.on_conflict_do_update(index_elements=list(conflict), set_=changes, where=changed)
     )
+    _expire(session, model)
+
+
+def _expire(session: Session, model: type[Base]) -> None:
+    """Core writes bypass the ORM: reload ``model`` objects this session already holds."""
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, model):
+            session.expire(obj)
 
 
 def clean_text(text: str) -> str:
@@ -131,7 +167,7 @@ class DocumentRepository:
         return existing
 
     def get(self, document_id: str) -> Document | None:
-        row = self.session.get(DocumentRow, document_id)
+        row = self.session.get(DocumentRow, document_id, populate_existing=True)
         return None if row is None else to_document(row)
 
     def get_by_sha256(self, sha256: str) -> Document | None:
@@ -237,3 +273,478 @@ class ChunkRepository:
             select(ChunkRow.id, ChunkRow.text).where(ChunkRow.id.in_(wanted))
         )
         return {row.id: row.text for row in rows}
+
+
+# --------------------------------------------------------------------------- line items
+
+
+def sync_lines(
+    session: Session,
+    model: type[InvoiceLineItemRow] | type[POLineItemRow],
+    parent: str,
+    parent_id: str,
+    lines: Sequence[LineItem],
+) -> None:
+    """Make ``lines`` the parent's line items, keyed by position (``line_no``)."""
+    upsert(
+        session,
+        model,
+        [
+            {
+                parent: parent_id,
+                "line_no": n,
+                "description": line.description,
+                "quantity": line.quantity,
+                "unit_price": line.unit_price,
+                "amount": line.amount,
+            }
+            for n, line in enumerate(lines)
+        ],
+        conflict=(parent, "line_no"),
+    )
+    table: Table = model.__table__  # type: ignore[assignment]
+    session.execute(
+        delete(table).where(table.c[parent] == parent_id, table.c.line_no >= len(lines))
+    )
+
+
+# --------------------------------------------------------------------------- vendors
+
+
+class VendorRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        vendor_id: str,
+        canonical_name: str,
+        *,
+        aliases: Sequence[str] = (),
+        tax_id: str | None = None,
+        email: str | None = None,
+    ) -> None:
+        upsert(
+            self.session,
+            VendorRow,
+            {
+                "id": vendor_id,
+                "canonical_name": canonical_name,
+                "aliases": list(dict.fromkeys(aliases)),
+                "tax_id": tax_id,
+                "email": email,
+            },
+        )
+
+    def add_alias(self, vendor_id: str, alias: str) -> bool:
+        """Remember another spelling of a vendor's name. Returns whether it was new."""
+        row = self.get(vendor_id)
+        if row is None:
+            raise KeyError(f"unknown vendor {vendor_id!r}")
+        if alias == row.canonical_name or alias in row.aliases:
+            return False
+        stmt = (
+            update(VendorRow)
+            .where(VendorRow.id == vendor_id, ~VendorRow.aliases.contains([alias]))
+            .values(aliases=func.array_append(VendorRow.aliases, alias), updated_at=func.now())
+        )
+        self.session.execute(stmt)
+        self.session.expire(row)
+        return True
+
+    def get(self, vendor_id: str) -> VendorRow | None:
+        return self.session.get(VendorRow, vendor_id, populate_existing=True)
+
+    def get_by_tax_id(self, tax_id: str) -> VendorRow | None:
+        return self.session.scalars(
+            select(VendorRow).where(VendorRow.tax_id == tax_id)
+        ).one_or_none()
+
+    def all(self) -> list[VendorRow]:
+        return list(self.session.scalars(select(VendorRow).order_by(VendorRow.id)))
+
+
+# --------------------------------------------------------------------------- records
+
+
+def _amounts(record: Invoice | PurchaseOrder) -> dict[str, Any]:
+    return {
+        "currency": record.currency,
+        "subtotal": record.subtotal,
+        "tax": record.tax,
+        "total": record.total,
+    }
+
+
+@dataclass(frozen=True)
+class OverdueInvoice:
+    invoice: InvoiceRow
+    outstanding: Decimal
+    days_overdue: int
+
+
+class InvoiceRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        record: Invoice,
+        *,
+        id: str,
+        document_id: str | None = None,
+        vendor_id: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        """Write the invoice and its line items.
+
+        ``status`` is workflow state: it is set when given (or to ``unpaid`` on first
+        insert) and otherwise left as it is, so re-ingesting a paid invoice keeps it paid.
+        """
+        values = {
+            "id": id,
+            "document_id": document_id,
+            "vendor_id": vendor_id,
+            "vendor_name": record.vendor_name,
+            "vendor_tax_id": record.vendor_tax_id,
+            "customer_name": record.customer_name,
+            "invoice_number": record.invoice_number,
+            "invoice_date": record.invoice_date,
+            "due_date": record.due_date,
+            "po_number": record.po_number,
+            "status": status or "unpaid",
+            **_amounts(record),
+        }
+        upsert(self.session, InvoiceRow, values, keep=() if status else ("status",))
+        sync_lines(self.session, InvoiceLineItemRow, "invoice_id", id, record.line_items)
+
+    def upsert_receipt(
+        self,
+        record: Receipt,
+        *,
+        id: str,
+        document_id: str | None = None,
+        vendor_id: str | None = None,
+    ) -> None:
+        """A till receipt is an invoice that was paid on the spot: stored as a ``paid``
+        invoice due on its date, numbered by its receipt number when it has one."""
+        invoice = Invoice(
+            invoice_number=record.receipt_number or f"RECEIPT-{id[:8]}",
+            vendor_name=record.vendor_name,
+            invoice_date=record.receipt_date,
+            due_date=record.receipt_date,
+            currency=record.currency,
+            tax=record.tax,
+            total=record.total,
+            line_items=record.line_items,
+        )
+        self.upsert(invoice, id=id, document_id=document_id, vendor_id=vendor_id, status="paid")
+
+    def get(self, invoice_id: str) -> InvoiceRow | None:
+        return self.session.get(InvoiceRow, invoice_id, populate_existing=True)
+
+    def find_by_number(
+        self, invoice_number: str, *, vendor_id: str | None = None
+    ) -> list[InvoiceRow]:
+        """Invoices printed with ``invoice_number`` (numbers are only unique per vendor)."""
+        stmt = select(InvoiceRow).where(InvoiceRow.invoice_number == invoice_number)
+        if vendor_id is not None:
+            stmt = stmt.where(InvoiceRow.vendor_id == vendor_id)
+        return list(self.session.scalars(stmt.order_by(InvoiceRow.invoice_date, InvoiceRow.id)))
+
+    def paid_amounts(self, invoice_ids: Iterable[str]) -> dict[str, Decimal]:
+        """Sum of payment allocations matched to each invoice."""
+        wanted = list(dict.fromkeys(invoice_ids))
+        if not wanted:
+            return {}
+        rows = self.session.execute(
+            select(PaymentAllocationRow.invoice_id, func.sum(PaymentAllocationRow.amount))
+            .where(PaymentAllocationRow.invoice_id.in_(wanted))
+            .group_by(PaymentAllocationRow.invoice_id)
+        )
+        paid = {invoice_id: Decimal(total) for invoice_id, total in rows}
+        return {invoice_id: paid.get(invoice_id, Decimal(0)) for invoice_id in wanted}
+
+    def refresh_status(self, invoice_ids: Iterable[str]) -> None:
+        """Set ``unpaid`` / ``partially_paid`` / ``paid`` from the matched payments.
+
+        ``disputed`` and ``void`` are decisions, not arithmetic, and are left alone.
+        """
+        paid = self.paid_amounts(invoice_ids)
+        for invoice_id, amount in paid.items():
+            row = self.get(invoice_id)
+            if row is None or row.status in ("disputed", "void"):
+                continue
+            if amount >= row.total - ROUNDING_TOLERANCE:
+                status = "paid"
+            elif amount > 0:
+                status = "partially_paid"
+            else:
+                status = "unpaid"
+            if row.status != status:
+                row.status = status
+        self.session.flush()
+
+    def list_overdue(
+        self, as_of: date, *, vendor_id: str | None = None, limit: int | None = None
+    ) -> list[OverdueInvoice]:
+        """Invoices past their due date on ``as_of`` with money still owed, oldest first."""
+        paid = (
+            select(
+                PaymentAllocationRow.invoice_id,
+                func.sum(PaymentAllocationRow.amount).label("paid"),
+            )
+            .group_by(PaymentAllocationRow.invoice_id)
+            .subquery()
+        )
+        outstanding = (InvoiceRow.total - func.coalesce(paid.c.paid, 0)).label("outstanding")
+        stmt = (
+            select(InvoiceRow, outstanding)
+            .outerjoin(paid, paid.c.invoice_id == InvoiceRow.id)
+            .where(
+                InvoiceRow.due_date < as_of,
+                InvoiceRow.status.not_in(("paid", "void")),
+                outstanding > ROUNDING_TOLERANCE,
+            )
+            .order_by(InvoiceRow.due_date, InvoiceRow.id)
+        )
+        if vendor_id is not None:
+            stmt = stmt.where(InvoiceRow.vendor_id == vendor_id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return [
+            OverdueInvoice(invoice=row, outstanding=Decimal(owed), days_overdue=_days(row, as_of))
+            for row, owed in self.session.execute(stmt)
+        ]
+
+
+def _days(row: InvoiceRow, as_of: date) -> int:
+    assert row.due_date is not None  # filtered in the query
+    return (as_of - row.due_date).days
+
+
+class ContractRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        record: Contract,
+        *,
+        id: str,
+        document_id: str | None = None,
+        vendor_id: str | None = None,
+    ) -> None:
+        upsert(
+            self.session,
+            ContractRow,
+            {
+                "id": id,
+                "document_id": document_id,
+                "vendor_id": vendor_id,
+                "vendor_name": record.vendor_name,
+                "customer_name": record.customer_name,
+                "contract_number": record.contract_number,
+                "title": record.title,
+                "start_date": record.start_date,
+                "end_date": record.end_date,
+                "payment_terms_days": record.payment_terms_days,
+                "currency": record.currency,
+                "rate_card": [entry.model_dump(mode="json") for entry in record.rate_card],
+            },
+        )
+
+    def get(self, contract_id: str) -> ContractRow | None:
+        return self.session.get(ContractRow, contract_id, populate_existing=True)
+
+    def find_by_number(
+        self, contract_number: str, *, vendor_id: str | None = None
+    ) -> list[ContractRow]:
+        stmt = select(ContractRow).where(ContractRow.contract_number == contract_number)
+        if vendor_id is not None:
+            stmt = stmt.where(ContractRow.vendor_id == vendor_id)
+        return list(self.session.scalars(stmt.order_by(ContractRow.start_date, ContractRow.id)))
+
+
+class PurchaseOrderRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        record: PurchaseOrder,
+        *,
+        id: str,
+        document_id: str | None = None,
+        vendor_id: str | None = None,
+        contract_id: str | None = None,
+    ) -> None:
+        """Write the PO and its lines. Without ``contract_id``, the printed contract number
+        is looked up (this vendor's contract first)."""
+        if contract_id is None and record.contract_number:
+            contract_id = _pick(
+                ContractRepository(self.session).find_by_number(record.contract_number),
+                vendor_id,
+            )
+        upsert(
+            self.session,
+            PurchaseOrderRow,
+            {
+                "id": id,
+                "document_id": document_id,
+                "vendor_id": vendor_id,
+                "vendor_name": record.vendor_name,
+                "vendor_tax_id": record.vendor_tax_id,
+                "buyer_name": record.buyer_name,
+                "po_number": record.po_number,
+                "order_date": record.order_date,
+                "delivery_date": record.delivery_date,
+                "contract_id": contract_id,
+                "contract_number": record.contract_number,
+                **_amounts(record),
+            },
+        )
+        sync_lines(self.session, POLineItemRow, "purchase_order_id", id, record.line_items)
+
+    def get(self, purchase_order_id: str) -> PurchaseOrderRow | None:
+        return self.session.get(PurchaseOrderRow, purchase_order_id, populate_existing=True)
+
+    def find_by_number(
+        self, po_number: str, *, vendor_id: str | None = None
+    ) -> list[PurchaseOrderRow]:
+        stmt = select(PurchaseOrderRow).where(PurchaseOrderRow.po_number == po_number)
+        if vendor_id is not None:
+            stmt = stmt.where(PurchaseOrderRow.vendor_id == vendor_id)
+        return list(
+            self.session.scalars(stmt.order_by(PurchaseOrderRow.order_date, PurchaseOrderRow.id))
+        )
+
+
+class PaymentRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        record: Payment,
+        *,
+        id: str,
+        document_id: str | None = None,
+        vendor_id: str | None = None,
+    ) -> None:
+        """Write the payment and its allocations, match each allocation's invoice number
+        to an invoice (this vendor's first), and refresh the affected invoices' status."""
+        invoices = InvoiceRepository(self.session)
+        before = {
+            invoice_id
+            for invoice_id in self.session.scalars(
+                select(PaymentAllocationRow.invoice_id).where(PaymentAllocationRow.payment_id == id)
+            )
+            if invoice_id is not None
+        }
+        upsert(
+            self.session,
+            PaymentRow,
+            {
+                "id": id,
+                "document_id": document_id,
+                "vendor_id": vendor_id,
+                "vendor_name": record.vendor_name,
+                "payer_name": record.payer_name,
+                "payment_reference": record.payment_reference,
+                "paid_at": record.paid_at,
+                "method": record.method,
+                "currency": record.currency,
+                "amount": record.amount,
+            },
+        )
+        matched = {
+            a.invoice_number: _pick(invoices.find_by_number(a.invoice_number), vendor_id)
+            for a in record.allocations
+        }
+        allocations = [
+            {
+                "payment_id": id,
+                "invoice_number": a.invoice_number,
+                "invoice_id": matched[a.invoice_number],
+                "amount": a.amount,
+            }
+            for a in record.allocations
+        ]
+        upsert(
+            self.session,
+            PaymentAllocationRow,
+            allocations,
+            conflict=("payment_id", "invoice_number"),
+        )
+        numbers = [a.invoice_number for a in record.allocations]
+        self.session.execute(
+            delete(PaymentAllocationRow).where(
+                PaymentAllocationRow.payment_id == id,
+                PaymentAllocationRow.invoice_number.not_in(numbers),
+            )
+        )
+        after = {invoice_id for invoice_id in matched.values() if invoice_id is not None}
+        invoices.refresh_status(before | after)
+
+    def get(self, payment_id: str) -> PaymentRow | None:
+        return self.session.get(PaymentRow, payment_id, populate_existing=True)
+
+    def find_by_reference(self, payment_reference: str) -> list[PaymentRow]:
+        return list(
+            self.session.scalars(
+                select(PaymentRow)
+                .where(PaymentRow.payment_reference == payment_reference)
+                .order_by(PaymentRow.paid_at, PaymentRow.id)
+            )
+        )
+
+
+def _pick(rows: Sequence[InvoiceRow] | Sequence[ContractRow], vendor_id: str | None) -> str | None:
+    """The id of the one candidate, preferring ``vendor_id``'s; ``None`` if ambiguous."""
+    if vendor_id is not None:
+        own = [row for row in rows if row.vendor_id == vendor_id]
+        if len(own) == 1:
+            return own[0].id
+    return rows[0].id if len(rows) == 1 else None
+
+
+# --------------------------------------------------------------------------- facade
+
+
+class Repositories:
+    """Every repository on one session, plus :meth:`upsert_record` for any record type."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.documents = DocumentRepository(session)
+        self.chunks = ChunkRepository(session)
+        self.vendors = VendorRepository(session)
+        self.invoices = InvoiceRepository(session)
+        self.purchase_orders = PurchaseOrderRepository(session)
+        self.payments = PaymentRepository(session)
+        self.contracts = ContractRepository(session)
+
+    def upsert_record(
+        self,
+        record: ExtractedRecord,
+        *,
+        id: str,
+        document_id: str | None = None,
+        vendor_id: str | None = None,
+    ) -> None:
+        """Write an extracted record to its table(s)."""
+        if isinstance(record, Invoice):
+            self.invoices.upsert(record, id=id, document_id=document_id, vendor_id=vendor_id)
+        elif isinstance(record, Receipt):
+            self.invoices.upsert_receipt(
+                record, id=id, document_id=document_id, vendor_id=vendor_id
+            )
+        elif isinstance(record, PurchaseOrder):
+            self.purchase_orders.upsert(record, id=id, document_id=document_id, vendor_id=vendor_id)
+        elif isinstance(record, Payment):
+            self.payments.upsert(record, id=id, document_id=document_id, vendor_id=vendor_id)
+        elif isinstance(record, Contract):
+            self.contracts.upsert(record, id=id, document_id=document_id, vendor_id=vendor_id)
+        else:  # pragma: no cover - ExtractedRecord is a closed union
+            raise TypeError(f"no table for {type(record).__name__}")
