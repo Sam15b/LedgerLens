@@ -108,13 +108,12 @@ def fixture_paths(tmp_path: Path) -> list[Path]:
 
 def test_fixtures_ingest_to_their_expected_json(tmp_path: Path) -> None:
     extractor, oracle = llm_extractor()
-    results = list(
-        pipeline(extractor).run(fixture_paths(tmp_path), bm25_path=tmp_path / "bm25.json")
-    )
     sink = JsonlSink(tmp_path / "processed")
-    for result in results:
-        sink.write(result)
+    results = pipeline(extractor).ingest(
+        fixture_paths(tmp_path), sink, bm25_path=tmp_path / "bm25.json"
+    )
     sink.close()
+    assert [r.document.status for r in results] == ["ready"] * len(ALL)
 
     rows = [json.loads(line) for line in (tmp_path / "processed" / "documents.jsonl").open()]
     by_name = {Path(r["document"]["filename"]).stem: r for r in rows}

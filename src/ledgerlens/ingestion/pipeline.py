@@ -13,6 +13,9 @@ Embedding needs a fitted BM25 encoder. :meth:`IngestionPipeline.run` handles a b
 way a first-time index build has to: every document is processed up to its chunks, BM25 is
 fit on all of them, then each document's chunks are embedded.
 
+Where results go is a :class:`StorageSink`: :meth:`IngestionPipeline.ingest` runs a batch
+and hands each result to one. :class:`JsonlSink` writes JSONL files for offline runs.
+
 Command line (also ``make ingest DATASET=sroie``)::
 
     python -m ledgerlens.ingestion.pipeline data/raw/sroie --limit 100 --extractor rules
@@ -202,6 +205,24 @@ class IngestionPipeline:
 
     # ------------------------------------------------------------------ batches
 
+    def ingest(
+        self,
+        paths: Sequence[Path],
+        sink: StorageSink,
+        *,
+        embed: bool = True,
+        bm25_path: Path | None = None,
+    ) -> list[IngestResult]:
+        """Run a batch (see :meth:`run`) and write every result to ``sink``.
+
+        Each result's ``document`` is replaced by what the sink stored -- ``ready``, or
+        ``failed`` with the error if writing failed.
+        """
+        results = list(self.run(paths, embed=embed, bm25_path=bm25_path))
+        for result in results:
+            result.document = sink.write(result)
+        return results
+
     def run(
         self,
         paths: Sequence[Path],
@@ -276,10 +297,16 @@ def _step(result: IngestResult, step: str) -> Iterator[None]:
 INPUT_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 
 
-class IngestSink(Protocol):
-    """Where ingested documents go. JSONL for now; Postgres/Pinecone/Neo4j on Day 30."""
+class StorageSink(Protocol):
+    """Where an ingested document is persisted.
 
-    def write(self, result: IngestResult) -> None: ...
+    ``write`` must be idempotent -- writing the same result again changes nothing -- and
+    must not raise for a storage failure: it returns the document as stored, ``ready`` or
+    ``failed`` with the error, so a batch carries on and the failure is on record.
+    Duplicates (``result.duplicate``) were stored before and are returned unchanged.
+    """
+
+    def write(self, result: IngestResult) -> Document: ...
 
     def close(self) -> None: ...
 
@@ -294,7 +321,7 @@ class JsonlSink:
         self._documents = (self.out_dir / "documents.jsonl").open("a", encoding="utf-8")
         self._chunks = (self.out_dir / "chunks.jsonl").open("a", encoding="utf-8")
 
-    def write(self, result: IngestResult) -> None:
+    def write(self, result: IngestResult) -> Document:
         extraction = result.extraction
         row = {
             "document": result.document.model_dump(mode="json"),
@@ -323,6 +350,7 @@ class JsonlSink:
                     **chunk.model_dump(mode="json"),
                 }
                 self._chunks.write(json.dumps(line, ensure_ascii=False) + "\n")
+        return result.document
 
     def close(self) -> None:
         self._documents.close()
@@ -391,11 +419,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     paths = find_inputs(args.source, args.limit)
     sink = JsonlSink(args.out)
     try:
-        results = list(
-            pipeline.run(paths, embed=not args.no_embed, bm25_path=args.out / "bm25.json")
+        results = pipeline.ingest(
+            paths, sink, embed=not args.no_embed, bm25_path=args.out / "bm25.json"
         )
-        for result in results:
-            sink.write(result)
     finally:
         sink.close()
     print(summarize(results))
