@@ -25,6 +25,7 @@ repos:
           - alembic>=1.13
           - neo4j>=5.20
           - redis>=5.0
+          - arq>=0.26
           - pinecone>=10.0
           - pymupdf>=1.24
           - pillow>=10.0
