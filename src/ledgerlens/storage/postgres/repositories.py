@@ -428,17 +428,13 @@ class InvoiceRepository:
     ) -> None:
         """A till receipt is an invoice that was paid on the spot: stored as a ``paid``
         invoice due on its date, numbered by its receipt number when it has one."""
-        invoice = Invoice(
-            invoice_number=record.receipt_number or f"RECEIPT-{id[:8]}",
-            vendor_name=record.vendor_name,
-            invoice_date=record.receipt_date,
-            due_date=record.receipt_date,
-            currency=record.currency,
-            tax=record.tax,
-            total=record.total,
-            line_items=record.line_items,
+        self.upsert(
+            record.as_invoice(id),
+            id=id,
+            document_id=document_id,
+            vendor_id=vendor_id,
+            status="paid",
         )
-        self.upsert(invoice, id=id, document_id=document_id, vendor_id=vendor_id, status="paid")
 
     def get(self, invoice_id: str) -> InvoiceRow | None:
         return self.session.get(InvoiceRow, invoice_id, populate_existing=True)

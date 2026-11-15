@@ -130,3 +130,20 @@ def test_union_schema_is_a_fresh_copy() -> None:
     extraction_json_schema()["anyOf"].clear()
 
     assert extraction_json_schema()["anyOf"]
+
+
+def test_receipt_as_invoice_is_due_on_its_date_and_keeps_its_number() -> None:
+    receipt = Receipt.model_validate(
+        {"vendor_name": "Cafe", "receipt_date": "2026-03-14", "total": "9.00", "currency": "MYR"}
+    )
+
+    invoice = receipt.as_invoice("3f2c0000-aaaa")
+    numbered = receipt.model_copy(update={"receipt_number": "R-77"}).as_invoice("x")
+
+    assert (invoice.invoice_number, invoice.due_date, invoice.total) == (
+        "RECEIPT-3f2c0000",
+        invoice.invoice_date,
+        receipt.total,
+    )
+    assert invoice.currency == "MYR"
+    assert numbered.invoice_number == "R-77"
