@@ -1,11 +1,15 @@
 """ORM model shape, checked without a database by compiling the DDL for PostgreSQL."""
 
+from typing import get_args
+
 import pytest
 from sqlalchemy import Table
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from ledgerlens.core.schemas import DocType, DocumentStatus
+from ledgerlens.core.schemas.payment import PaymentMethod
+from ledgerlens.observability.cost import LLMCallRecord
 from ledgerlens.storage.postgres.models import Base
 
 TABLES = Base.metadata.tables
@@ -20,10 +24,6 @@ def ddl(table: Table) -> str:
 @pytest.mark.parametrize("name", sorted(TABLES))
 def test_every_table_compiles_for_postgres(name: str) -> None:
     assert f"CREATE TABLE {name}" in ddl(TABLES[name])
-
-
-def test_core_tables_exist() -> None:
-    assert {"documents", "chunks", "vendors", "invoices", "invoice_line_items"} <= set(TABLES)
 
 
 def test_document_id_is_a_uuid_shared_with_chunks_and_records() -> None:
@@ -74,3 +74,67 @@ def test_constraint_names_follow_the_naming_convention() -> None:
         for constraint in table.constraints:
             assert constraint.name, f"unnamed constraint on {table.name}"
             assert str(constraint.name).split("_", 1)[0] in {"pk", "fk", "uq", "ck"}
+
+
+def test_every_planned_table_exists() -> None:
+    planned = {
+        "documents",
+        "chunks",
+        "vendors",
+        "invoices",
+        "invoice_line_items",
+        "purchase_orders",
+        "po_line_items",
+        "payments",
+        "payment_allocations",
+        "contracts",
+        "anomaly_scores",
+        "reminders",
+        "llm_calls",
+        "eval_runs",
+    }
+
+    assert set(TABLES) == planned
+
+
+def test_payment_methods_match_the_pydantic_schema() -> None:
+    sql = ddl(TABLES["payments"])
+
+    for method in get_args(PaymentMethod):
+        assert f"'{method}'" in sql
+
+
+def test_a_payment_can_settle_several_invoices() -> None:
+    sql = ddl(TABLES["payment_allocations"])
+
+    assert "REFERENCES payments (id) ON DELETE CASCADE" in sql
+    assert "REFERENCES invoices (id) ON DELETE SET NULL" in sql  # unmatched numbers survive
+    assert "UNIQUE (payment_id, invoice_number)" in sql
+
+
+def test_purchase_orders_link_to_their_contract() -> None:
+    assert "REFERENCES contracts (id) ON DELETE SET NULL" in ddl(TABLES["purchase_orders"])
+
+
+def test_rate_cards_and_eval_payloads_are_jsonb() -> None:
+    assert "rate_card JSONB DEFAULT '[]'::jsonb NOT NULL" in ddl(TABLES["contracts"])
+    eval_sql = ddl(TABLES["eval_runs"])
+    assert "config JSONB DEFAULT '{}'::jsonb NOT NULL" in eval_sql
+    assert "metrics JSONB DEFAULT '{}'::jsonb NOT NULL" in eval_sql
+
+
+def test_one_score_per_invoice_and_model_version() -> None:
+    assert "UNIQUE (invoice_id, model_version)" in ddl(TABLES["anomaly_scores"])
+
+
+def test_reminders_wait_for_approval() -> None:
+    sql = ddl(TABLES["reminders"])
+
+    assert "'pending_approval'" in sql
+    assert TABLES["reminders"].c.status.default.arg == "pending_approval"  # type: ignore[union-attr]
+
+
+def test_llm_calls_mirror_the_cost_record() -> None:
+    columns = set(TABLES["llm_calls"].c.keys())
+
+    assert set(LLMCallRecord.model_fields) <= columns
