@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     embedding_dim: int = 768
 
     # Observability
+    llm_cost_db: bool = False
+    """Also write every LLM call to the ``llm_calls`` table (needs migrated Postgres)."""
     langsmith_api_key: str = ""
     langsmith_project: str = "ledgerlens"
     phoenix_collector_endpoint: str = ""
