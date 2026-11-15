@@ -336,6 +336,24 @@ class VendorRepository:
             },
         )
 
+    def ensure(self, vendor_id: str, name: str, *, tax_id: str | None = None) -> bool:
+        """Insert the vendor unless its id exists (an existing row is left as it is).
+
+        The tax id is only stored if no other vendor has it. Returns whether it was new.
+        """
+        if tax_id is not None:
+            owner = self.get_by_tax_id(tax_id)
+            if owner is not None and owner.id != vendor_id:
+                tax_id = None
+        table: Table = VendorRow.__table__  # type: ignore[assignment]
+        stmt = (
+            pg_insert(table)
+            .values(id=vendor_id, canonical_name=name, tax_id=tax_id)
+            .on_conflict_do_nothing(index_elements=["id"])
+            .returning(table.c.id)
+        )
+        return self.session.execute(stmt).scalar_one_or_none() is not None
+
     def add_alias(self, vendor_id: str, alias: str) -> bool:
         """Remember another spelling of a vendor's name. Returns whether it was new."""
         row = self.get(vendor_id)
@@ -707,6 +725,19 @@ def _pick(rows: Sequence[InvoiceRow] | Sequence[ContractRow], vendor_id: str | N
 
 # --------------------------------------------------------------------------- facade
 
+RECORD_MODELS: tuple[type[Base], ...] = (InvoiceRow, PurchaseOrderRow, PaymentRow, ContractRow)
+
+
+def record_model(record: ExtractedRecord) -> type[Base]:
+    """The table a record is stored in (receipts are invoices)."""
+    if isinstance(record, Invoice | Receipt):
+        return InvoiceRow
+    if isinstance(record, PurchaseOrder):
+        return PurchaseOrderRow
+    if isinstance(record, Payment):
+        return PaymentRow
+    return ContractRow
+
 
 class Repositories:
     """Every repository on one session, plus :meth:`upsert_record` for any record type."""
@@ -720,6 +751,18 @@ class Repositories:
         self.purchase_orders = PurchaseOrderRepository(session)
         self.payments = PaymentRepository(session)
         self.contracts = ContractRepository(session)
+
+    def delete_records(self, document_id: str, *, keep: type[Base] | None = None) -> int:
+        """Delete the business records a document produced, except in table ``keep`` --
+        for a re-ingest whose extraction changed the document type. Returns how many."""
+        removed = 0
+        for model in RECORD_MODELS:
+            if model is keep:
+                continue
+            table: Table = model.__table__  # type: ignore[assignment]
+            result = self.session.execute(delete(table).where(table.c.document_id == document_id))
+            removed += result.rowcount  # type: ignore[attr-defined]
+        return removed
 
     def upsert_record(
         self,

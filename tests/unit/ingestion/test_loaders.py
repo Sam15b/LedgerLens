@@ -269,3 +269,41 @@ def test_sniff_mime_type() -> None:
     assert sniff_mime_type(b"\xff\xd8\xff\xe0") == "image/jpeg"
     assert sniff_mime_type(b"MM\x00*") == sniff_mime_type(b"II*\x00") == "image/tiff"
     assert sniff_mime_type(b"GIF89a") is None
+
+
+class UnfinishedRegistry(InMemoryRegistry):
+    """Every registered document counts as never finished (as after a crash)."""
+
+    def needs_retry(self, document_id: str) -> bool:
+        return True
+
+
+def test_unfinished_documents_are_retried_under_their_old_id() -> None:
+    registry = UnfinishedRegistry()
+    first = FileLoader(CONFIG, registry=registry).load(FIXTURES / "contract.pdf")
+
+    again = FileLoader(CONFIG, registry=registry).load(FIXTURES / "contract.pdf")  # next run
+
+    assert (again.duplicate, again.retry) == (False, True)
+    assert again.document_id == first.document_id
+
+
+def test_a_retry_is_handed_out_once_per_loader() -> None:
+    registry = UnfinishedRegistry()
+    FileLoader(CONFIG, registry=registry).load(FIXTURES / "contract.pdf")
+    rerun = FileLoader(CONFIG, registry=registry)
+
+    retried = rerun.load(FIXTURES / "contract.pdf")
+    copy = rerun.load_bytes((FIXTURES / "contract.pdf").read_bytes(), "copy.pdf")
+
+    assert retried.retry and not retried.duplicate
+    assert copy.duplicate and copy.document_id == retried.document_id  # not processed twice
+
+
+def test_finished_documents_stay_duplicates() -> None:
+    registry = InMemoryRegistry()
+    FileLoader(CONFIG, registry=registry).load(FIXTURES / "contract.pdf")
+
+    again = FileLoader(CONFIG, registry=registry).load(FIXTURES / "contract.pdf")
+
+    assert (again.duplicate, again.retry) == (True, False)

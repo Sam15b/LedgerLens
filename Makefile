@@ -15,7 +15,7 @@ DATASET ?= sroie
 todo = @echo make $@: not implemented yet - $(1)
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install-ml up down init migrate data ingest api mcp web \
+.PHONY: help setup install-ml up down init migrate data ingest worker enqueue api mcp web \
         test test-int cov lint format eval eval-ci clean
 
 help:             ## Show this help
@@ -48,8 +48,14 @@ migrate:          ## Upgrade Postgres to the latest Alembic migration
 data:             ## Download public datasets into data/raw (DATASETS="funsd cuad" for a subset)
 	$(PY) scripts/download_datasets.py $(DATASETS)
 
-ingest:           ## Ingest data/raw/$(DATASET) into data/processed (ARGS="--limit 100 --extractor rules")
+ingest:           ## Ingest data/raw/$(DATASET) into the stores (ARGS="--limit 100" or "--sink jsonl")
 	$(PY) -m ledgerlens.ingestion.pipeline data/raw/$(DATASET) $(ARGS)
+
+worker:           ## Run the ingestion worker (Redis queue; needs make up && make init)
+	$(PY) -m ledgerlens.workers.ingest_worker run
+
+enqueue:          ## Queue data/raw/$(DATASET) for the ingestion worker
+	$(PY) -m ledgerlens.workers.ingest_worker enqueue data/raw/$(DATASET)
 
 # --- Run -----------------------------------------------------------------------------
 api:              ## Run FastAPI with reload on :8000

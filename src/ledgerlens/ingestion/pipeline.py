@@ -9,16 +9,28 @@ Extraction runs *before* chunking (the plan lists it after): the chunks' context
 (``[INVOICE INV-889 | Vendor: ... | Date: ...]``) needs the extracted number, vendor and
 date.
 
+Status: a document is ``processing`` from the first step; a step failure makes it
+``failed`` with ``"<step>: <error>"``, otherwise the pipeline hands it on as ``ready`` and the
+sink has the last word (``failed`` if storing it fails). ``on_status`` hears about
+``processing`` and pipeline failures as they happen -- the stores sink records them, so a
+crash part-way leaves documents that are not ``ready`` and the next run retries them.
+
 Embedding needs a fitted BM25 encoder. :meth:`IngestionPipeline.run` handles a batch the
 way a first-time index build has to: every document is processed up to its chunks, BM25 is
 fit on all of them, then each document's chunks are embedded.
 
+Where results go is a :class:`StorageSink`: :meth:`IngestionPipeline.ingest` runs a batch
+and hands each result to one. :class:`~ledgerlens.ingestion.sinks.StoresSink` writes
+Postgres, Pinecone and Neo4j; :class:`JsonlSink` writes JSONL files for offline runs.
+
 Command line (also ``make ingest DATASET=sroie``)::
 
     python -m ledgerlens.ingestion.pipeline data/raw/sroie --limit 100 --extractor rules
+    python -m ledgerlens.ingestion.pipeline data/raw/sroie --sink jsonl --out data/processed
 
-writes ``data/processed/documents.jsonl`` and ``chunks.jsonl`` and prints the median time
-per step.
+stores every document (needs ``make up && make init``; files already stored are skipped by
+their SHA-256), or writes ``documents.jsonl`` / ``chunks.jsonl`` without any store, and
+prints the median time per step.
 """
 
 from __future__ import annotations
@@ -27,7 +39,7 @@ import argparse
 import json
 import logging
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
@@ -58,6 +70,7 @@ class IngestResult(BaseModel):
 
     document: Document
     duplicate: bool = False  # same bytes ingested before: nothing else was run
+    retry: bool = False  # same bytes as a document that never finished: run again
     classification: str | None = None  # "rules" | "llm" | "fallback"
     extraction: ExtractionResult | None = None
     pages: list[PageContent] = Field(default_factory=list, exclude=True)
@@ -111,6 +124,7 @@ class IngestionPipeline:
         extractor: Extractor | None = None,
         embedder: ChunkEmbedder | None = None,
         llm: LLMClient | None = None,
+        on_status: Callable[[Document], object] | None = None,
     ) -> None:
         self.config = config or get_config().ingestion
         self.loader = loader or FileLoader(self.config.loader)
@@ -118,6 +132,7 @@ class IngestionPipeline:
         self.llm = llm
         self.extractor = extractor or make_extractor(self.config.extraction.default, llm=llm)
         self.embedder = embedder
+        self.on_status = on_status
 
     @property
     def ocr(self) -> OCREngine:
@@ -139,8 +154,11 @@ class IngestionPipeline:
             logger.info("%s already ingested as %s", loaded.file.filename, loaded.document_id)
             return IngestResult(document=document, duplicate=True, timings_ms=timings)
 
-        result = IngestResult(document=document.with_status(DocumentStatus.PROCESSING))
+        result = IngestResult(
+            document=document.with_status(DocumentStatus.PROCESSING), retry=loaded.retry
+        )
         result.timings_ms = timings
+        self._status(result.document)
         try:
             self._read(result, Path(path), loaded.file.mime_type)
             self._understand(result)
@@ -149,9 +167,20 @@ class IngestionPipeline:
         except _StepError as exc:
             logger.warning("ingesting %s failed at %s", loaded.file.filename, exc)
             result.document = result.document.with_status(DocumentStatus.FAILED, error=str(exc))
+            self._status(result.document)
             return result
         result.document = result.document.with_status(DocumentStatus.READY)
         return result
+
+    def _status(self, document: Document) -> None:
+        logger.info(
+            "document %s is %s",
+            document.id,
+            document.status.value,
+            extra={"document_id": document.id, "status": document.status.value},
+        )
+        if self.on_status is not None:
+            self.on_status(document)
 
     def _read(self, result: IngestResult, path: Path, mime_type: str) -> None:
         with _step(result, "layout"):
@@ -202,6 +231,24 @@ class IngestionPipeline:
 
     # ------------------------------------------------------------------ batches
 
+    def ingest(
+        self,
+        paths: Sequence[Path],
+        sink: StorageSink,
+        *,
+        embed: bool = True,
+        bm25_path: Path | None = None,
+    ) -> list[IngestResult]:
+        """Run a batch (see :meth:`run`) and write every result to ``sink``.
+
+        Each result's ``document`` is replaced by what the sink stored -- ``ready``, or
+        ``failed`` with the error if writing failed.
+        """
+        results = list(self.run(paths, embed=embed, bm25_path=bm25_path))
+        for result in results:
+            result.document = sink.write(result)
+        return results
+
     def run(
         self,
         paths: Sequence[Path],
@@ -233,6 +280,7 @@ class IngestionPipeline:
                         result.document = result.document.with_status(
                             DocumentStatus.FAILED, error=str(exc)
                         )
+                        self._status(result.document)
         yield from results
 
 
@@ -276,10 +324,16 @@ def _step(result: IngestResult, step: str) -> Iterator[None]:
 INPUT_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 
 
-class IngestSink(Protocol):
-    """Where ingested documents go. JSONL for now; Postgres/Pinecone/Neo4j on Day 30."""
+class StorageSink(Protocol):
+    """Where an ingested document is persisted.
 
-    def write(self, result: IngestResult) -> None: ...
+    ``write`` must be idempotent -- writing the same result again changes nothing -- and
+    must not raise for a storage failure: it returns the document as stored, ``ready`` or
+    ``failed`` with the error, so a batch carries on and the failure is on record.
+    Duplicates (``result.duplicate``) were stored before and are returned unchanged.
+    """
+
+    def write(self, result: IngestResult) -> Document: ...
 
     def close(self) -> None: ...
 
@@ -294,7 +348,7 @@ class JsonlSink:
         self._documents = (self.out_dir / "documents.jsonl").open("a", encoding="utf-8")
         self._chunks = (self.out_dir / "chunks.jsonl").open("a", encoding="utf-8")
 
-    def write(self, result: IngestResult) -> None:
+    def write(self, result: IngestResult) -> Document:
         extraction = result.extraction
         row = {
             "document": result.document.model_dump(mode="json"),
@@ -323,6 +377,7 @@ class JsonlSink:
                     **chunk.model_dump(mode="json"),
                 }
                 self._chunks.write(json.dumps(line, ensure_ascii=False) + "\n")
+        return result.document
 
     def close(self) -> None:
         self._documents.close()
@@ -368,11 +423,19 @@ def _median(values: Sequence[float]) -> float:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m ledgerlens.ingestion.pipeline",
-        description="Ingest every PDF/image under a folder into JSONL (data/processed).",
+        description="Ingest every PDF/image under a folder into the stores (or JSONL).",
     )
     parser.add_argument("source", type=Path, help="file or folder, e.g. data/raw/sroie")
     parser.add_argument("--limit", type=int, help="ingest at most N files (sorted by path)")
-    parser.add_argument("--out", type=Path, default=repo_path("data/processed"))
+    parser.add_argument(
+        "--sink",
+        choices=["stores", "jsonl"],
+        default="stores",
+        help="stores: Postgres + Pinecone + Neo4j (default); jsonl: files under --out",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=repo_path("data/processed"), help="JSONL folder, BM25 params"
+    )
     parser.add_argument(
         "--extractor",
         choices=["rules", "llm"],
@@ -383,23 +446,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     configure_logging()
     config = get_config().ingestion
+    sink: StorageSink
+    if args.sink == "stores":
+        from ledgerlens.ingestion.loaders import PostgresRegistry
+        from ledgerlens.ingestion.sinks import StoresSink
+
+        stores = StoresSink.from_settings()
+        sink, on_status = stores, stores.mark
+        loader = FileLoader(config.loader, registry=PostgresRegistry())
+    else:
+        sink, on_status = JsonlSink(args.out), None
+        loader = FileLoader(config.loader)
     pipeline = IngestionPipeline(
         config,
+        loader=loader,
+        on_status=on_status,
         extractor=make_extractor(args.extractor) if args.extractor else None,
         embedder=None if args.no_embed else default_embedder(config),
     )
     paths = find_inputs(args.source, args.limit)
-    sink = JsonlSink(args.out)
     try:
-        results = list(
-            pipeline.run(paths, embed=not args.no_embed, bm25_path=args.out / "bm25.json")
+        results = pipeline.ingest(
+            paths, sink, embed=not args.no_embed, bm25_path=args.out / "bm25.json"
         )
-        for result in results:
-            sink.write(result)
     finally:
         sink.close()
     print(summarize(results))
-    print(f"wrote {args.out / 'documents.jsonl'} and {args.out / 'chunks.jsonl'}")
+    if args.sink == "jsonl":
+        print(f"wrote {args.out / 'documents.jsonl'} and {args.out / 'chunks.jsonl'}")
     return 0 if all(r.document.status is not DocumentStatus.FAILED for r in results) else 1
 
 

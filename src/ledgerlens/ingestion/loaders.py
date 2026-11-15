@@ -20,6 +20,10 @@ Two registries:
 * :class:`InMemoryRegistry` -- one process only; the default when no registry is passed,
   for tests and one-off runs that should not touch the database.
 
+A file whose earlier document never reached ``ready`` -- its run failed, or the process
+died part-way -- is not a duplicate: it comes back with ``retry=True`` and its old
+``document_id``, so the next run finishes the job instead of skipping it.
+
 Size and type limits come from ``loader`` in ``configs/ingestion.yaml``.
 """
 
@@ -76,7 +80,8 @@ class LoadResult(BaseModel):
     """A loaded file and the ``document_id`` it belongs to.
 
     ``duplicate`` is true when these bytes were registered before: ``document_id`` is then
-    the earlier document's, and the file should not be processed again.
+    the earlier document's, and the file should not be processed again. ``retry`` is true
+    when they were registered but never finished: process them again under the old id.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -84,6 +89,7 @@ class LoadResult(BaseModel):
     file: LoadedFile
     document_id: str
     duplicate: bool
+    retry: bool = False
 
     def to_document(self) -> Document:
         """A new ``queued`` :class:`Document` for this file."""
@@ -189,6 +195,10 @@ class DedupeRegistry(Protocol):
 
     def get(self, sha256: str) -> str | None: ...
 
+    def needs_retry(self, document_id: str) -> bool:
+        """Whether a registered document never finished (failed, or stopped part-way)."""
+        ...
+
 
 class InMemoryRegistry:
     def __init__(self) -> None:
@@ -205,6 +215,9 @@ class InMemoryRegistry:
     def get(self, sha256: str) -> str | None:
         with self._lock:
             return self._ids.get(sha256)
+
+    def needs_retry(self, document_id: str) -> bool:
+        return False  # no status here: within one process a duplicate is a duplicate
 
     def __len__(self) -> int:
         return len(self._ids)
@@ -235,6 +248,14 @@ class PostgresRegistry:
         with self.sessions() as session:
             return DocumentRepository(session).id_for_sha256(sha256)
 
+    def needs_retry(self, document_id: str) -> bool:
+        from ledgerlens.core.schemas import DocumentStatus
+        from ledgerlens.storage.postgres.repositories import DocumentRepository
+
+        with self.sessions() as session:
+            stored = DocumentRepository(session).get(document_id)
+        return stored is not None and stored.status is not DocumentStatus.READY
+
 
 # --------------------------------------------------------------------------- loader
 
@@ -248,6 +269,7 @@ class FileLoader:
     ) -> None:
         self.config = config or get_config().ingestion.loader
         self.registry: DedupeRegistry = registry if registry is not None else InMemoryRegistry()
+        self._taken: set[str] = set()  # ids this loader handed out: a second copy is a duplicate
 
     @property
     def max_bytes(self) -> int:
@@ -298,7 +320,17 @@ class FileLoader:
         claimed = LoadResult(file=file, document_id=new_document_id(), duplicate=False)
         existing = self.registry.claim(claimed.to_document())
         if existing is None:
+            self._taken.add(claimed.document_id)
             return claimed
+        if existing not in self._taken and self.registry.needs_retry(existing):
+            self._taken.add(existing)
+            logger.info(
+                "retrying %s: document %s never finished",
+                file.filename,
+                existing,
+                extra={"sha256": file.sha256, "document_id": existing},
+            )
+            return LoadResult(file=file, document_id=existing, duplicate=False, retry=True)
         logger.info(
             "skipping %s: same content as document %s",
             file.filename,
