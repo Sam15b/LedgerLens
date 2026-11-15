@@ -11,6 +11,7 @@ from ledgerlens.core.config import LoaderConfig
 from ledgerlens.core.ids import is_document_id
 from ledgerlens.core.schemas import (
     Contract,
+    Document,
     DocumentStatus,
     ExtractedModel,
     Invoice,
@@ -173,7 +174,8 @@ def test_concurrent_claims_of_one_hash_have_a_single_winner() -> None:
 
     def claim(n: int) -> None:
         start.wait()
-        results.append(registry.claim("a" * 64, f"doc-{n}"))
+        document = Document(sha256="a" * 64, filename=f"copy-{n}.pdf")
+        results.append(registry.claim(document))
 
     threads = [threading.Thread(target=claim, args=(n,)) for n in range(8)]
     for thread in threads:

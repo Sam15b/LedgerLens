@@ -5,9 +5,13 @@ provider, model, tokens, USD cost and latency, plus the request id from the logg
 context so a call can be traced back to the API request or job that made it.
 
 The :class:`CostLedger` keeps recent records in memory (for summaries such as the provider
-comparison) and forwards each one to its sinks. :class:`JsonlCostSink` appends one JSON
-object per line to a file; a Postgres ``llm_calls`` sink joins it in Phase 3. A failing
-sink is logged and skipped: recording cost must never break the call it describes.
+comparison) and forwards each one to its sinks:
+
+* :class:`JsonlCostSink` appends one JSON object per line to ``cost_log`` (models.yaml);
+* :class:`PostgresCostSink` inserts a row into the ``llm_calls`` table, when
+  ``LLM_COST_DB=true`` -- the record the dashboards and cost reports query.
+
+A failing sink is logged and skipped: recording cost must never break the call it describes.
 """
 
 from __future__ import annotations
@@ -17,13 +21,17 @@ import threading
 from collections import deque
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ledgerlens.core.config import ModelsConfig, repo_path
+from ledgerlens.core.config import ModelsConfig, Settings, get_settings, repo_path
 from ledgerlens.core.logging import get_request_id
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +89,61 @@ class JsonlCostSink:
                 f.write(line)
 
 
+class PostgresCostSink:
+    """Insert each record into ``llm_calls``, one short transaction per call.
+
+    SQLAlchemy is imported on first use, so the LLM layer runs without the storage extra
+    when this sink is off. ``sessions`` defaults to the ``DATABASE_URL`` pool.
+    """
+
+    def __init__(self, sessions: sessionmaker[Session] | None = None) -> None:
+        from ledgerlens.storage.postgres.db import get_session_factory
+
+        self.sessions = sessions or get_session_factory()
+
+    def write(self, record: LLMCallRecord) -> None:
+        from ledgerlens.storage.postgres.db import session_scope
+        from ledgerlens.storage.postgres.models import LLMCallRow
+
+        with session_scope(self.sessions) as session:
+            session.add(LLMCallRow(**llm_call_values(record)))
+
+    def read(self, *, since: datetime | None = None) -> list[LLMCallRecord]:
+        """Stored records, oldest first (optionally only those at or after ``since``)."""
+        from sqlalchemy import select
+
+        from ledgerlens.storage.postgres.models import LLMCallRow
+
+        stmt = select(LLMCallRow).order_by(LLMCallRow.ts, LLMCallRow.id)
+        if since is not None:
+            stmt = stmt.where(LLMCallRow.ts >= since)
+        with self.sessions() as session:
+            return [
+                LLMCallRecord(
+                    ts=row.ts,
+                    request_id=row.request_id,
+                    alias=row.alias,
+                    provider=row.provider,
+                    model=row.model,
+                    tokens_in=row.tokens_in,
+                    tokens_out=row.tokens_out,
+                    cost_usd=None if row.cost_usd is None else float(row.cost_usd),
+                    latency_ms=row.latency_ms,
+                    streamed=row.streamed,
+                )
+                for row in session.scalars(stmt)
+            ]
+
+
+def llm_call_values(record: LLMCallRecord) -> dict[str, Any]:
+    """Column values for an ``llm_calls`` row; cost goes through ``str`` so the stored
+    decimal is the float's shortest repr (0.1 stays 0.1, not 0.1000000000000000055...)."""
+    values = record.model_dump()
+    if record.cost_usd is not None:
+        values["cost_usd"] = Decimal(str(record.cost_usd))
+    return values
+
+
 def read_jsonl(path: Path) -> list[LLMCallRecord]:
     """Load the records a :class:`JsonlCostSink` wrote."""
     if not path.is_file():
@@ -98,11 +161,15 @@ class CostLedger:
         self._lock = threading.Lock()
 
     @classmethod
-    def from_config(cls, config: ModelsConfig) -> CostLedger:
-        """A ledger with a JSONL sink at ``cost_log`` (relative to the repo), if set."""
-        if config.cost_log is None:
-            return cls()
-        return cls([JsonlCostSink(repo_path(config.cost_log))])
+    def from_config(cls, config: ModelsConfig, settings: Settings | None = None) -> CostLedger:
+        """A ledger with a JSONL sink at ``cost_log`` (relative to the repo), if set, and a
+        Postgres ``llm_calls`` sink if ``LLM_COST_DB`` is on."""
+        sinks: list[CostSink] = []
+        if config.cost_log is not None:
+            sinks.append(JsonlCostSink(repo_path(config.cost_log)))
+        if (settings or get_settings()).llm_cost_db:
+            sinks.append(PostgresCostSink())
+        return cls(sinks)
 
     def record(self, record: LLMCallRecord) -> None:
         with self._lock:
