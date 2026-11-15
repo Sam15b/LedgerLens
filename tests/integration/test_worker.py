@@ -64,5 +64,9 @@ def test_queued_files_are_ingested_by_the_worker(tmp_path: Path) -> None:
 
     results = asyncio.run(run_queue(paths, ingestor))
 
-    assert ingestor.paths == [str(p.resolve()) for p in paths]
+    # arq orders its queue by enqueue time in milliseconds; jobs queued in the same
+    # millisecond come out in job-id order (random), so only the set of jobs is fixed.
+    assert sorted(ingestor.paths) == sorted(str(p.resolve()) for p in paths)
+    assert len(ingestor.paths) == len(paths)  # each job ran exactly once
     assert [r["status"] for r in results] == ["ready"] * 3
+    assert [r["path"] for r in results] == [str(p.resolve()) for p in paths]  # by job id

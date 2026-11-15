@@ -17,6 +17,8 @@ the document is marked ``failed`` with that reason.
 
 Jobs run one at a time per worker process (``max_jobs = 1``): the embedding model and the
 OCR engine are not shared between threads. Scale out with more worker processes.
+Jobs are not processed strictly in queue order (arq scores its queue by enqueue time in
+milliseconds, and ties break on the random job id); nothing here depends on the order.
 
 ``run`` needs a POSIX system (arq's worker relies on Unix signals): use Docker or WSL on
 Windows. ``enqueue`` works everywhere.
