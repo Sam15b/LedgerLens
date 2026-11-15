@@ -192,13 +192,16 @@ class VendorResolver:
         return match or VendorMatch(new_vendor_id(name), "new", 0.0)
 
     def ensure(self, name: str, tax_id: str | None = None) -> VendorMatch:
-        """Resolve the vendor and make sure its node exists.
-
-        A new vendor is created with the printed name; a name or fuzzy match whose printed
-        spelling differs from the vendor's name records it as an alias; a tax id is filled
-        in if the vendor had none.
-        """
+        """Resolve the vendor and make sure its node exists (:meth:`resolve` +
+        :meth:`remember`)."""
         match = self.resolve(name, tax_id)
+        self.remember(match, name, tax_id)
+        return match
+
+    def remember(self, match: VendorMatch, name: str, tax_id: str | None = None) -> None:
+        """Write what a resolution learned: a new vendor is created with the printed name;
+        a match whose printed spelling differs from the vendor's name records it as an
+        alias; a tax id is filled in if the vendor had none."""
         if match.method == "new":
             run_write(
                 self.driver,
@@ -207,7 +210,7 @@ class VendorResolver:
                 {"id": match.vendor_id, "name": name, "tax_id": tax_id},
                 database=self.database,
             )
-            return match
+            return
         run_write(
             self.driver,
             """
@@ -222,7 +225,6 @@ class VendorResolver:
             {"id": match.vendor_id, "name": name, "tax_id": tax_id},
             database=self.database,
         )
-        return match
 
 
 # --------------------------------------------------------------------------- linking
@@ -451,6 +453,20 @@ def _lines(record_id: str, lines: Sequence[LineItem]) -> list[dict[str, Any]]:
     ]
 
 
+RECORD_LABELS = ("Invoice", "PurchaseOrder", "Payment", "Contract")
+
+
+def record_label(record: ExtractedRecord) -> str:
+    """The node label a record is linked as (receipts are invoices)."""
+    if isinstance(record, Invoice | Receipt):
+        return "Invoice"
+    if isinstance(record, PurchaseOrder):
+        return "PurchaseOrder"
+    if isinstance(record, Payment):
+        return "Payment"
+    return "Contract"
+
+
 @dataclass
 class LinkResult:
     """What linking one record did."""
@@ -676,6 +692,32 @@ class GraphLinker:
         if rows[0]["governs"]:
             links["GOVERNS"] = sorted(rows[0]["governs"])
         return LinkResult(base["id"], "Contract", vendor, links)
+
+    def unlink_document(self, document_id: str, *, keep: str | None = None) -> int:
+        """Remove the record nodes (and their line items and unresolved links) that a
+        document produced, except those labelled ``keep`` -- for a re-ingest whose
+        extraction changed the document type. Vendors are shared and stay.
+        Returns how many record nodes were removed."""
+        removed = 0
+        for label in RECORD_LABELS:
+            if label == keep:
+                continue
+            rows = run_write(
+                self.driver,
+                f"""
+                MATCH (n:{label} {{document_id: $document_id}})
+                OPTIONAL MATCH (n)-[:HAS_LINE]->(line:LineItem)
+                OPTIONAL MATCH (u:UnresolvedLink {{source_id: n.id}})
+                DETACH DELETE line, u
+                WITH DISTINCT n
+                DETACH DELETE n
+                RETURN count(*) AS removed
+                """,
+                {"document_id": document_id},
+                database=self.database,
+            )
+            removed += rows[0]["removed"] if rows else 0
+        return removed
 
     def unresolved(self, rel: str | None = None) -> list[UnresolvedLink]:
         """Recorded references that still have no target, optionally of one edge type."""

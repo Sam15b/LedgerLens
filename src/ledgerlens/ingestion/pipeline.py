@@ -14,14 +14,17 @@ way a first-time index build has to: every document is processed up to its chunk
 fit on all of them, then each document's chunks are embedded.
 
 Where results go is a :class:`StorageSink`: :meth:`IngestionPipeline.ingest` runs a batch
-and hands each result to one. :class:`JsonlSink` writes JSONL files for offline runs.
+and hands each result to one. :class:`~ledgerlens.ingestion.sinks.StoresSink` writes
+Postgres, Pinecone and Neo4j; :class:`JsonlSink` writes JSONL files for offline runs.
 
 Command line (also ``make ingest DATASET=sroie``)::
 
     python -m ledgerlens.ingestion.pipeline data/raw/sroie --limit 100 --extractor rules
+    python -m ledgerlens.ingestion.pipeline data/raw/sroie --sink jsonl --out data/processed
 
-writes ``data/processed/documents.jsonl`` and ``chunks.jsonl`` and prints the median time
-per step.
+stores every document (needs ``make up && make init``; files already stored are skipped by
+their SHA-256), or writes ``documents.jsonl`` / ``chunks.jsonl`` without any store, and
+prints the median time per step.
 """
 
 from __future__ import annotations
@@ -396,11 +399,19 @@ def _median(values: Sequence[float]) -> float:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m ledgerlens.ingestion.pipeline",
-        description="Ingest every PDF/image under a folder into JSONL (data/processed).",
+        description="Ingest every PDF/image under a folder into the stores (or JSONL).",
     )
     parser.add_argument("source", type=Path, help="file or folder, e.g. data/raw/sroie")
     parser.add_argument("--limit", type=int, help="ingest at most N files (sorted by path)")
-    parser.add_argument("--out", type=Path, default=repo_path("data/processed"))
+    parser.add_argument(
+        "--sink",
+        choices=["stores", "jsonl"],
+        default="stores",
+        help="stores: Postgres + Pinecone + Neo4j (default); jsonl: files under --out",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=repo_path("data/processed"), help="JSONL folder, BM25 params"
+    )
     parser.add_argument(
         "--extractor",
         choices=["rules", "llm"],
@@ -411,13 +422,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     configure_logging()
     config = get_config().ingestion
+    sink: StorageSink
+    if args.sink == "stores":
+        from ledgerlens.ingestion.loaders import PostgresRegistry
+        from ledgerlens.ingestion.sinks import StoresSink
+
+        sink = StoresSink.from_settings()
+        loader = FileLoader(config.loader, registry=PostgresRegistry())
+    else:
+        sink, loader = JsonlSink(args.out), FileLoader(config.loader)
     pipeline = IngestionPipeline(
         config,
+        loader=loader,
         extractor=make_extractor(args.extractor) if args.extractor else None,
         embedder=None if args.no_embed else default_embedder(config),
     )
     paths = find_inputs(args.source, args.limit)
-    sink = JsonlSink(args.out)
     try:
         results = pipeline.ingest(
             paths, sink, embed=not args.no_embed, bm25_path=args.out / "bm25.json"
@@ -425,7 +445,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         sink.close()
     print(summarize(results))
-    print(f"wrote {args.out / 'documents.jsonl'} and {args.out / 'chunks.jsonl'}")
+    if args.sink == "jsonl":
+        print(f"wrote {args.out / 'documents.jsonl'} and {args.out / 'chunks.jsonl'}")
     return 0 if all(r.document.status is not DocumentStatus.FAILED for r in results) else 1
 
 

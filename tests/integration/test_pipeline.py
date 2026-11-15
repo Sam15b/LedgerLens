@@ -193,6 +193,8 @@ def test_cli_ingests_a_folder(tmp_path: Path, capsys: pytest.CaptureFixture[str]
             "--extractor",
             "rules",
             "--no-embed",
+            "--sink",
+            "jsonl",
             "--out",
             str(tmp_path / "out"),
         ]

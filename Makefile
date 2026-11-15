@@ -48,7 +48,7 @@ migrate:          ## Upgrade Postgres to the latest Alembic migration
 data:             ## Download public datasets into data/raw (DATASETS="funsd cuad" for a subset)
 	$(PY) scripts/download_datasets.py $(DATASETS)
 
-ingest:           ## Ingest data/raw/$(DATASET) into data/processed (ARGS="--limit 100 --extractor rules")
+ingest:           ## Ingest data/raw/$(DATASET) into the stores (ARGS="--limit 100" or "--sink jsonl")
 	$(PY) -m ledgerlens.ingestion.pipeline data/raw/$(DATASET) $(ARGS)
 
 # --- Run -----------------------------------------------------------------------------
