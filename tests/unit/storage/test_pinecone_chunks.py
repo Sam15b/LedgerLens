@@ -50,10 +50,18 @@ class FakeIndex:
             self.namespaces.get(namespace, {}).pop(vector_id, None)
 
     def list(self, *, prefix: str, namespace: str) -> Iterator[Any]:
-        yield from ()
+        ids = sorted(i for i in self.namespaces.get(namespace, {}) if i.startswith(prefix))
+        for start in range(0, len(ids), 2):  # small pages, like the real paginated listing
+            yield SimpleNamespace(vectors=[SimpleNamespace(id=i) for i in ids[start : start + 2]])
 
     def describe_index_stats(self) -> Any:
-        return {}
+        return SimpleNamespace(
+            dimension=DIM,
+            total_vector_count=sum(len(v) for v in self.namespaces.values()),
+            namespaces={
+                name: SimpleNamespace(vector_count=len(v)) for name, v in self.namespaces.items()
+            },
+        )
 
 
 def embedded(
@@ -291,3 +299,72 @@ def test_query_returns_hits_best_first() -> None:
 def test_query_rejects_the_wrong_dimension() -> None:
     with pytest.raises(ValueError, match="3 dims, index is 4"):
         store().query([1.0] * 3)
+
+
+# --------------------------------------------------------------------------- delete + stats
+
+
+def test_delete_document_removes_only_that_documents_vectors() -> None:
+    index, keep, drop = FakeIndex(), new_document_id(), new_document_id()
+    pinecone = store(index)
+    pinecone.upsert_chunks([embedded(drop, n) for n in range(5)] + [embedded(keep, 0)])
+
+    deleted = pinecone.delete_document(drop)
+
+    assert deleted == 5
+    assert list(index.namespaces["dev"]) == [chunk_vector_id(keep, 0)]
+    assert pinecone.delete_document(drop) == 0  # already gone: a no-op
+    assert pinecone.document_ids(keep) == [chunk_vector_id(keep, 0)]
+
+
+def test_delete_document_batches_large_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ledgerlens.storage.pinecone_store.DELETE_BATCH_SIZE", 2)
+    index, document_id = FakeIndex(), new_document_id()
+    pinecone = store(index)
+    pinecone.upsert_chunks([embedded(document_id, n) for n in range(5)])
+
+    pinecone.delete_document(document_id)
+
+    assert [len(batch) for batch in index.deletes] == [2, 2, 1]
+
+
+def test_delete_document_only_touches_its_namespace() -> None:
+    index, document_id = FakeIndex(), new_document_id()
+    pinecone = store(index)
+    pinecone.upsert_chunks([embedded(document_id, 0)])
+    pinecone.upsert_chunks([embedded(document_id, 0)], namespace="eval")
+
+    assert pinecone.delete_document(document_id, namespace="eval") == 1
+    assert pinecone.count("dev") == 1
+
+
+@pytest.mark.parametrize("bad", ["", "not-a-uuid", "3F2C0000-0000-4000-8000-000000000000"])
+def test_delete_document_refuses_anything_but_a_document_id(bad: str) -> None:
+    with pytest.raises(ValueError, match="document id"):
+        store().delete_document(bad)
+
+
+def test_stats_counts_vectors_per_namespace() -> None:
+    index = FakeIndex()
+    pinecone = store(index)
+    pinecone.upsert_chunks([embedded(new_document_id(), n) for n in range(3)])
+    pinecone.upsert_chunks([embedded(new_document_id(), 0)], namespace="eval")
+
+    assert pinecone.stats() == {
+        "dimension": DIM,
+        "total_vector_count": 4,
+        "namespaces": {"dev": 3, "eval": 1},
+    }
+    assert (pinecone.count(), pinecone.count("eval"), pinecone.count("prod")) == (3, 1, 0)
+
+
+def test_stats_reads_plain_dict_responses() -> None:
+    class DictIndex(FakeIndex):
+        def describe_index_stats(self) -> Any:
+            return {
+                "dimension": DIM,
+                "total_vector_count": 2,
+                "namespaces": {"dev": {"vector_count": 2}},
+            }
+
+    assert store(DictIndex()).stats()["namespaces"] == {"dev": 2}

@@ -9,6 +9,9 @@
 * ``query`` -- hybrid dense + sparse: dense values are scaled by ``alpha`` and sparse values
   by ``1 - alpha`` (``hybrid_alpha``, 0.7), so one weight trades semantic against keyword
   match; metadata filters (``date_filter`` for date ranges) narrow the candidates.
+* ``delete_document`` -- every vector id of a document starts with ``{document_id}#``, so
+  re-ingesting lists that prefix and deletes it before upserting the new chunks.
+* ``stats`` -- vector counts per namespace.
 
 Index administration has two implementations behind one protocol:
 
@@ -30,6 +33,7 @@ import httpx
 from pinecone import NotFoundError, Pinecone, ServerlessSpec
 
 from ledgerlens.core.config import PineconeConfig
+from ledgerlens.core.ids import is_document_id, vector_id_prefix
 from ledgerlens.core.schemas import (
     Contract,
     ExtractedRecord,
@@ -356,6 +360,17 @@ def _matches(response: Any) -> list[Any]:
     return list(matches or [])
 
 
+DELETE_BATCH_SIZE = 1000  # Pinecone's limit on ids per delete request
+
+
+def _page_ids(page: Any) -> list[str]:
+    """Ids in one page from ``Index.list``: a ``ListResponse`` or (older SDKs) a list."""
+    vectors = getattr(page, "vectors", None)
+    if vectors is not None:
+        return [item.id for item in vectors]
+    return [item if isinstance(item, str) else item.id for item in page]
+
+
 def batched(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
@@ -430,3 +445,42 @@ class PineconeStore:
             VectorHit(id=m.id, score=float(m.score), metadata=dict(m.metadata or {}))
             for m in _matches(self.index.query(**kwargs))
         ]
+
+    def document_ids(self, document_id: str, *, namespace: str | None = None) -> list[str]:
+        """Vector ids stored for a document (listed by the ``{document_id}#`` prefix)."""
+        if not is_document_id(document_id):
+            raise ValueError(f"not a canonical document id: {document_id!r}")
+        pages = self.index.list(
+            prefix=vector_id_prefix(document_id), namespace=namespace or self.namespace
+        )
+        return [vector_id for page in pages for vector_id in _page_ids(page)]
+
+    def delete_document(self, document_id: str, *, namespace: str | None = None) -> int:
+        """Delete every vector of a document. Returns how many there were (0 is fine:
+        deleting an unknown document is a no-op, so re-ingest can always call this)."""
+        target = namespace or self.namespace
+        ids = self.document_ids(document_id, namespace=target)
+        for batch in batched(ids, DELETE_BATCH_SIZE):
+            self.index.delete(ids=list(batch), namespace=target)
+        return len(ids)
+
+    def stats(self) -> dict[str, Any]:
+        """``{"dimension", "total_vector_count", "namespaces": {name: vector_count}}``."""
+        raw = self.index.describe_index_stats()
+        namespaces = _get(raw, "namespaces") or {}
+        return {
+            "dimension": _get(raw, "dimension"),
+            "total_vector_count": int(_get(raw, "total_vector_count") or 0),
+            "namespaces": {
+                name: int(_get(summary, "vector_count") or 0)
+                for name, summary in namespaces.items()
+            },
+        }
+
+    def count(self, namespace: str | None = None) -> int:
+        """Vectors in a namespace (default: the store's)."""
+        return int(self.stats()["namespaces"].get(namespace or self.namespace, 0))
+
+
+def _get(obj: Any, name: str) -> Any:
+    return obj.get(name) if isinstance(obj, Mapping) else getattr(obj, name, None)
