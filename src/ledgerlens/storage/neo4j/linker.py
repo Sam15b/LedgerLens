@@ -9,6 +9,11 @@
 Node ids are the record ids used in Postgres, and nodes from a document carry its
 ``document_id``, so graph results map back to rows and Pinecone chunks.
 
+A reference that finds no target -- an invoice's PO number with no PO, a remittance line
+naming an unknown invoice, a PO citing a contract that is not in the graph -- is recorded
+as an ``(:UnresolvedLink)`` node for the reconciler, and removed again once the target is
+linked. :meth:`GraphLinker.unresolved` lists them.
+
 Vendor resolution (:class:`VendorResolver`) decides which ``Vendor`` node a document's
 printed vendor is. In order:
 
@@ -27,7 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -354,6 +359,69 @@ RETURN governs
 )
 
 
+# An UnresolvedLink is deleted once the edge it was waiting for exists.
+_CLEAR_RESOLVED = {
+    "REFERENCES": """
+        MATCH (u:UnresolvedLink {rel: 'REFERENCES', value: $value})
+        WHERE EXISTS { (:Invoice {id: u.source_id})-[:REFERENCES]->(:PurchaseOrder) }
+        DELETE u
+    """,
+    "SETTLES": """
+        MATCH (u:UnresolvedLink {rel: 'SETTLES', value: $value})
+        WHERE EXISTS {
+          (:Payment {id: u.source_id})-[:SETTLES {invoice_number: $value}]->(:Invoice)
+        }
+        DELETE u
+    """,
+    "GOVERNS": """
+        MATCH (u:UnresolvedLink {rel: 'GOVERNS', value: $value})
+        WHERE EXISTS { (:Contract)-[:GOVERNS]->(:PurchaseOrder {id: u.source_id}) }
+        DELETE u
+    """,
+}
+
+_RECORD_UNRESOLVED = """
+OPTIONAL MATCH (stale:UnresolvedLink {source_id: $source_id})
+WHERE NOT stale.id IN [link IN $links | link.id]
+DELETE stale
+WITH count(*) AS _
+UNWIND $links AS link
+MERGE (u:UnresolvedLink {id: link.id})
+  ON CREATE SET u.recorded_at = datetime()
+SET u += link
+"""
+
+
+@dataclass(frozen=True)
+class UnresolvedLink:
+    """A reference on ``source`` whose target (``target_label`` with ``key = value``) is
+    not in the graph. ``rel`` is the edge that will be made once it is."""
+
+    source_label: str
+    source_id: str
+    rel: Literal["REFERENCES", "SETTLES", "GOVERNS"]
+    target_label: str
+    key: str
+    value: str
+    vendor_id: str | None = None
+
+    @property
+    def id(self) -> str:
+        return f"{self.source_id}|{self.rel}|{self.value}"
+
+    def to_props(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source_label": self.source_label,
+            "source_id": self.source_id,
+            "rel": self.rel,
+            "target_label": self.target_label,
+            "key": self.key,
+            "value": self.value,
+            "vendor_id": self.vendor_id,
+        }
+
+
 def _iso(day: date | None) -> str | None:
     return None if day is None else day.isoformat()
 
@@ -392,6 +460,8 @@ class LinkResult:
     vendor: VendorMatch
     links: dict[str, list[str]] = field(default_factory=dict)
     """Edges made, by type: ``{"REFERENCES": ["po-1"], "SETTLES": [...]}``."""
+    unresolved: list[UnresolvedLink] = field(default_factory=list)
+    """References this record makes that found no target (also stored in the graph)."""
 
 
 class GraphLinker:
@@ -461,16 +531,35 @@ class GraphLinker:
             "invoice_date": _iso(record.invoice_date),
             "due_date": _iso(record.due_date),
         }
-        rows = self._write(
+
+        def missing(rows: list[dict[str, Any]]) -> list[UnresolvedLink]:
+            if record.po_number is None or rows[0]["po_id"]:
+                return []
+            return [
+                UnresolvedLink(
+                    "Invoice",
+                    base["id"],
+                    "REFERENCES",
+                    "PurchaseOrder",
+                    "po_number",
+                    record.po_number,
+                    vendor.vendor_id,
+                )
+            ]
+
+        rows, unresolved = self._write(
             (_INVOICE, params),
             (_LINES.format(label="Invoice"), _line_params(base["id"], record.line_items)),
+            source_id=base["id"],
+            missing=missing,
+            resolves=[("SETTLES", record.invoice_number)],
         )
         links = {"ISSUED": [vendor.vendor_id], "HAS_LINE": _line_ids(base["id"], record.line_items)}
-        if rows and rows[0]["po_id"]:
+        if rows[0]["po_id"]:
             links["REFERENCES"] = [rows[0]["po_id"]]
-        if rows and rows[0]["settled_by"]:
+        if rows[0]["settled_by"]:
             links["SETTLED_BY"] = sorted(rows[0]["settled_by"])
-        return LinkResult(base["id"], "Invoice", vendor, links)
+        return LinkResult(base["id"], "Invoice", vendor, links, unresolved)
 
     def _purchase_order(
         self,
@@ -494,16 +583,35 @@ class GraphLinker:
             "order_date": _iso(record.order_date),
             "delivery_date": _iso(record.delivery_date),
         }
-        rows = self._write(
+
+        def missing(rows: list[dict[str, Any]]) -> list[UnresolvedLink]:
+            if record.contract_number is None or rows[0]["contract_id"]:
+                return []
+            return [
+                UnresolvedLink(
+                    "PurchaseOrder",
+                    base["id"],
+                    "GOVERNS",
+                    "Contract",
+                    "contract_number",
+                    record.contract_number,
+                    vendor.vendor_id,
+                )
+            ]
+
+        rows, unresolved = self._write(
             (_PURCHASE_ORDER, params),
             (_LINES.format(label="PurchaseOrder"), _line_params(base["id"], record.line_items)),
+            source_id=base["id"],
+            missing=missing,
+            resolves=[("REFERENCES", record.po_number)],
         )
         links = {"HAS_LINE": _line_ids(base["id"], record.line_items)}
-        if rows and rows[0]["contract_id"]:
+        if rows[0]["contract_id"]:
             links["GOVERNED_BY"] = [rows[0]["contract_id"]]
-        if rows and rows[0]["referenced_by"]:
+        if rows[0]["referenced_by"]:
             links["REFERENCED_BY"] = sorted(rows[0]["referenced_by"])
-        return LinkResult(base["id"], "PurchaseOrder", vendor, links)
+        return LinkResult(base["id"], "PurchaseOrder", vendor, links, unresolved)
 
     def _payment(
         self, record: Payment, base: dict[str, Any], common: dict[str, Any], vendor: VendorMatch
@@ -518,9 +626,30 @@ class GraphLinker:
             "invoice_numbers": [a.invoice_number for a in record.allocations],
             "allocated_amounts": [_money(a.amount) for a in record.allocations],
         }
-        rows = self._write((_PAYMENT, base | {"props": props, "paid_at": _iso(record.paid_at)}))
+
+        def missing(rows: list[dict[str, Any]]) -> list[UnresolvedLink]:
+            return [
+                UnresolvedLink(
+                    "Payment",
+                    base["id"],
+                    "SETTLES",
+                    "Invoice",
+                    "invoice_number",
+                    row["invoice_number"],
+                    vendor.vendor_id,
+                )
+                for row in rows
+                if not row["invoice_id"]
+            ]
+
+        rows, unresolved = self._write(
+            (_PAYMENT, base | {"props": props, "paid_at": _iso(record.paid_at)}),
+            source_id=base["id"],
+            missing=missing,
+        )
         settled = sorted({row["invoice_id"] for row in rows if row["invoice_id"]})
-        return LinkResult(base["id"], "Payment", vendor, {"SETTLES": settled} if settled else {})
+        links = {"SETTLES": settled} if settled else {}
+        return LinkResult(base["id"], "Payment", vendor, links, unresolved)
 
     def _contract(
         self, record: Contract, base: dict[str, Any], common: dict[str, Any], vendor: VendorMatch
@@ -538,24 +667,67 @@ class GraphLinker:
             "start_date": _iso(record.start_date),
             "end_date": _iso(record.end_date),
         }
-        rows = self._write((_CONTRACT, params))
+        rows, _ = self._write(
+            (_CONTRACT, params),
+            source_id=base["id"],
+            resolves=[("GOVERNS", record.contract_number)] if record.contract_number else [],
+        )
         links = {"PARTY_TO": [vendor.vendor_id]}
-        if rows and rows[0]["governs"]:
+        if rows[0]["governs"]:
             links["GOVERNS"] = sorted(rows[0]["governs"])
         return LinkResult(base["id"], "Contract", vendor, links)
 
+    def unresolved(self, rel: str | None = None) -> list[UnresolvedLink]:
+        """Recorded references that still have no target, optionally of one edge type."""
+        rows = run_read(
+            self.driver,
+            "MATCH (u:UnresolvedLink) WHERE $rel IS NULL OR u.rel = $rel "
+            "RETURN u ORDER BY u.source_label, u.source_id, u.value",
+            {"rel": rel},
+            database=self.database,
+        )
+        return [
+            UnresolvedLink(
+                source_label=u["source_label"],
+                source_id=u["source_id"],
+                rel=u["rel"],
+                target_label=u["target_label"],
+                key=u["key"],
+                value=u["value"],
+                vendor_id=u.get("vendor_id"),
+            )
+            for u in (row["u"] for row in rows)
+        ]
+
     # ------------------------------------------------------------------ plumbing
 
-    def _write(self, *statements: tuple[str, dict[str, Any]]) -> list[dict[str, Any]]:
-        """Run the statements in one write transaction; rows of the first are returned."""
+    def _write(
+        self,
+        *statements: tuple[str, dict[str, Any]],
+        source_id: str,
+        missing: Callable[[list[dict[str, Any]]], list[UnresolvedLink]] | None = None,
+        resolves: Sequence[tuple[str, str]] = (),
+    ) -> tuple[list[dict[str, Any]], list[UnresolvedLink]]:
+        """One write transaction: the statements, then this record's unresolved links
+        (``missing`` reads them from the first statement's rows), then clearing the ones
+        satisfied by this record being linked (``resolves``: ``(rel, value)`` pairs).
+        Returns the first statement's rows and this record's unresolved links."""
 
-        def work(tx: ManagedTransaction) -> list[dict[str, Any]]:
+        def work(tx: ManagedTransaction) -> tuple[list[dict[str, Any]], list[UnresolvedLink]]:
             first: list[dict[str, Any]] | None = None
             for query, params in statements:
                 rows = [record.data() for record in tx.run(query, params)]
                 if first is None:
                     first = rows
-            return first or []
+            result = first or []
+            unresolved = missing(result) if missing is not None else []
+            tx.run(
+                _RECORD_UNRESOLVED,
+                {"source_id": source_id, "links": [u.to_props() for u in unresolved]},
+            ).consume()
+            for rel, value in resolves:
+                tx.run(_CLEAR_RESOLVED[rel], {"value": value}).consume()
+            return result, unresolved
 
         with write_session(self.driver, database=self.database) as session:
             return session.execute_write(work)
