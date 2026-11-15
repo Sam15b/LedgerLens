@@ -3,6 +3,7 @@
 from collections.abc import Iterator, Sequence
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,7 +15,9 @@ from ledgerlens.ingestion.embedding import EmbeddedChunk, SparseVector
 from ledgerlens.storage.pinecone_store import (
     DocumentKeys,
     PineconeStore,
+    date_filter,
     date_key,
+    hybrid_scale,
     truncate_utf8,
     vector_metadata,
 )
@@ -31,6 +34,7 @@ class FakeIndex:
         self.upserts: list[int] = []
         self.queries: list[dict[str, Any]] = []
         self.deletes: list[list[str]] = []
+        self.response: Any = {"matches": []}
 
     def upsert(self, *, vectors: list[dict[str, Any]], namespace: str) -> None:
         self.upserts.append(len(vectors))
@@ -38,7 +42,7 @@ class FakeIndex:
 
     def query(self, **kwargs: Any) -> Any:
         self.queries.append(kwargs)
-        return {"matches": []}
+        return self.response
 
     def delete(self, *, ids: Sequence[str], namespace: str) -> None:
         self.deletes.append(list(ids))
@@ -198,3 +202,92 @@ def test_upserting_nothing_makes_no_calls() -> None:
 
     assert PineconeStore(index, namespace="dev", config=CONFIG).upsert_chunks([]) == 0
     assert index.upserts == []
+
+
+# --------------------------------------------------------------------------- query
+
+
+def store(index: FakeIndex | None = None, **config: Any) -> PineconeStore:
+    return PineconeStore(
+        index or FakeIndex(), namespace="dev", config=CONFIG.model_copy(update=config)
+    )
+
+
+def test_hybrid_scale_is_a_convex_combination() -> None:
+    dense, sparse = hybrid_scale([1.0, 2.0], SparseVector(indices=[3], values=[0.5]), 0.75)
+
+    assert dense == [0.75, 1.5]
+    assert sparse == {"indices": [3], "values": [0.125]}
+
+
+@pytest.mark.parametrize("sparse", [None, SparseVector()])
+def test_hybrid_scale_without_sparse_terms_keeps_dense_as_is(sparse: SparseVector | None) -> None:
+    assert hybrid_scale([1.0, 2.0], sparse, 0.3) == ([1.0, 2.0], None)
+
+
+def test_alpha_one_is_pure_dense() -> None:
+    assert hybrid_scale([1.0], SparseVector(indices=[1], values=[1.0]), 1.0) == ([1.0], None)
+
+
+@pytest.mark.parametrize("alpha", [-0.1, 1.5])
+def test_alpha_out_of_range_is_rejected(alpha: float) -> None:
+    with pytest.raises(ValueError, match="alpha"):
+        hybrid_scale([1.0], None, alpha)
+
+
+def test_date_filter_bounds() -> None:
+    assert date_filter(date(2026, 1, 1), date(2026, 3, 31)) == {
+        "doc_date": {"$gte": 20260101, "$lte": 20260331}
+    }
+    assert date_filter(end=date(2026, 3, 31)) == {"doc_date": {"$lte": 20260331}}
+    assert date_filter() == {}
+
+
+def test_query_sends_weighted_vectors_with_config_defaults() -> None:
+    index = FakeIndex()
+
+    store(index, hybrid_alpha=0.5, query_top_k=7).query(
+        [1.0] * DIM, SparseVector(indices=[2], values=[1.0])
+    )
+
+    sent = index.queries[0]
+    assert sent["vector"] == [0.5] * DIM
+    assert sent["sparse_vector"] == {"indices": [2], "values": [0.5]}
+    assert (sent["top_k"], sent["namespace"], sent["include_metadata"]) == (7, "dev", True)
+    assert "filter" not in sent
+
+
+def test_query_overrides_and_filters() -> None:
+    index = FakeIndex()
+    where = {"doc_type": "invoice", **date_filter(start=date(2026, 1, 1))}
+
+    store(index).query([1.0] * DIM, top_k=3, filter=where, namespace="eval", alpha=1.0)
+
+    sent = index.queries[0]
+    assert (sent["top_k"], sent["namespace"], sent["filter"]) == (3, "eval", where)
+    assert "sparse_vector" not in sent
+
+
+def test_query_returns_hits_best_first() -> None:
+    document_id = new_document_id()
+    index = FakeIndex()
+    index.response = SimpleNamespace(
+        matches=[
+            SimpleNamespace(
+                id=chunk_vector_id(document_id, 1),
+                score=0.9,
+                metadata={"document_id": document_id, "text": "Total 120.00"},
+            ),
+            SimpleNamespace(id=chunk_vector_id(document_id, 0), score=0.4, metadata=None),
+        ]
+    )
+
+    hits = store(index).query([1.0] * DIM)
+
+    assert [(h.score, h.document_id) for h in hits] == [(0.9, document_id), (0.4, document_id)]
+    assert (hits[0].text, hits[1].text) == ("Total 120.00", "")
+
+
+def test_query_rejects_the_wrong_dimension() -> None:
+    with pytest.raises(ValueError, match="3 dims, index is 4"):
+        store().query([1.0] * 3)

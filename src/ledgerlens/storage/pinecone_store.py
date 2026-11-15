@@ -6,6 +6,9 @@
   queries filter on (``document_id``, ``doc_type``, ``vendor_id``, ``doc_number``,
   ``doc_date`` as a ``YYYYMMDD`` int, ``page``, ``chunk_index``) plus the chunk text cut to
   ``metadata_text_max_bytes`` -- the full text lives in Postgres.
+* ``query`` -- hybrid dense + sparse: dense values are scaled by ``alpha`` and sparse values
+  by ``1 - alpha`` (``hybrid_alpha``, 0.7), so one weight trades semantic against keyword
+  match; metadata filters (``date_filter`` for date ranges) narrow the candidates.
 
 Index administration has two implementations behind one protocol:
 
@@ -37,7 +40,7 @@ from ledgerlens.core.schemas import (
 )
 
 if TYPE_CHECKING:
-    from ledgerlens.ingestion.embedding import EmbeddedChunk, MetadataValue
+    from ledgerlens.ingestion.embedding import EmbeddedChunk, MetadataValue, SparseVector
 
 # Pinecone Local accepts any API key; this placeholder is used when only a host is set.
 LOCAL_API_KEY = "pclocal"
@@ -300,6 +303,59 @@ class VectorIndex(Protocol):
     def describe_index_stats(self) -> Any: ...
 
 
+@dataclass(frozen=True)
+class VectorHit:
+    """One query match: the chunk's vector id, its hybrid score and stored metadata."""
+
+    id: str
+    score: float
+    metadata: dict[str, Any]
+
+    @property
+    def document_id(self) -> str:
+        return str(self.metadata.get("document_id") or self.id.split("#", 1)[0])
+
+    @property
+    def text(self) -> str:
+        """The truncated chunk text kept in metadata (full text: Postgres ``chunks``)."""
+        return str(self.metadata.get("text", ""))
+
+
+def hybrid_scale(
+    dense: Sequence[float], sparse: SparseVector | None, alpha: float
+) -> tuple[list[float], dict[str, list[Any]] | None]:
+    """Weight dense by ``alpha`` and sparse by ``1 - alpha`` (convex combination).
+
+    Without sparse terms the dense vector is returned unscaled -- scaling it alone would
+    change scores but not the ranking. ``alpha == 1`` drops the sparse part.
+    """
+    if not 0 <= alpha <= 1:
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+    if sparse is None or not sparse.indices or alpha == 1:
+        return list(dense), None
+    return [v * alpha for v in dense], {
+        "indices": list(sparse.indices),
+        "values": [v * (1 - alpha) for v in sparse.values],
+    }
+
+
+def date_filter(start: date | None = None, end: date | None = None) -> dict[str, Any]:
+    """A metadata filter on ``doc_date`` between ``start`` and ``end`` (inclusive)."""
+    bounds: dict[str, int] = {}
+    if start is not None:
+        bounds["$gte"] = date_key(start)
+    if end is not None:
+        bounds["$lte"] = date_key(end)
+    return {"doc_date": bounds} if bounds else {}
+
+
+def _matches(response: Any) -> list[Any]:
+    matches = getattr(response, "matches", None)
+    if matches is None and isinstance(response, Mapping):
+        matches = response.get("matches")
+    return list(matches or [])
+
+
 def batched(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
@@ -340,3 +396,37 @@ class PineconeStore:
             chunk.metadata, keys, max_text_bytes=self.config.metadata_text_max_bytes
         )
         return record
+
+    def query(
+        self,
+        dense: Sequence[float],
+        sparse: SparseVector | None = None,
+        *,
+        top_k: int | None = None,
+        filter: Mapping[str, Any] | None = None,
+        namespace: str | None = None,
+        alpha: float | None = None,
+    ) -> list[VectorHit]:
+        """Hybrid nearest neighbours of a query, best first.
+
+        ``alpha`` defaults to ``hybrid_alpha``; ``top_k`` to ``query_top_k``. ``filter`` is a
+        Pinecone metadata filter, e.g. ``{"doc_type": "invoice", **date_filter(start)}``.
+        """
+        if len(dense) != self.config.dimension:
+            raise ValueError(f"query has {len(dense)} dims, index is {self.config.dimension}")
+        weight = self.config.hybrid_alpha if alpha is None else alpha
+        values, sparse_values = hybrid_scale(dense, sparse, weight)
+        kwargs: dict[str, Any] = {
+            "vector": values,
+            "top_k": top_k or self.config.query_top_k,
+            "namespace": namespace or self.namespace,
+            "include_metadata": True,
+        }
+        if sparse_values is not None:
+            kwargs["sparse_vector"] = sparse_values
+        if filter:
+            kwargs["filter"] = dict(filter)
+        return [
+            VectorHit(id=m.id, score=float(m.score), metadata=dict(m.metadata or {}))
+            for m in _matches(self.index.query(**kwargs))
+        ]
