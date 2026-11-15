@@ -16,16 +16,16 @@ from sqlalchemy import Engine
 from ledgerlens.core.config import get_settings
 from ledgerlens.storage.neo4j.driver import create_driver
 from ledgerlens.storage.pinecone_store import IndexAdmin, create_index_admin
-from ledgerlens.storage.postgres.db import make_engine
+from ledgerlens.storage.postgres import db
 
 
 def _timeout() -> float:
     return get_settings().health_check_timeout_s
 
 
-@lru_cache
 def get_engine() -> Engine:
-    return make_engine(get_settings().database_url, connect_timeout_s=_timeout())
+    """The shared Postgres engine (one pool per process, also used by repositories)."""
+    return db.get_engine()
 
 
 @lru_cache
