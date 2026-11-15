@@ -79,7 +79,8 @@ erDiagram
     PURCHASE_ORDERS ||--o{ INVOICES : "billed by"
     INVOICES ||--o{ INVOICE_LINE_ITEMS : contains
     PURCHASE_ORDERS ||--o{ PO_LINE_ITEMS : contains
-    INVOICES ||--o{ PAYMENTS : "settled by"
+    PAYMENTS ||--o{ PAYMENT_ALLOCATIONS : "split into"
+    INVOICES ||--o{ PAYMENT_ALLOCATIONS : "settled by"
     DOCUMENTS ||--o{ CHUNKS : "split into"
     DOCUMENTS ||--o| INVOICES : "is"
     INVOICES ||--o{ ANOMALY_SCORES : scored
@@ -93,14 +94,22 @@ erDiagram
 | `vendors` | id, canonical_name, aliases[], tax_id, email |
 | `invoices` | id, document_id, vendor_id, invoice_number, invoice_date, due_date, po_number, currency, subtotal, tax, total, status |
 | `purchase_orders` | id, document_id, vendor_id, po_number, contract_id, total |
-| `payments` | id, invoice_id, amount, paid_at, method, reference |
+| `payments` | id, document_id, vendor_id, payment_reference, amount, paid_at, method |
+| `payment_allocations` | payment_id, invoice_number (as printed), invoice_id (once matched), amount |
 | `contracts` | id, document_id, vendor_id, start_date, end_date, payment_terms_days, rate_card JSONB |
 | `anomaly_scores` | invoice_id, model_version, score, reasons JSONB |
 | `reminders` | id, invoice_id, draft, tone, status (pending_approval/approved/rejected) |
 | `llm_calls` | id, request_id, provider, model, tokens_in, tokens_out, cost_usd, latency_ms |
 | `eval_runs` | id, git_sha, config JSONB, metrics JSONB, created_at |
 
-Migrations via **Alembic**. Example analytics (`analytics.sql`): AP aging buckets
+Models: `storage/postgres/models.py`. Business records take a writer-chosen text `id` (the
+`document_id` for an extracted record) so re-ingesting writes the same key; `vendor_name`
+keeps the printed name until `vendor_id` is resolved. Amounts are `NUMERIC(18, 4)`.
+
+Migrations via **Alembic** (`alembic.ini`, `migrations/versions/`; `make migrate`, also run by
+`make init`). After changing a model: `alembic revision --autogenerate --rev-id 000N -m "..."`,
+review the file, and `pytest -m integration tests/integration/storage` checks that the
+migrated schema matches the models. Example analytics (`analytics.sql`): AP aging buckets
 (0–30/31–60/61–90/90+), spend by vendor by month, unpaid totals, average days-to-pay.
 
 ---
