@@ -12,6 +12,14 @@ and returns a :class:`LoadedFile`. :meth:`FileLoader.load` also checks the hash 
 :class:`DedupeRegistry`, so the same bytes uploaded twice -- under any name -- map to one
 ``document_id`` and the second upload is skipped.
 
+Two registries:
+
+* :class:`PostgresRegistry` -- the ``documents`` table, whose unique index on ``sha256``
+  catches duplicates across processes, workers and restarts. Claiming a file inserts its
+  ``queued`` document row, so every accepted upload is on record from the first step.
+* :class:`InMemoryRegistry` -- one process only; the default when no registry is passed,
+  for tests and one-off runs that should not touch the database.
+
 Size and type limits come from ``loader`` in ``configs/ingestion.yaml``.
 """
 
@@ -23,7 +31,7 @@ import logging
 import threading
 from collections.abc import Iterable
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 import pymupdf
 from PIL import Image
@@ -33,6 +41,9 @@ from ledgerlens.core.config import LoaderConfig, get_config
 from ledgerlens.core.ids import new_document_id
 from ledgerlens.core.schemas import Document
 from ledgerlens.core.schemas.document import Sha256
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -165,14 +176,10 @@ def _image_frames(source: Path | bytes) -> int:
 
 
 class DedupeRegistry(Protocol):
-    """Remembers which ``document_id`` each content hash belongs to.
+    """Remembers which ``document_id`` each content hash belongs to."""
 
-    In memory for now; the Postgres version (a unique index on ``documents.sha256``)
-    replaces it in Phase 3 so duplicates are caught across processes and restarts.
-    """
-
-    def claim(self, sha256: str, document_id: str) -> str | None:
-        """Register ``document_id`` for ``sha256`` unless the hash is already known.
+    def claim(self, document: Document) -> str | None:
+        """Register the new ``document`` unless its ``sha256`` is already known.
 
         Returns ``None`` if this call registered it, else the existing ``document_id``.
         Check-and-register is atomic, so two concurrent uploads of the same bytes cannot
@@ -188,11 +195,11 @@ class InMemoryRegistry:
         self._ids: dict[str, str] = {}
         self._lock = threading.Lock()
 
-    def claim(self, sha256: str, document_id: str) -> str | None:
+    def claim(self, document: Document) -> str | None:
         with self._lock:
-            existing = self._ids.get(sha256)
+            existing = self._ids.get(document.sha256)
             if existing is None:
-                self._ids[sha256] = document_id
+                self._ids[document.sha256] = document.id
             return existing
 
     def get(self, sha256: str) -> str | None:
@@ -201,6 +208,32 @@ class InMemoryRegistry:
 
     def __len__(self) -> int:
         return len(self._ids)
+
+
+class PostgresRegistry:
+    """Dedupe on ``documents.sha256``; a won claim inserts the ``queued`` document row.
+
+    Each call is its own short transaction, so the claim is visible to every other worker
+    as soon as it returns. ``sessions`` defaults to the process-wide ``DATABASE_URL`` pool.
+    """
+
+    def __init__(self, sessions: sessionmaker[Session] | None = None) -> None:
+        from ledgerlens.storage.postgres.db import get_session_factory
+
+        self.sessions = sessions or get_session_factory()
+
+    def claim(self, document: Document) -> str | None:
+        from ledgerlens.storage.postgres.db import session_scope
+        from ledgerlens.storage.postgres.repositories import DocumentRepository
+
+        with session_scope(self.sessions) as session:
+            return DocumentRepository(session).claim(document)
+
+    def get(self, sha256: str) -> str | None:
+        from ledgerlens.storage.postgres.repositories import DocumentRepository
+
+        with self.sessions() as session:
+            return DocumentRepository(session).id_for_sha256(sha256)
 
 
 # --------------------------------------------------------------------------- loader
@@ -262,10 +295,10 @@ class FileLoader:
     # ------------------------------------------------------------------ internals
 
     def _claim(self, file: LoadedFile) -> LoadResult:
-        new_id = new_document_id()
-        existing = self.registry.claim(file.sha256, new_id)
+        claimed = LoadResult(file=file, document_id=new_document_id(), duplicate=False)
+        existing = self.registry.claim(claimed.to_document())
         if existing is None:
-            return LoadResult(file=file, document_id=new_id, duplicate=False)
+            return claimed
         logger.info(
             "skipping %s: same content as document %s",
             file.filename,
