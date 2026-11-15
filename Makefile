@@ -15,7 +15,7 @@ DATASET ?= sroie
 todo = @echo make $@: not implemented yet - $(1)
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install-ml up down init data ingest api mcp web \
+.PHONY: help setup install-ml up down init migrate data ingest api mcp web \
         test test-int cov lint format eval eval-ci clean
 
 help:             ## Show this help
@@ -38,10 +38,12 @@ up:               ## Start local services (Postgres, Neo4j, Redis, Ollama)
 down:             ## Stop local services
 	docker compose down
 
-init:             ## Create Pinecone index, Neo4j schema, run DB migrations
+init: migrate     ## Run DB migrations, create Pinecone index and Neo4j schema
 	$(PY) scripts/create_pinecone_index.py
 	$(PY) scripts/init_neo4j_schema.py
-	$(call todo,Phase 3: Alembic migrations for Postgres)
+
+migrate:          ## Upgrade Postgres to the latest Alembic migration
+	$(PY) -m alembic upgrade head
 
 data:             ## Download public datasets into data/raw (DATASETS="funsd cuad" for a subset)
 	$(PY) scripts/download_datasets.py $(DATASETS)
