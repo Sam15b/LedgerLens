@@ -118,3 +118,17 @@ class Receipt(ExtractedModel):
     def consistency_issues(self, *, tolerance: Decimal = ROUNDING_TOLERANCE) -> list[str]:
         # Receipts usually print tax inside the total, so only lines vs total are checked.
         return totals_issues(self.line_items, None, None, self.total, tolerance=tolerance)
+
+    def as_invoice(self, record_id: str) -> Invoice:
+        """The receipt as an invoice paid on the spot -- how Postgres and the graph store
+        it: due on its date, numbered by its receipt number or ``RECEIPT-<id prefix>``."""
+        return Invoice(
+            invoice_number=self.receipt_number or f"RECEIPT-{record_id[:8]}",
+            vendor_name=self.vendor_name,
+            invoice_date=self.receipt_date,
+            due_date=self.receipt_date,
+            currency=self.currency,
+            tax=self.tax,
+            total=self.total,
+            line_items=self.line_items,
+        )

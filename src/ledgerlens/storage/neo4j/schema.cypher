@@ -19,3 +19,12 @@ CREATE INDEX vendor_name IF NOT EXISTS FOR (v:Vendor) ON (v.name);
 CREATE INDEX invoice_document_id IF NOT EXISTS FOR (i:Invoice) ON (i.document_id);
 CREATE INDEX po_document_id IF NOT EXISTS FOR (p:PurchaseOrder) ON (p.document_id);
 CREATE INDEX contract_document_id IF NOT EXISTS FOR (c:Contract) ON (c.document_id);
+
+// --- Reconciliation: references whose target is not in the graph yet ----------------
+CREATE CONSTRAINT unresolved_link_id IF NOT EXISTS FOR (u:UnresolvedLink) REQUIRE u.id IS UNIQUE;
+CREATE INDEX unresolved_link_value IF NOT EXISTS FOR (u:UnresolvedLink) ON (u.rel, u.value);
+CREATE INDEX unresolved_link_source IF NOT EXISTS FOR (u:UnresolvedLink) ON (u.source_id);
+
+// --- More linking keys --------------------------------------------------------------
+CREATE INDEX contract_number IF NOT EXISTS FOR (c:Contract) ON (c.contract_number);
+CREATE INDEX payment_reference IF NOT EXISTS FOR (p:Payment) ON (p.payment_reference);
