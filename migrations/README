@@ -1,0 +1,9 @@
+PostgreSQL migrations (Alembic). Models: src/ledgerlens/storage/postgres/models.py.
+
+    alembic upgrade head                              # apply everything (make init does this)
+    alembic revision --autogenerate -m "describe it"  # after changing the models; review the file
+    alembic downgrade -1                              # undo the last migration
+    alembic downgrade base                            # drop every table
+
+DATABASE_URL (env or .env) picks the database; `alembic -x url=...` overrides it.
+Revision ids are sequential (0001, 0002, ...): pass --rev-id when generating.

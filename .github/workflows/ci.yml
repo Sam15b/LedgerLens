@@ -72,6 +72,7 @@ jobs:
           http://localhost:5080/indexes
       - name: Initialise stores
         run: |
+          alembic upgrade head
           python scripts/create_pinecone_index.py
           python scripts/init_neo4j_schema.py
       - name: Integration tests
