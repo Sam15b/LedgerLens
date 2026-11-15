@@ -14,7 +14,7 @@ from redis import Redis
 from sqlalchemy import Engine
 
 from ledgerlens.core.config import get_settings
-from ledgerlens.storage.neo4j.driver import create_driver
+from ledgerlens.storage.neo4j import driver as neo4j_driver
 from ledgerlens.storage.pinecone_store import IndexAdmin, create_index_admin
 from ledgerlens.storage.postgres import db
 
@@ -28,12 +28,9 @@ def get_engine() -> Engine:
     return db.get_engine()
 
 
-@lru_cache
 def get_neo4j_driver() -> Driver:
-    s = get_settings()
-    return create_driver(
-        s.neo4j_uri, s.neo4j_user, s.neo4j_password, connection_timeout_s=_timeout()
-    )
+    """The shared Neo4j driver (one connection pool per process, also used by the linker)."""
+    return neo4j_driver.get_driver()
 
 
 @lru_cache
