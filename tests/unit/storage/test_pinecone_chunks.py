@@ -8,16 +8,19 @@ from typing import Any
 
 import pytest
 
-from ledgerlens.core.config import PineconeConfig
+from ledgerlens.core.config import PineconeConfig, Settings
 from ledgerlens.core.ids import chunk_vector_id, new_document_id
 from ledgerlens.core.schemas import Contract, Invoice, Payment, PurchaseOrder, Receipt
 from ledgerlens.ingestion.embedding import EmbeddedChunk, SparseVector
 from ledgerlens.storage.pinecone_store import (
     DocumentKeys,
+    IndexInfo,
+    PineconeNotConfiguredError,
     PineconeStore,
     date_filter,
     date_key,
     hybrid_scale,
+    resolve_namespace,
     truncate_utf8,
     vector_metadata,
 )
@@ -368,3 +371,74 @@ def test_stats_reads_plain_dict_responses() -> None:
             }
 
     assert store(DictIndex()).stats()["namespaces"] == {"dev": 2}
+
+
+# --------------------------------------------------------------------------- namespaces
+
+
+def settings(**values: Any) -> Settings:
+    return Settings(_env_file=None, **values)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("app_env", "expected"),
+    [("dev", "dev"), ("eval", "eval"), ("prod", "prod"), ("Production", "prod"), ("test", "eval")],
+)
+def test_namespace_follows_app_env(app_env: str, expected: str) -> None:
+    assert resolve_namespace(settings(app_env=app_env), CONFIG) == expected
+
+
+def test_explicit_namespace_wins_over_app_env() -> None:
+    assert resolve_namespace(settings(app_env="prod", pinecone_namespace="eval"), CONFIG) == "eval"
+
+
+def test_default_environment_is_dev() -> None:
+    assert resolve_namespace(settings(), CONFIG) == "dev"
+
+
+@pytest.mark.parametrize("values", [{"app_env": "staging"}, {"pinecone_namespace": "Prod"}])
+def test_unlisted_namespaces_are_refused(values: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="not one of: dev, eval, prod"):
+        resolve_namespace(settings(**values), CONFIG)
+
+
+def test_store_refuses_unlisted_namespaces() -> None:
+    with pytest.raises(ValueError, match="'tenant-x'"):
+        PineconeStore(FakeIndex(), namespace="tenant-x", config=CONFIG)
+    pinecone = store()
+    with pytest.raises(ValueError, match="'scratch'"):
+        pinecone.upsert_chunks([embedded(new_document_id(), 0)], namespace="scratch")
+    with pytest.raises(ValueError, match="'scratch'"):
+        pinecone.query([1.0] * DIM, namespace="scratch")
+
+
+class FakeAdmin:
+    def __init__(self, info: IndexInfo | None) -> None:
+        self.info = info
+
+    def describe(self, name: str) -> IndexInfo | None:
+        return self.info
+
+
+def test_from_settings_opens_the_configured_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = IndexInfo("chunks", DIM, "dotproduct", "http://localhost:5081", ready=True)
+    monkeypatch.setattr(
+        "ledgerlens.storage.pinecone_store.create_index_admin", lambda *a, **k: FakeAdmin(info)
+    )
+
+    pinecone = PineconeStore.from_settings(
+        settings(pinecone_host="http://localhost:5080", pinecone_index="chunks", app_env="eval"),
+        CONFIG,
+    )
+
+    assert pinecone.namespace == "eval"
+    assert pinecone.config is CONFIG
+
+
+def test_from_settings_needs_the_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "ledgerlens.storage.pinecone_store.create_index_admin", lambda *a, **k: FakeAdmin(None)
+    )
+
+    with pytest.raises(PineconeNotConfiguredError, match="make init"):
+        PineconeStore.from_settings(settings(pinecone_host="http://localhost:5080"), CONFIG)

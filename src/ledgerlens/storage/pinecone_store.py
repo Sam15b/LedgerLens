@@ -13,6 +13,11 @@
   re-ingesting lists that prefix and deletes it before upserting the new chunks.
 * ``stats`` -- vector counts per namespace.
 
+Each environment writes to its own namespace (``namespaces`` in pinecone.yaml): eval runs
+never touch prod vectors. :func:`resolve_namespace` picks it -- ``PINECONE_NAMESPACE`` if
+set, else the one named by ``APP_ENV`` -- and the store refuses namespaces not listed.
+:meth:`PineconeStore.from_settings` builds the store for the configured index.
+
 Index administration has two implementations behind one protocol:
 
 * :class:`CloudIndexAdmin` uses the Pinecone SDK against Pinecone cloud.
@@ -27,12 +32,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import httpx
 from pinecone import NotFoundError, Pinecone, ServerlessSpec
 
-from ledgerlens.core.config import PineconeConfig
+from ledgerlens.core.config import PineconeConfig, Settings, get_config, get_settings
 from ledgerlens.core.ids import is_document_id, vector_id_prefix
 from ledgerlens.core.schemas import (
     Contract,
@@ -376,6 +381,30 @@ def batched(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
         yield items[start : start + size]
 
 
+APP_ENV_NAMESPACES = {"development": "dev", "production": "prod", "test": "eval"}
+
+
+def resolve_namespace(settings: Settings, config: PineconeConfig) -> str:
+    """The namespace this environment reads and writes.
+
+    ``PINECONE_NAMESPACE`` wins when it is set; otherwise ``APP_ENV`` decides (``dev``,
+    ``eval``, ``prod``, or the long forms ``development`` / ``production`` / ``test``).
+    """
+    if "pinecone_namespace" in settings.model_fields_set:
+        namespace = settings.pinecone_namespace
+    else:
+        env = settings.app_env.strip().lower()
+        namespace = APP_ENV_NAMESPACES.get(env, env)
+    return check_namespace(namespace, config)
+
+
+def check_namespace(namespace: str, config: PineconeConfig) -> str:
+    if namespace not in config.namespaces:
+        allowed = ", ".join(config.namespaces)
+        raise ValueError(f"Pinecone namespace {namespace!r} is not one of: {allowed}")
+    return namespace
+
+
 class PineconeStore:
     """Chunk vectors in one index, isolated by namespace (``dev`` / ``eval`` / ``prod``)."""
 
@@ -384,7 +413,32 @@ class PineconeStore:
     ) -> None:
         self.index = index
         self.config = config or PineconeConfig()
-        self.namespace = namespace
+        self.namespace = check_namespace(namespace, self.config)
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings | None = None,
+        config: PineconeConfig | None = None,
+        *,
+        namespace: str | None = None,
+    ) -> PineconeStore:
+        """The store for ``PINECONE_INDEX`` (cloud, or Pinecone Local with ``PINECONE_HOST``)
+        in this environment's namespace. The index must exist: ``make init`` creates it."""
+        settings = settings or get_settings()
+        config = config or get_config().pinecone
+        admin = create_index_admin(settings.pinecone_api_key, settings.pinecone_host)
+        info = admin.describe(settings.pinecone_index)
+        if info is None or not info.host:
+            raise PineconeNotConfiguredError(
+                f"Pinecone index {settings.pinecone_index!r} does not exist; run `make init`"
+            )
+        client = create_client(settings.pinecone_api_key, settings.pinecone_host)
+        index = cast(VectorIndex, client.Index(host=info.host))  # Index | GrpcIndex
+        return cls(index, namespace=namespace or resolve_namespace(settings, config), config=config)
+
+    def _namespace(self, namespace: str | None) -> str:
+        return self.namespace if namespace is None else check_namespace(namespace, self.config)
 
     def upsert_chunks(
         self,
@@ -396,7 +450,7 @@ class PineconeStore:
         """Upsert ``chunks`` in batches; ``keys`` adds vendor, number and date to each
         chunk's metadata. Returns how many vectors were written."""
         records = [self._record(chunk, keys) for chunk in chunks]
-        target = namespace or self.namespace
+        target = self._namespace(namespace)
         for batch in batched(records, self.config.upsert_batch_size):
             self.index.upsert(vectors=list(batch), namespace=target)
         return len(records)
@@ -434,7 +488,7 @@ class PineconeStore:
         kwargs: dict[str, Any] = {
             "vector": values,
             "top_k": top_k or self.config.query_top_k,
-            "namespace": namespace or self.namespace,
+            "namespace": self._namespace(namespace),
             "include_metadata": True,
         }
         if sparse_values is not None:
@@ -451,14 +505,14 @@ class PineconeStore:
         if not is_document_id(document_id):
             raise ValueError(f"not a canonical document id: {document_id!r}")
         pages = self.index.list(
-            prefix=vector_id_prefix(document_id), namespace=namespace or self.namespace
+            prefix=vector_id_prefix(document_id), namespace=self._namespace(namespace)
         )
         return [vector_id for page in pages for vector_id in _page_ids(page)]
 
     def delete_document(self, document_id: str, *, namespace: str | None = None) -> int:
         """Delete every vector of a document. Returns how many there were (0 is fine:
         deleting an unknown document is a no-op, so re-ingest can always call this)."""
-        target = namespace or self.namespace
+        target = self._namespace(namespace)
         ids = self.document_ids(document_id, namespace=target)
         for batch in batched(ids, DELETE_BATCH_SIZE):
             self.index.delete(ids=list(batch), namespace=target)
@@ -479,7 +533,7 @@ class PineconeStore:
 
     def count(self, namespace: str | None = None) -> int:
         """Vectors in a namespace (default: the store's)."""
-        return int(self.stats()["namespaces"].get(namespace or self.namespace, 0))
+        return int(self.stats()["namespaces"].get(self._namespace(namespace), 0))
 
 
 def _get(obj: Any, name: str) -> Any:
