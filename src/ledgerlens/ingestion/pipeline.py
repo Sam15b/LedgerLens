@@ -9,6 +9,12 @@ Extraction runs *before* chunking (the plan lists it after): the chunks' context
 (``[INVOICE INV-889 | Vendor: ... | Date: ...]``) needs the extracted number, vendor and
 date.
 
+Status: a document is ``processing`` from the first step; a step failure makes it
+``failed`` with ``"<step>: <error>"``, otherwise the pipeline hands it on as ``ready`` and the
+sink has the last word (``failed`` if storing it fails). ``on_status`` hears about
+``processing`` and pipeline failures as they happen -- the stores sink records them, so a
+crash part-way leaves documents that are not ``ready`` and the next run retries them.
+
 Embedding needs a fitted BM25 encoder. :meth:`IngestionPipeline.run` handles a batch the
 way a first-time index build has to: every document is processed up to its chunks, BM25 is
 fit on all of them, then each document's chunks are embedded.
@@ -33,7 +39,7 @@ import argparse
 import json
 import logging
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
@@ -64,6 +70,7 @@ class IngestResult(BaseModel):
 
     document: Document
     duplicate: bool = False  # same bytes ingested before: nothing else was run
+    retry: bool = False  # same bytes as a document that never finished: run again
     classification: str | None = None  # "rules" | "llm" | "fallback"
     extraction: ExtractionResult | None = None
     pages: list[PageContent] = Field(default_factory=list, exclude=True)
@@ -117,6 +124,7 @@ class IngestionPipeline:
         extractor: Extractor | None = None,
         embedder: ChunkEmbedder | None = None,
         llm: LLMClient | None = None,
+        on_status: Callable[[Document], object] | None = None,
     ) -> None:
         self.config = config or get_config().ingestion
         self.loader = loader or FileLoader(self.config.loader)
@@ -124,6 +132,7 @@ class IngestionPipeline:
         self.llm = llm
         self.extractor = extractor or make_extractor(self.config.extraction.default, llm=llm)
         self.embedder = embedder
+        self.on_status = on_status
 
     @property
     def ocr(self) -> OCREngine:
@@ -145,8 +154,11 @@ class IngestionPipeline:
             logger.info("%s already ingested as %s", loaded.file.filename, loaded.document_id)
             return IngestResult(document=document, duplicate=True, timings_ms=timings)
 
-        result = IngestResult(document=document.with_status(DocumentStatus.PROCESSING))
+        result = IngestResult(
+            document=document.with_status(DocumentStatus.PROCESSING), retry=loaded.retry
+        )
         result.timings_ms = timings
+        self._status(result.document)
         try:
             self._read(result, Path(path), loaded.file.mime_type)
             self._understand(result)
@@ -155,9 +167,20 @@ class IngestionPipeline:
         except _StepError as exc:
             logger.warning("ingesting %s failed at %s", loaded.file.filename, exc)
             result.document = result.document.with_status(DocumentStatus.FAILED, error=str(exc))
+            self._status(result.document)
             return result
         result.document = result.document.with_status(DocumentStatus.READY)
         return result
+
+    def _status(self, document: Document) -> None:
+        logger.info(
+            "document %s is %s",
+            document.id,
+            document.status.value,
+            extra={"document_id": document.id, "status": document.status.value},
+        )
+        if self.on_status is not None:
+            self.on_status(document)
 
     def _read(self, result: IngestResult, path: Path, mime_type: str) -> None:
         with _step(result, "layout"):
@@ -257,6 +280,7 @@ class IngestionPipeline:
                         result.document = result.document.with_status(
                             DocumentStatus.FAILED, error=str(exc)
                         )
+                        self._status(result.document)
         yield from results
 
 
@@ -427,13 +451,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         from ledgerlens.ingestion.loaders import PostgresRegistry
         from ledgerlens.ingestion.sinks import StoresSink
 
-        sink = StoresSink.from_settings()
+        stores = StoresSink.from_settings()
+        sink, on_status = stores, stores.mark
         loader = FileLoader(config.loader, registry=PostgresRegistry())
     else:
-        sink, loader = JsonlSink(args.out), FileLoader(config.loader)
+        sink, on_status = JsonlSink(args.out), None
+        loader = FileLoader(config.loader)
     pipeline = IngestionPipeline(
         config,
         loader=loader,
+        on_status=on_status,
         extractor=make_extractor(args.extractor) if args.extractor else None,
         embedder=None if args.no_embed else default_embedder(config),
     )

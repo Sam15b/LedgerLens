@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ledgerlens.core.config import LoaderConfig
 from ledgerlens.core.schemas import Document, DocumentStatus
 from ledgerlens.ingestion.loaders import FileLoader, PostgresRegistry
+from ledgerlens.storage.postgres.db import session_scope
 from ledgerlens.storage.postgres.repositories import DocumentRepository
 
 pytestmark = pytest.mark.integration
@@ -21,13 +22,6 @@ def test_a_second_loader_sees_the_first_loaders_upload(
     sessions: sessionmaker[Session],
 ) -> None:
     first = FileLoader(CONFIG, registry=PostgresRegistry(sessions)).load(FIXTURES / "contract.pdf")
-    # A new process: nothing shared with the first loader but the database.
-    again = FileLoader(CONFIG, registry=PostgresRegistry(sessions)).load_bytes(
-        (FIXTURES / "contract.pdf").read_bytes(), "renamed.pdf"
-    )
-
-    assert not first.duplicate
-    assert again.duplicate and again.document_id == first.document_id
     with sessions() as session:
         stored = DocumentRepository(session).get(first.document_id)
     assert stored is not None
@@ -36,7 +30,31 @@ def test_a_second_loader_sees_the_first_loaders_upload(
         DocumentStatus.QUEUED,
         2,
     )
+    with session_scope(sessions) as session:  # the first run finishes the document
+        DocumentRepository(session).set_status(first.document_id, DocumentStatus.READY)
+
+    # A new process: nothing shared with the first loader but the database.
+    again = FileLoader(CONFIG, registry=PostgresRegistry(sessions)).load_bytes(
+        (FIXTURES / "contract.pdf").read_bytes(), "renamed.pdf"
+    )
+
+    assert not first.duplicate
+    assert again.duplicate and again.document_id == first.document_id
     assert PostgresRegistry(sessions).get(first.file.sha256) == first.document_id
+
+
+@pytest.mark.parametrize("status", [DocumentStatus.QUEUED, DocumentStatus.FAILED])
+def test_unfinished_documents_are_retried_not_skipped(
+    sessions: sessionmaker[Session], status: DocumentStatus
+) -> None:
+    first = FileLoader(CONFIG, registry=PostgresRegistry(sessions)).load(FIXTURES / "contract.pdf")
+    with session_scope(sessions) as session:
+        DocumentRepository(session).set_status(first.document_id, status, error="ocr: boom")
+
+    again = FileLoader(CONFIG, registry=PostgresRegistry(sessions)).load(FIXTURES / "contract.pdf")
+
+    assert (again.duplicate, again.retry) == (False, True)
+    assert again.document_id == first.document_id
 
 
 def test_concurrent_claims_of_one_hash_have_a_single_winner(
