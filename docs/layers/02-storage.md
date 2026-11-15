@@ -65,6 +65,10 @@ Use the **Pinecone Local** Docker emulator in `docker-compose.yml` for tests and
 (set `PINECONE_HOST`); use the real serverless index for eval runs and production.
 Check Pinecone's docs for the current image name and ports.
 
+The emulator is **dense-only**: it accepts `sparse_values` on upsert and query but neither
+stores nor scores them (a fetched vector has `sparse_values=None`). Hybrid weighting is
+unit-tested; tune `hybrid_alpha` against the serverless index, never against the emulator.
+
 ---
 
 ## PostgreSQL (system of record + analytics)
