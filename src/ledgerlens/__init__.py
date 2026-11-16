@@ -1,3 +1,3 @@
 """LedgerLens: agentic GraphRAG for invoices, purchase orders and contracts."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

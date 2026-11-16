@@ -8,6 +8,73 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-16
+
+Phase 3 — Storage: every document is stored three ways, all keyed by the same
+`document_id`: records in Postgres, chunk vectors in Pinecone and relationships in Neo4j.
+One idempotent write path fills them. The synthetic ledger loads into all three with
+matching counts, and Pinecone and Neo4j can be rebuilt from Postgres alone. This release
+also contains the synthetic data milestone below, which was finished before Phase 3 closed.
+
+### Storage (Phase 3)
+
+#### Added
+
+- PostgreSQL (`storage/postgres/`):
+  - ORM models for documents, chunks, vendors, invoices, POs, payments with allocations,
+    contracts, anomaly scores, reminders, `llm_calls` and `eval_runs`;
+  - engine and session management, and Alembic with `make migrate` (also run by
+    `make init`);
+  - idempotent repositories: upserts whose update only fires on a real change;
+  - payments matched to invoices by number, with invoice status refreshed from them;
+  - Postgres-backed SHA-256 dedupe, and LLM call costs written to `llm_calls`.
+- AP analytics in `analytics.sql`, with typed Python wrappers: AP aging
+  (current / 0-30 / 31-60 / 61-90 / 90+), spend by vendor by month, unpaid totals and
+  average days to pay. Every report is per currency and point-in-time.
+- Pinecone (`storage/pinecone_store.py`):
+  - batched upsert with filterable metadata (`doc_date` as `YYYYMMDD` ints);
+  - α-weighted hybrid dense + sparse query;
+  - delete by document prefix and stats;
+  - one namespace per environment (`dev` / `eval` / `prod`);
+  - tests against Pinecone Local.
+- Neo4j (`storage/neo4j/`):
+  - driver with read and write sessions, and a read-only runner for untrusted Cypher;
+  - vendor resolution by tax id, then canonical name or alias, then fuzzy match;
+  - a MERGE-based linker for Vendor → Invoice → PO ← Contract and Payment → Invoice;
+  - `UnresolvedLink` nodes for references with no target yet.
+- `ingestion/sinks.py` `StoresSink`, the write path:
+  - Postgres transaction → Pinecone delete + upsert → Neo4j MERGE → `ready`;
+  - any failure leaves the document `failed` with the step and the error, and the next
+    run retries it;
+  - re-ingesting is a no-op.
+- `workers/ingest_worker.py`: a Redis (arq) queue worker for ingestion jobs (`make worker`,
+  `make enqueue`).
+- `scripts/reindex_pinecone.py` and `scripts/rebuild_graph.py` rebuild the vectors (BM25
+  refit, stale vectors pruned) and the graph (aliases kept, `--wipe`) from Postgres.
+- `scripts/load_synthetic.py` (`storage/bulk_load.py`):
+  - records go straight into Postgres and Neo4j;
+  - rendered PDFs go through the pipeline and attach to those records;
+  - the script exits non-zero if store counts disagree.
+- `scripts/seed_demo_data.py`: a small demo slice of the ledger with every invoice state
+  and anomaly kind.
+- `eval/reports/2026-11-16/storage.md`: the full synthetic ledger loaded with matching
+  counts across stores (14,291 records, 950 documents, 1,667 chunks = 1,667 vectors),
+  with per-stage timings and full-scale rebuilds.
+
+#### Changed
+
+- The pipeline hands results to a `StorageSink` instead of writing JSONL; `JsonlSink`
+  keeps the offline mode.
+- `IngestionPipeline.process(doc_type=...)` skips classification when the type is known.
+- `StoresSink` has `record_id` / `resolve_vendor` hooks, used by the bulk loader.
+- Package version 0.3.0.
+
+#### Known issues
+
+- Payments that name a number shared by exact-duplicate invoices stay unmatched: 171 of
+  4,491 allocations on the synthetic set. Left for the reconciler.
+- The rules classifier puts the compact invoice layout ("BILL NO.") below its threshold.
+
 ### Synthetic data milestone (Phase 6b: GAN + diffusion)
 
 A labelled synthetic ledger, rendered to real-looking documents and degraded scans, so

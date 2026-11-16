@@ -71,7 +71,7 @@ class IngestResult(BaseModel):
     document: Document
     duplicate: bool = False  # same bytes ingested before: nothing else was run
     retry: bool = False  # same bytes as a document that never finished: run again
-    classification: str | None = None  # "rules" | "llm" | "fallback"
+    classification: str | None = None  # "rules" | "llm" | "fallback" | "given"
     extraction: ExtractionResult | None = None
     pages: list[PageContent] = Field(default_factory=list, exclude=True)
     chunks: list[Chunk] = Field(default_factory=list)
@@ -143,9 +143,14 @@ class IngestionPipeline:
 
     # ------------------------------------------------------------------ one document
 
-    def process(self, path: Path | str, *, embed: bool = True) -> IngestResult:
+    def process(
+        self, path: Path | str, *, embed: bool = True, doc_type: DocType | None = None
+    ) -> IngestResult:
         """Ingest one file. Loader errors (unsupported, too large, unreadable) are raised;
-        a failure in a later step returns a ``failed`` document with the error."""
+        a failure in a later step returns a ``failed`` document with the error.
+
+        ``doc_type`` skips classification when the caller already knows the type (a
+        bulk load of rendered records); ``classification`` is then ``"given"``."""
         timings: dict[str, float] = {}
         with _timed(timings, "load"):
             loaded = self.loader.load(path)
@@ -161,7 +166,7 @@ class IngestionPipeline:
         self._status(result.document)
         try:
             self._read(result, Path(path), loaded.file.mime_type)
-            self._understand(result)
+            self._understand(result, doc_type)
             if embed and self.embedder is not None and self.embedder.sparse.is_fitted:
                 self.embed(result)
         except _StepError as exc:
@@ -200,12 +205,14 @@ class IngestionPipeline:
             page if isinstance(page, PageContent) else read[page.page_number] for page in pages
         ]
 
-    def _understand(self, result: IngestResult) -> None:
+    def _understand(self, result: IngestResult, known: DocType | None = None) -> None:
         text = result.text
-        with _step(result, "classify"):
-            decided = classify(text, llm=self.llm)
-        result.classification = decided.method
-        doc_type = decided.doc_type
+        if known is not None:
+            result.classification, doc_type = "given", known
+        else:
+            with _step(result, "classify"):
+                decided = classify(text, llm=self.llm)
+            result.classification, doc_type = decided.method, decided.doc_type
         result.document = _with(result.document, doc_type=doc_type)
         record = None
         if doc_type is not DocType.UNKNOWN:
