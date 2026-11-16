@@ -48,6 +48,7 @@ from ledgerlens.storage.postgres.models import (
     PurchaseOrderRow,
 )
 from ledgerlens.storage.postgres.repositories import InvoiceRepository
+from ledgerlens.storage.rebuild import rebuild_graph, reindex_pinecone
 
 pytestmark = [
     pytest.mark.integration,
@@ -354,3 +355,88 @@ def test_killed_mid_batch_then_rerun_reaches_the_correct_state(
     assert sum(r.retry for r in rerun) == 3 and sum(r.duplicate for r in rerun) == 1
     assert_complete(state(stores))
     assert count(stores["sessions"], DocumentRow) == 4  # same documents, not new ones
+
+
+# --------------------------------------------------------------------------- rebuilds
+
+
+def drop_derived(stores: dict[str, Any]) -> None:
+    """Lose the graph and the vectors of the stored documents (as if the volume were
+    dropped), keeping Postgres -- the stores fixture's teardown, run early."""
+    with stores["sessions"]() as session:
+        ids = list(session.scalars(select(DocumentRow.id)))
+    for document_id in ids:
+        stores["pinecone"].delete_document(document_id)
+    run_write(
+        stores["driver"],
+        """
+        MATCH (n) WHERE n.document_id IN $ids
+        OPTIONAL MATCH (n)-[:HAS_LINE]->(line:LineItem)
+        OPTIONAL MATCH (u:UnresolvedLink {source_id: n.id})
+        DETACH DELETE line, u, n
+        """,
+        {"ids": ids},
+    )
+    run_write(stores["driver"], "MATCH (v:Vendor {name: 'Acme Supplies Ltd'}) DETACH DELETE v")
+
+
+def derived(stores: dict[str, Any]) -> dict[str, Any]:
+    """What the rebuilds must restore: vendor nodes and every vector with its metadata."""
+    vendors = run_read(
+        stores["driver"],
+        "MATCH (v:Vendor {name: 'Acme Supplies Ltd'}) RETURN v.id AS id, v.tax_id AS tax_id, "
+        "v.aliases AS aliases",
+    )
+    hits = stores["pinecone"].query([1.0] * DIM, top_k=100)
+    return {
+        "vendors": vendors,
+        "vectors": {h.id: (round(h.score, 5), h.metadata) for h in hits},
+    }
+
+
+def test_graph_and_vectors_rebuild_from_postgres_alone(
+    stores: dict[str, Any], raw: list[Path], tmp_path: Path
+) -> None:
+    ingest(stores, raw, sink_for(stores), tmp_path)
+    before, extra = state(stores), derived(stores)
+    assert_complete(before)
+
+    drop_derived(stores)
+    lost = state(stores)
+    assert lost["vectors"] == [] and lost["edges"] == []
+
+    graph = rebuild_graph(stores["sessions"], GraphLinker(stores["driver"]))
+    vectors = reindex_pinecone(
+        stores["sessions"], stores["pinecone"], DenseEmbedder(model=FakeEncoder())
+    )
+
+    assert graph.vendors == 1
+    assert graph.records == {"Contract": 1, "PurchaseOrder": 1, "Invoice": 1, "Payment": 1}
+    assert (vectors.documents, vectors.vectors) == (4, len(before["chunks"]))
+    assert state(stores) == before
+    assert derived(stores) == extra
+
+    again = rebuild_graph(stores["sessions"], GraphLinker(stores["driver"]))  # idempotent
+    assert again.records == graph.records
+    assert state(stores) == before
+
+
+def test_reindex_prunes_vectors_of_documents_not_ready(
+    stores: dict[str, Any], raw: list[Path], tmp_path: Path
+) -> None:
+    ingest(stores, raw, sink_for(stores), tmp_path)
+    with stores["sessions"]() as session:
+        invoice = session.scalars(
+            select(DocumentRow).where(DocumentRow.filename == "invoice_digital.pdf")
+        ).one()
+        invoice.status, invoice.error = "failed", "test: marked failed"
+        session.commit()
+    stale = stores["pinecone"].document_ids(invoice.id)
+    assert stale
+
+    result = reindex_pinecone(
+        stores["sessions"], stores["pinecone"], DenseEmbedder(model=FakeEncoder())
+    )
+
+    assert result.documents == 3 and result.pruned == len(stale)
+    assert stores["pinecone"].document_ids(invoice.id) == []
