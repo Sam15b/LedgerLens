@@ -4,7 +4,14 @@
   (BGE, with its query instruction) and take Pinecone's top ``k`` by dot product, within
   the question's :class:`~ledgerlens.retrieval.QueryFilters` (as metadata filters).
 
+* **R2** :class:`HybridRetriever` -- the same query plus a BM25 sparse vector of the
+  question, weighted ``alpha`` dense to ``1 - alpha`` sparse (``hybrid_alpha`` in
+  pinecone.yaml, 0.7). The sparse side matches exact tokens -- ``INV-889``, ``PO-1042``,
+  amounts -- that a dense embedding blurs.
+
 R1 is what GraphRAG has to beat (docs/layers/03-retrieval.md); it is deliberately plain.
+Note that the Pinecone Local emulator ignores sparse values, so R2 only differs from R1
+on the serverless index.
 
 Pinecone keeps only the first ~1 KB of each chunk in metadata; the full text lives in the
 Postgres ``chunks`` table under the same id. A :class:`ChunkTexts` source fills it in
@@ -19,6 +26,7 @@ from typing import Any, Protocol
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from ledgerlens.ingestion.embedding import SparseVector
 from ledgerlens.retrieval import QueryFilters, RetrievalResult, ScoredChunk
 from ledgerlens.retrieval.filters import to_pinecone_filter
 from ledgerlens.storage.pinecone_store import PineconeStore, VectorHit
@@ -30,6 +38,13 @@ class QueryEmbedder(Protocol):
     """The part of :class:`~ledgerlens.ingestion.embedding.DenseEmbedder` a retriever uses."""
 
     def embed_query(self, text: str) -> list[float]: ...
+
+
+class SparseQueryEncoder(Protocol):
+    """The part of :class:`~ledgerlens.ingestion.embedding.BM25Encoder` R2 uses (fitted on
+    the indexed chunks: load it from ``embedding.sparse_params_path``)."""
+
+    def encode_query(self, text: str) -> SparseVector: ...
 
 
 class ChunkTexts(Protocol):
@@ -103,4 +118,36 @@ class DenseRetriever:
             filter=to_pinecone_filter(filters) or None,
         )
         chunks = with_full_text([to_scored(h, "dense") for h in hits], self.texts)
+        return RetrievalResult.build(query, self.name, chunks)
+
+
+class HybridRetriever(DenseRetriever):
+    """R2: dense + BM25 sparse in one Pinecone query, ``alpha``-weighted."""
+
+    name = "r2_hybrid"
+
+    def __init__(
+        self,
+        store: PineconeStore,
+        embedder: QueryEmbedder,
+        sparse: SparseQueryEncoder,
+        *,
+        alpha: float | None = None,
+        texts: ChunkTexts | None = None,
+    ) -> None:
+        super().__init__(store, embedder, texts=texts)
+        self.sparse = sparse
+        self.alpha = alpha  # None: the index config's hybrid_alpha
+
+    def retrieve(
+        self, query: str, *, filters: QueryFilters | None = None, k: int = 5
+    ) -> RetrievalResult:
+        hits = self.store.query(
+            self.embedder.embed_query(query),
+            self.sparse.encode_query(query),
+            top_k=k,
+            filter=to_pinecone_filter(filters) or None,
+            alpha=self.alpha,
+        )
+        chunks = with_full_text([to_scored(h, "hybrid") for h in hits], self.texts)
         return RetrievalResult.build(query, self.name, chunks)
