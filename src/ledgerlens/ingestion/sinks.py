@@ -132,15 +132,16 @@ class StoresSink:
     def _write(self, result: IngestResult) -> None:
         document = result.document
         record = result.extraction.record if result.extraction else None
-        vendor = self._step("vendor", lambda: self._resolve_vendor(record))
+        record_id = self.record_id(result)
+        vendor = self._step("vendor", lambda: self.resolve_vendor(result, record))
         vendor_id = vendor.vendor_id if vendor else None
-        self._step("postgres", lambda: self._postgres(result, record, vendor_id))
+        self._step("postgres", lambda: self._postgres(result, record, record_id, vendor_id))
         if self.pinecone is not None:
             pinecone = self.pinecone
             self._step("pinecone", lambda: self._vectors(pinecone, result, record, vendor_id))
         if self.linker is not None:
             linker = self.linker
-            self._step("neo4j", lambda: self._graph(linker, document, record, vendor))
+            self._step("neo4j", lambda: self._graph(linker, document, record, record_id, vendor))
 
     @staticmethod
     def _step(name: str, run: Callable[[], T]) -> T:
@@ -149,13 +150,27 @@ class StoresSink:
         except Exception as exc:
             raise StoreWriteError(name, exc) from exc
 
-    def _resolve_vendor(self, record: ExtractedRecord | None) -> VendorMatch | None:
+    # Two hooks a subclass can override when it knows more than the document says (a
+    # bulk load of records whose ids and vendors are already known).
+
+    def record_id(self, result: IngestResult) -> str:
+        """The id the document's record is stored under: the ``document_id``."""
+        return result.document.id
+
+    def resolve_vendor(
+        self, result: IngestResult, record: ExtractedRecord | None
+    ) -> VendorMatch | None:
+        """Which vendor the record is from: resolved against the graph (read only)."""
         if record is None or self.linker is None:
             return None
         return self.linker.resolver.resolve(record.vendor_name, _tax_id(record))
 
     def _postgres(
-        self, result: IngestResult, record: ExtractedRecord | None, vendor_id: str | None
+        self,
+        result: IngestResult,
+        record: ExtractedRecord | None,
+        record_id: str,
+        vendor_id: str | None,
     ) -> None:
         document = result.document
         with session_scope(self.sessions) as session:
@@ -167,9 +182,7 @@ class StoresSink:
                 return
             if vendor_id is not None:
                 repos.vendors.ensure(vendor_id, record.vendor_name, tax_id=_tax_id(record))
-            repos.upsert_record(
-                record, id=document.id, document_id=document.id, vendor_id=vendor_id
-            )
+            repos.upsert_record(record, id=record_id, document_id=document.id, vendor_id=vendor_id)
 
     @staticmethod
     def _vectors(
@@ -193,10 +206,11 @@ class StoresSink:
         linker: GraphLinker,
         document: Document,
         record: ExtractedRecord | None,
+        record_id: str,
         vendor: VendorMatch | None,
     ) -> None:
         linker.unlink_document(document.id, keep=record_label(record) if record else None)
         if record is None or vendor is None:
             return
         linker.resolver.remember(vendor, record.vendor_name, _tax_id(record))
-        linker.link(record, id=document.id, document_id=document.id, vendor_id=vendor.vendor_id)
+        linker.link(record, id=record_id, document_id=document.id, vendor_id=vendor.vendor_id)
