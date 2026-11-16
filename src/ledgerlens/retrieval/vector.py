@@ -1,7 +1,8 @@
 """Vector retrievers over the Pinecone chunk index.
 
 * **R1** :class:`DenseRetriever` -- the baseline: embed the question with the dense model
-  (BGE, with its query instruction) and take Pinecone's top ``k`` by dot product.
+  (BGE, with its query instruction) and take Pinecone's top ``k`` by dot product, within
+  the question's :class:`~ledgerlens.retrieval.QueryFilters` (as metadata filters).
 
 R1 is what GraphRAG has to beat (docs/layers/03-retrieval.md); it is deliberately plain.
 
@@ -19,6 +20,7 @@ from typing import Any, Protocol
 from sqlalchemy.orm import Session, sessionmaker
 
 from ledgerlens.retrieval import QueryFilters, RetrievalResult, ScoredChunk
+from ledgerlens.retrieval.filters import to_pinecone_filter
 from ledgerlens.storage.pinecone_store import PineconeStore, VectorHit
 from ledgerlens.storage.postgres.db import get_session_factory
 from ledgerlens.storage.postgres.repositories import ChunkRepository
@@ -94,8 +96,11 @@ class DenseRetriever:
     def retrieve(
         self, query: str, *, filters: QueryFilters | None = None, k: int = 5
     ) -> RetrievalResult:
-        if filters is not None and not filters.is_empty():
-            raise NotImplementedError("metadata filters are not supported yet")
-        hits = self.store.query(self.embedder.embed_query(query), None, top_k=k)
+        hits = self.store.query(
+            self.embedder.embed_query(query),
+            None,
+            top_k=k,
+            filter=to_pinecone_filter(filters) or None,
+        )
         chunks = with_full_text([to_scored(h, "dense") for h in hits], self.texts)
         return RetrievalResult.build(query, self.name, chunks)
