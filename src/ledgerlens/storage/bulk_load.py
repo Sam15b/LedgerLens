@@ -40,6 +40,7 @@ from neo4j import Driver
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from ledgerlens.core.config import get_config
 from ledgerlens.core.schemas import (
     DocType,
     DocumentStatus,
@@ -49,6 +50,8 @@ from ledgerlens.core.schemas import (
     parse_extracted,
 )
 from ledgerlens.extraction.base import ExtractionResult
+from ledgerlens.ingestion.embedding import BM25Encoder, ChunkEmbedder, DenseEmbedder
+from ledgerlens.ingestion.loaders import FileLoader, PostgresRegistry
 from ledgerlens.ingestion.pipeline import IngestionPipeline, IngestResult
 from ledgerlens.ingestion.sinks import StoresSink
 from ledgerlens.storage.neo4j.driver import run_read
@@ -522,4 +525,39 @@ def count_stores(
         postgres=postgres,
         pinecone=pinecone.count(),
         neo4j={row["label"]: int(row["n"]) for row in nodes},
+    )
+
+
+def load_rendered(
+    rendered: Sequence[Rendered],
+    loaded: LoadReport,
+    *,
+    sessions: sessionmaker[Session],
+    pinecone: PineconeStore | None,
+    linker: GraphLinker | None,
+    embedder: ChunkEmbedder | None = None,
+    bm25_path: Path | None = None,
+    progress: Progress | None = None,
+) -> RenderedReport:
+    """:func:`ingest_rendered` with the production pipeline: files deduplicated against
+    Postgres, the configured dense model (unless ``embedder`` is given) and a BM25 fit on
+    these documents, stored by a :class:`LedgerSink` on the records ``loaded`` wrote."""
+    config = get_config().ingestion
+    extractor = KnownRecordExtractor()
+    sink = LedgerSink(loaded.assignments, sessions=sessions, pinecone=pinecone, linker=linker)
+    pipeline = IngestionPipeline(
+        config,
+        loader=FileLoader(config.loader, registry=PostgresRegistry(sessions)),
+        extractor=extractor,
+        embedder=embedder or ChunkEmbedder(DenseEmbedder(config.embedding), BM25Encoder()),
+        on_status=sink.mark,
+    )
+    return ingest_rendered(
+        rendered,
+        loaded.assignments,
+        pipeline,
+        extractor,
+        sink,
+        bm25_path=bm25_path,
+        progress=progress,
     )

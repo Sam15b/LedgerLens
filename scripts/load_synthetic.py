@@ -32,17 +32,12 @@ from typing import Any
 from neo4j.exceptions import AuthError, ServiceUnavailable
 from sqlalchemy.exc import OperationalError
 
-from ledgerlens.core.config import get_config, repo_path
+from ledgerlens.core.config import repo_path
 from ledgerlens.core.logging import configure_logging
-from ledgerlens.ingestion.embedding import BM25Encoder, ChunkEmbedder, DenseEmbedder
-from ledgerlens.ingestion.loaders import FileLoader, PostgresRegistry
-from ledgerlens.ingestion.pipeline import IngestionPipeline
 from ledgerlens.storage.bulk_load import (
-    KnownRecordExtractor,
     LedgerLoader,
-    LedgerSink,
     count_stores,
-    ingest_rendered,
+    load_rendered,
     read_ledger,
     read_manifest,
 )
@@ -97,25 +92,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{loaded.vendors} vendors ({loaded.new_vendors} new); "
             + ", ".join(f"{k} {v:.1f}s" for k, v in loaded.timings_s.items())
         )
-        out["structured"] = {k: v for k, v in asdict(loaded).items() if k != "assignments"}
+        out["structured"] = {
+            "records": loaded.records,
+            "vendors": loaded.vendors,
+            "new_vendors": loaded.new_vendors,
+            "timings_s": loaded.timings_s,
+        }
 
         if not args.no_pdfs and args.manifest.exists():
             rendered = read_manifest(args.manifest)[: args.pdf_limit]
-            config = get_config().ingestion
-            extractor = KnownRecordExtractor()
-            sink = LedgerSink(
-                loaded.assignments, sessions=sessions, pinecone=pinecone, linker=linker
-            )
-            pipeline = IngestionPipeline(
-                config,
-                loader=FileLoader(config.loader, registry=PostgresRegistry(sessions)),
-                extractor=extractor,
-                embedder=ChunkEmbedder(DenseEmbedder(config.embedding), BM25Encoder()),
-                on_status=sink.mark,
-            )
             started = time.perf_counter()
-            docs = ingest_rendered(
-                rendered, loaded.assignments, pipeline, extractor, sink, progress=progress
+            docs = load_rendered(
+                rendered,
+                loaded,
+                sessions=sessions,
+                pinecone=pinecone,
+                linker=linker,
+                progress=progress,
             )
             elapsed = time.perf_counter() - started
             medians = {
