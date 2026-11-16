@@ -7,17 +7,21 @@
   (upper-cased; the prefix also says which document type is meant);
 * **vendors** -- names matched against the vendor master: exact canonical name or alias
   ("ACME Supplies, Ltd." = "Acme Supplies Limited"), a distinctive first word ("Acme"),
-  or a fuzzy match on a word n-gram (``rapidfuzz``, for typos).
+  or a fuzzy match on a word n-gram (``rapidfuzz``, for typos);
+* **date range** -- ``Q1`` / ``Q1 2026``, ``FY2026``, ``last month``, ``this quarter``,
+  ``in March``, ``March 2026``, ``last 30 days``, ``since``/``before``/``after`` a date,
+  ``between`` two dates, or one explicit date -- resolved against ``today``.
 
 Everything above is rules: fast, free and predictable.
 """
 
 from __future__ import annotations
 
+import calendar
 import logging
 import re
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -25,7 +29,7 @@ from rapidfuzz import fuzz
 from sqlalchemy.orm import Session, sessionmaker
 
 from ledgerlens.core.schemas import DocType
-from ledgerlens.extraction.normalize import canonical_vendor
+from ledgerlens.extraction.normalize import canonical_vendor, find_dates
 from ledgerlens.retrieval import QueryFilters
 from ledgerlens.storage.neo4j.linker import VendorCandidate
 from ledgerlens.storage.postgres.db import get_session_factory
@@ -207,6 +211,149 @@ class VendorFinder:
         return best[1] if best else None
 
 
+# --------------------------------------------------------------------------- dates
+
+DateRange = tuple[date | None, date | None]
+
+_MONTH_NAMES = {
+    name.lower(): number
+    for number in range(1, 13)
+    for name in (calendar.month_name[number], calendar.month_abbr[number])
+}
+_MONTH_NAMES["sept"] = 9
+_MONTH = "|".join(sorted(_MONTH_NAMES, key=len, reverse=True))
+_YEAR = r"(?:19|20)\d\d"
+
+_QUARTER = re.compile(
+    rf"\b(?:q([1-4])|([1-4])(?:st|nd|rd|th)\s+quarter)(?:\s*(?:of\s+)?'?({_YEAR}))?\b", re.I
+)
+_FISCAL_YEAR = re.compile(rf"\b(?:fy|fiscal(?:\s+year)?)\s*'?({_YEAR}|\d\d)\b", re.I)
+_MONTH_YEAR = re.compile(
+    rf"\b(?:in\s+|during\s+|for\s+)?({_MONTH})\.?(?:\s*,?\s*({_YEAR}))?\b", re.I
+)
+_RELATIVE = re.compile(
+    r"\b(this|last|previous|past|current|next)\s+(week|month|quarter|year)\b", re.I
+)
+_LAST_N = re.compile(r"\b(?:last|past|previous)\s+(\d{1,3})\s+(day|week|month)s?\b", re.I)
+_YEAR_ONLY = re.compile(rf"\b(?:in|during|for|of|year)\s+({_YEAR})\b", re.I)
+_TODAY = re.compile(
+    r"\b(today|yesterday|ytd|year[\s-]to[\s-]date|mtd|month[\s-]to[\s-]date)\b", re.I
+)
+_SINCE = re.compile(r"\b(since|after|from|starting)\b", re.I)
+_UNTIL = re.compile(r"\b(before|until|till|up\s+to|through|by)\b", re.I)
+
+
+def month_range(year: int, month: int) -> tuple[date, date]:
+    return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+
+
+def quarter_range(year: int, quarter: int, *, fiscal_start: int = 1) -> tuple[date, date]:
+    """Quarter ``quarter`` of fiscal year ``year`` (a fiscal year starting in month
+    ``fiscal_start`` is named by the calendar year it ends in, as FY2026 = Apr 2025 to
+    Mar 2026 when it starts in April)."""
+    first = (fiscal_start - 1) + (quarter - 1) * 3  # months after January of the start year
+    start_year = year - (1 if fiscal_start > 1 else 0) + first // 12
+    start = date(start_year, first % 12 + 1, 1)
+    end_month = start.month + 2
+    end_year = start.year + (end_month - 1) // 12
+    end_month = (end_month - 1) % 12 + 1
+    return start, month_range(end_year, end_month)[1]
+
+
+def fiscal_quarter_of(day: date, fiscal_start: int = 1) -> tuple[int, int]:
+    """(fiscal year, quarter) that ``day`` falls in."""
+    offset = (day.month - fiscal_start) % 12
+    fiscal_year = day.year + (1 if fiscal_start > 1 and day.month >= fiscal_start else 0)
+    return fiscal_year, offset // 3 + 1
+
+
+def _shift_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    index = year * 12 + (month - 1) + delta
+    return index // 12, index % 12 + 1
+
+
+def parse_date_range(text: str, today: date, *, fiscal_start: int = 1) -> DateRange:
+    """The date range a question talks about, or ``(None, None)``.
+
+    The first matching form wins, most specific first: explicit dates (one = that day,
+    two = between them; ``since``/``after`` or ``before``/``until`` make one date an open
+    range), quarters, fiscal years, relative periods, months, then a bare year. A month or
+    quarter without a year is the latest one that has started by ``today``.
+    """
+    dates = sorted(find_dates(text))
+    if len(dates) >= 2:
+        return dates[0], dates[-1]
+    if len(dates) == 1:
+        (day,) = dates
+        if _SINCE.search(text):
+            return (day + timedelta(days=1) if re.search(r"\bafter\b", text, re.I) else day), None
+        if _UNTIL.search(text):
+            return None, (day - timedelta(days=1) if re.search(r"\bbefore\b", text, re.I) else day)
+        return day, day
+
+    if match := _QUARTER.search(text):
+        quarter = int(match[1] or match[2])
+        if match[3]:
+            return quarter_range(int(match[3]), quarter, fiscal_start=fiscal_start)
+        fiscal_year, _ = fiscal_quarter_of(today, fiscal_start)
+        start, end = quarter_range(fiscal_year, quarter, fiscal_start=fiscal_start)
+        if start > today:  # "Q4" asked in February is last year's
+            start, end = quarter_range(fiscal_year - 1, quarter, fiscal_start=fiscal_start)
+        return start, end
+
+    if match := _FISCAL_YEAR.search(text):
+        year = int(match[1])
+        year += 2000 if year < 100 else 0
+        start, _ = quarter_range(year, 1, fiscal_start=fiscal_start)
+        _, end = quarter_range(year, 4, fiscal_start=fiscal_start)
+        return start, end
+
+    if match := _TODAY.search(text):
+        word = match[1].lower().replace("-", " ")
+        if word == "today":
+            return today, today
+        if word == "yesterday":
+            return today - timedelta(days=1), today - timedelta(days=1)
+        if word in ("ytd", "year to date"):
+            return date(today.year, 1, 1), today
+        return date(today.year, today.month, 1), today  # month to date
+
+    if match := _LAST_N.search(text):
+        n, unit = int(match[1]), match[2].lower()
+        if unit == "month":
+            year, month = _shift_months(today.year, today.month, -n)
+            last = calendar.monthrange(year, month)[1]
+            return date(year, month, min(today.day, last)), today
+        return today - timedelta(days=n * (7 if unit == "week" else 1)), today
+
+    if match := _RELATIVE.search(text):
+        which, unit = match[1].lower(), match[2].lower()
+        step = {"this": 0, "current": 0, "last": -1, "previous": -1, "past": -1, "next": 1}[which]
+        if unit == "week":
+            monday = today - timedelta(days=today.weekday()) + timedelta(weeks=step)
+            return monday, monday + timedelta(days=6)
+        if unit == "month":
+            return month_range(*_shift_months(today.year, today.month, step))
+        if unit == "quarter":
+            fiscal_year, quarter = fiscal_quarter_of(today, fiscal_start)
+            index = fiscal_year * 4 + (quarter - 1) + step
+            return quarter_range(index // 4, index % 4 + 1, fiscal_start=fiscal_start)
+        return date(today.year + step, 1, 1), date(today.year + step, 12, 31)
+
+    if match := _MONTH_YEAR.search(text):
+        month = _MONTH_NAMES[match[1].lower()]
+        if match[2]:
+            return month_range(int(match[2]), month)
+        if match[0][:2].lower() in ("in", "du", "fo") or len(match[1]) > 3:
+            year = today.year if month <= today.month else today.year - 1
+            return month_range(year, month)
+
+    if match := _YEAR_ONLY.search(text):
+        year = int(match[1])
+        return date(year, 1, 1), date(year, 12, 31)
+    return None, None
+
+
 # --------------------------------------------------------------------------- the analyzer
 
 
@@ -217,9 +364,13 @@ class QueryAnalyzer:
         self,
         vendors: Iterable[VendorCandidate] = (),
         *,
+        today: date | None = None,
+        fiscal_start: int = 1,
         vendor_threshold: float = 88.0,
     ) -> None:
         self.finder = VendorFinder(vendors, threshold=vendor_threshold)
+        self._today = today
+        self.fiscal_start = fiscal_start
 
     @classmethod
     def from_postgres(
@@ -233,14 +384,19 @@ class QueryAnalyzer:
             ]
         return cls(vendors, **kwargs)
 
+    @property
+    def today(self) -> date:
+        return self._today or date.today()
+
     def analyze(self, question: str) -> QueryAnalysis:
         return self.rules(question)
 
     def rules(self, question: str) -> QueryAnalysis:
         numbers = find_doc_numbers(question)
         doc_numbers = [number for number, _ in numbers]
-        rest = _DOC_NUMBER.sub(" ", question)  # a number is not a vendor
+        rest = _DOC_NUMBER.sub(" ", question)  # numbers must not read as dates or vendors
         vendor_ids = self.finder.find(rest)
+        start, end = parse_date_range(rest, self.today, fiscal_start=self.fiscal_start)
         all_types = list(dict.fromkeys(t for _, t in numbers))
         return QueryAnalysis(
             query=question,
@@ -248,4 +404,6 @@ class QueryAnalyzer:
             doc_types=tuple(all_types),
             vendor_ids=tuple(vendor_ids),
             vendor_names=tuple(self.finder.names[v] for v in vendor_ids),
+            date_from=start,
+            date_to=end,
         )
