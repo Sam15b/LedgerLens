@@ -16,6 +16,7 @@ Exit codes: 0 rebuilt, 1 a store is unreachable or not configured.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from collections.abc import Sequence
@@ -48,6 +49,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging()
+    for noisy in ("httpx", "pinecone"):  # per-request INFO lines drown the progress output
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         store = PineconeStore.from_settings(namespace=args.namespace)
     except PineconeNotConfiguredError as exc:

@@ -36,7 +36,9 @@ from ledgerlens.core.schemas import (
     Invoice,
     LineItem,
     Payment,
+    PaymentAllocation,
     PurchaseOrder,
+    RateCardEntry,
     Receipt,
 )
 from ledgerlens.storage.postgres.models import (
@@ -721,6 +723,101 @@ def _pick(rows: Sequence[InvoiceRow] | Sequence[ContractRow], vendor_id: str | N
         if len(own) == 1:
             return own[0].id
     return rows[0].id if len(rows) == 1 else None
+
+
+# --------------------------------------------------------------------------- rows -> records
+#
+# The inverse of the upserts above, for rebuilding the graph or vectors from Postgres.
+
+
+def to_line_items(rows: Iterable[InvoiceLineItemRow | POLineItemRow]) -> list[LineItem]:
+    return [
+        LineItem(
+            description=row.description,
+            quantity=row.quantity,
+            unit_price=row.unit_price,
+            amount=row.amount,
+        )
+        for row in rows
+    ]
+
+
+def to_invoice(row: InvoiceRow) -> Invoice:
+    return Invoice(
+        invoice_number=row.invoice_number,
+        vendor_name=row.vendor_name,
+        vendor_tax_id=row.vendor_tax_id,
+        customer_name=row.customer_name,
+        invoice_date=row.invoice_date,
+        due_date=row.due_date,
+        po_number=row.po_number,
+        currency=row.currency,
+        subtotal=row.subtotal,
+        tax=row.tax,
+        total=row.total,
+        line_items=to_line_items(row.line_items),
+    )
+
+
+def to_receipt(row: InvoiceRow) -> Receipt:
+    """An invoice row written by ``upsert_receipt`` back as the receipt it came from
+    (its invoice number is the receipt number, or the ``RECEIPT-...`` stand-in)."""
+    return Receipt(
+        vendor_name=row.vendor_name,
+        receipt_number=row.invoice_number,
+        receipt_date=row.invoice_date,
+        currency=row.currency,
+        tax=row.tax,
+        total=row.total,
+        line_items=to_line_items(row.line_items),
+    )
+
+
+def to_purchase_order(row: PurchaseOrderRow) -> PurchaseOrder:
+    return PurchaseOrder(
+        po_number=row.po_number,
+        vendor_name=row.vendor_name,
+        vendor_tax_id=row.vendor_tax_id,
+        buyer_name=row.buyer_name,
+        order_date=row.order_date,
+        delivery_date=row.delivery_date,
+        contract_number=row.contract_number,
+        currency=row.currency,
+        subtotal=row.subtotal,
+        tax=row.tax,
+        total=row.total,
+        line_items=to_line_items(row.line_items),
+    )
+
+
+def to_payment(row: PaymentRow) -> Payment:
+    return Payment(
+        payment_reference=row.payment_reference,
+        payer_name=row.payer_name,
+        vendor_name=row.vendor_name,
+        paid_at=row.paid_at,
+        method=row.method,  # type: ignore[arg-type]  # CHECKed in the database
+        currency=row.currency,
+        amount=row.amount,
+        allocations=[
+            PaymentAllocation(invoice_number=a.invoice_number, amount=a.amount)
+            for a in row.allocations
+        ],
+    )
+
+
+def to_contract(row: ContractRow) -> Contract:
+    return Contract(
+        contract_number=row.contract_number,
+        title=row.title,
+        vendor_name=row.vendor_name,
+        customer_name=row.customer_name,
+        start_date=row.start_date,
+        end_date=row.end_date,
+        payment_terms_days=row.payment_terms_days,
+        currency=row.currency,
+        rate_card=[RateCardEntry.model_validate(entry) for entry in row.rate_card],
+    )
 
 
 # --------------------------------------------------------------------------- facade
