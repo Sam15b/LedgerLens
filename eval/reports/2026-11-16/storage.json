@@ -1,0 +1,62 @@
+{
+  "records_file": "data/synthetic/records.jsonl",
+  "namespace": "dev",
+  "structured": {
+    "records": {
+      "contract": 50,
+      "purchase_order": 4750,
+      "invoice": 5000,
+      "payment": 4491
+    },
+    "vendors": 58,
+    "new_vendors": 8,
+    "timings_s": {
+      "plan": 0.03809809999074787,
+      "postgres": 95.00244700000621,
+      "neo4j": 171.68154110002797
+    }
+  },
+  "rendered": {
+    "documents": 950,
+    "ready": 934,
+    "duplicates": 16,
+    "failed": {},
+    "chunks": 1635,
+    "timings_s": {
+      "process": 24.519751999992877,
+      "embed": 243.22232940001413,
+      "store": 85.81352860003244
+    },
+    "median_step_ms": {
+      "load": 14.6,
+      "layout": 4.2,
+      "extract": 0.0,
+      "chunk": 0.1,
+      "embed": 256.8
+    },
+    "elapsed_s": 353.66193900001235
+  },
+  "counts": {
+    "postgres": {
+      "vendors": 58,
+      "contracts": 50,
+      "purchase_orders": 4750,
+      "invoices": 5000,
+      "payments": 4491,
+      "documents": 950,
+      "chunks": 1667
+    },
+    "pinecone": 1667,
+    "neo4j": {
+      "Vendor": 58,
+      "Contract": 50,
+      "PurchaseOrder": 4750,
+      "LineItem": 20075,
+      "Invoice": 5000,
+      "Payment": 4491
+    },
+    "mismatches": []
+  },
+  "pinecone": "Pinecone Local (docker compose), index ledgerlens-chunks",
+  "note": "Re-run over data already loaded once (structured timings of the first load: postgres 93.0 s, neo4j 136.5 s); see storage.md."
+}
