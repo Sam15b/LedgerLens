@@ -9,6 +9,9 @@
   pinecone.yaml, 0.7). The sparse side matches exact tokens -- ``INV-889``, ``PO-1042``,
   amounts -- that a dense embedding blurs.
 
+* **R3** :class:`RerankRetriever` -- R2's top ``candidates`` (20), re-sorted by a
+  cross-encoder (:mod:`ledgerlens.retrieval.rerank`) and cut to ``k`` (5).
+
 R1 is what GraphRAG has to beat (docs/layers/03-retrieval.md); it is deliberately plain.
 Note that the Pinecone Local emulator ignores sparse values, so R2 only differs from R1
 on the serverless index.
@@ -27,7 +30,7 @@ from typing import Any, Protocol
 from sqlalchemy.orm import Session, sessionmaker
 
 from ledgerlens.ingestion.embedding import SparseVector
-from ledgerlens.retrieval import QueryFilters, RetrievalResult, ScoredChunk
+from ledgerlens.retrieval import QueryFilters, RetrievalResult, Retriever, ScoredChunk
 from ledgerlens.retrieval.filters import to_pinecone_filter
 from ledgerlens.storage.pinecone_store import PineconeStore, VectorHit
 from ledgerlens.storage.postgres.db import get_session_factory
@@ -45,6 +48,14 @@ class SparseQueryEncoder(Protocol):
     the indexed chunks: load it from ``embedding.sparse_params_path``)."""
 
     def encode_query(self, text: str) -> SparseVector: ...
+
+
+class Reranker(Protocol):
+    """Re-sorts chunks by relevance (:class:`~ledgerlens.retrieval.rerank.CrossEncoderReranker`)."""
+
+    def rerank(
+        self, query: str, chunks: Sequence[ScoredChunk], top_n: int | None = None
+    ) -> list[ScoredChunk]: ...
 
 
 class ChunkTexts(Protocol):
@@ -151,3 +162,32 @@ class HybridRetriever(DenseRetriever):
         )
         chunks = with_full_text([to_scored(h, "hybrid") for h in hits], self.texts)
         return RetrievalResult.build(query, self.name, chunks)
+
+
+DEFAULT_RERANK_CANDIDATES = 20
+
+
+class RerankRetriever:
+    """R3: a retriever's top ``candidates`` (R2's, normally), reranked to the best ``k``."""
+
+    name = "r3_hybrid_rerank"
+
+    def __init__(
+        self,
+        base: Retriever,
+        reranker: Reranker,
+        *,
+        candidates: int = DEFAULT_RERANK_CANDIDATES,
+    ) -> None:
+        if candidates < 1:
+            raise ValueError("candidates must be at least 1")
+        self.base = base
+        self.reranker = reranker
+        self.candidates = candidates
+
+    def retrieve(
+        self, query: str, *, filters: QueryFilters | None = None, k: int = 5
+    ) -> RetrievalResult:
+        pool = self.base.retrieve(query, filters=filters, k=max(k, self.candidates))
+        ranked = self.reranker.rerank(query, pool.chunks, top_n=k)
+        return RetrievalResult.build(query, self.name, ranked)
