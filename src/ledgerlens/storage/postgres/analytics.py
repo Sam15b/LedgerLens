@@ -15,6 +15,7 @@ Amounts are per currency -- no report adds USD to EUR.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -112,3 +113,77 @@ def spend_by_vendor_month(
         )
         for row in run_query(session, "spend_by_vendor_month", start=start, end=end)
     ]
+
+
+# --------------------------------------------------------------------------- unpaid
+
+
+@dataclass(frozen=True)
+class UnpaidTotal:
+    vendor_id: str | None
+    vendor_name: str
+    currency: str
+    open_invoices: int
+    outstanding: Decimal
+    overdue_invoices: int
+    overdue: Decimal
+    """The part of ``outstanding`` that was past due."""
+    oldest_due_date: date
+
+
+def unpaid_totals(session: Session, as_of: date) -> list[UnpaidTotal]:
+    """What each vendor was still owed on ``as_of``, per currency, largest first."""
+    return [
+        UnpaidTotal(
+            vendor_id=row.vendor_id,
+            vendor_name=row.vendor_name,
+            currency=row.currency,
+            open_invoices=int(row.open_invoices),
+            outstanding=Decimal(row.outstanding),
+            overdue_invoices=int(row.overdue_invoices),
+            overdue=Decimal(row.overdue),
+            oldest_due_date=row.oldest_due_date,
+        )
+        for row in run_query(session, "unpaid_totals", as_of=as_of)
+    ]
+
+
+# --------------------------------------------------------------------------- days to pay
+
+
+@dataclass(frozen=True)
+class DaysToPay:
+    vendor_id: str | None
+    vendor_name: str
+    invoices_paid: int
+    avg_days_to_pay: Decimal
+    """From invoice date to the payment that settled it."""
+    avg_days_late: Decimal | None
+    """From due date to settlement (negative: early); ``None`` if no invoice had a due date."""
+    max_days_to_pay: int
+
+
+def days_to_pay(
+    session: Session, start: date | None = None, end: date | None = None
+) -> list[DaysToPay]:
+    """Average days to pay per vendor, over invoices settled from ``start`` to ``end``
+    inclusive (``None``: unbounded)."""
+    return [
+        DaysToPay(
+            vendor_id=row.vendor_id,
+            vendor_name=row.vendor_name,
+            invoices_paid=int(row.invoices_paid),
+            avg_days_to_pay=Decimal(row.avg_days_to_pay),
+            avg_days_late=None if row.avg_days_late is None else Decimal(row.avg_days_late),
+            max_days_to_pay=int(row.max_days_to_pay),
+        )
+        for row in run_query(session, "days_to_pay", start=start, end=end)
+    ]
+
+
+def average_days_to_pay(rows: Sequence[DaysToPay]) -> Decimal | None:
+    """Across vendors, weighted by invoices paid (``None`` when nothing was paid)."""
+    paid = sum(row.invoices_paid for row in rows)
+    if not paid:
+        return None
+    return sum((row.avg_days_to_pay * row.invoices_paid for row in rows), Decimal(0)) / paid
