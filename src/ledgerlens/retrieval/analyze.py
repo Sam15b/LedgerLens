@@ -8,9 +8,13 @@
 * **vendors** -- names matched against the vendor master: exact canonical name or alias
   ("ACME Supplies, Ltd." = "Acme Supplies Limited"), a distinctive first word ("Acme"),
   or a fuzzy match on a word n-gram (``rapidfuzz``, for typos);
+* **document types** -- "invoices", "POs", "remittance", "agreement", ...;
 * **date range** -- ``Q1`` / ``Q1 2026``, ``FY2026``, ``last month``, ``this quarter``,
   ``in March``, ``March 2026``, ``last 30 days``, ``since``/``before``/``after`` a date,
-  ``between`` two dates, or one explicit date -- resolved against ``today``.
+  ``between`` two dates, or one explicit date -- resolved against ``today``;
+* **intent** -- ``needs_graph`` when the answer lies in relationships between documents
+  (which payment settled an invoice, invoices without a PO, price vs contract rate), and
+  ``aggregation`` when it is a total, count, average or ranking.
 
 Everything above is rules: fast, free and predictable.
 """
@@ -20,7 +24,7 @@ from __future__ import annotations
 import calendar
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 from typing import Any, Literal
 
@@ -354,6 +358,69 @@ def parse_date_range(text: str, today: date, *, fiscal_start: int = 1) -> DateRa
     return None, None
 
 
+# --------------------------------------------------------------------------- types and intent
+
+_TYPE_WORDS: tuple[tuple[re.Pattern[str], DocType], ...] = (
+    (re.compile(r"\binvoic(?:e|es|ed|ing)\b|\bbills?\b", re.I), DocType.INVOICE),
+    (re.compile(r"\breceipts?\b", re.I), DocType.RECEIPT),
+    (re.compile(r"\bpurchase\s+orders?\b|\bPOs?\b(?![-#]?\d)", re.I), DocType.PURCHASE_ORDER),
+    (  # not "late payment (fees)" or "payment terms": those are contract clauses
+        re.compile(r"(?<!late[\s-])\bpayments?\b(?!\s+terms?)|\bremittances?\b", re.I),
+        DocType.PAYMENT,
+    ),
+    (re.compile(r"\bcontracts?\b|\bagreements?\b|\bMSA\b(?![-#]?\d)", re.I), DocType.CONTRACT),
+)
+
+_AGGREGATION = re.compile(
+    r"\b(?:how\s+many|sum|count|number\s+of|average|avg|mean|median|top\s+\d+|"
+    r"per\s+(?:vendor|supplier|month|quarter|year)|by\s+(?:vendor|supplier|month|quarter|year)|"
+    r"breakdown|spend|spent|aging|ageing|rank(?:ed|ing)?)\b",
+    re.I,
+)
+"""Always an aggregation."""
+_AGGREGATION_UNLESS_ONE = re.compile(
+    r"\b(?:how\s+much|totals?|totall?ed|most|least|largest|biggest|highest|lowest|smallest|"
+    r"outstanding|owed?)\b",
+    re.I,
+)
+"""An aggregation unless the question names one document ("the total on INV-889")."""
+_RELATIONSHIP = re.compile(
+    r"\b(?:linked|link|related|relat(?:e|es|ing)\s+to|connected|referenc(?:e|es|ed|ing)|"
+    r"settl(?:e|es|ed|ing)|paid\s+(?:by|with)|which\s+payment|what\s+payment|"
+    r"(?:without|no|missing|lacking)\s+(?:a\s+|any\s+|matching\s+)?(?:po|purchase\s+order|"
+    r"payment|contract)s?|against\s+(?:the\s+)?(?:po|purchase\s+order|contract)|"
+    r"governs?|governed|under\s+(?:the\s+)?(?:contract|agreement)|"
+    r"match(?:es|ed|ing)?\s+(?:the\s+)?(?:contract|po|purchase\s+order|rate)|"
+    r"rate\s+card|contract(?:ed)?\s+(?:rate|price)|three[\s-]way|3[\s-]way|"
+    r"consistent|consistency|reconcil\w*|duplicates?|same\s+(?:invoice|amount))\b",
+    re.I,
+)
+
+
+def find_doc_types(text: str) -> list[DocType]:
+    """Document types a question names, in order of first mention."""
+    found = sorted(
+        (match.start(), doc_type)
+        for pattern, doc_type in _TYPE_WORDS
+        for match in [pattern.search(text)]
+        if match is not None
+    )
+    return list(dict.fromkeys(doc_type for _, doc_type in found))
+
+
+def is_aggregation(text: str, doc_numbers: Sequence[str] = ()) -> bool:
+    """A total, count, average, ranking or breakdown over many documents."""
+    if _AGGREGATION.search(text):
+        return True
+    return len(doc_numbers) != 1 and _AGGREGATION_UNLESS_ONE.search(text) is not None
+
+
+def needs_relationships(text: str, doc_types: Sequence[DocType]) -> bool:
+    """The answer depends on links between documents: an explicit relationship word, or
+    a question that names two kinds of document ("invoices for PO-1042")."""
+    return _RELATIONSHIP.search(text) is not None or len(set(doc_types)) >= 2
+
+
 # --------------------------------------------------------------------------- the analyzer
 
 
@@ -395,15 +462,18 @@ class QueryAnalyzer:
         numbers = find_doc_numbers(question)
         doc_numbers = [number for number, _ in numbers]
         rest = _DOC_NUMBER.sub(" ", question)  # numbers must not read as dates or vendors
+        word_types = find_doc_types(rest)
         vendor_ids = self.finder.find(rest)
         start, end = parse_date_range(rest, self.today, fiscal_start=self.fiscal_start)
-        all_types = list(dict.fromkeys(t for _, t in numbers))
+        all_types = list(dict.fromkeys([*word_types, *(t for _, t in numbers)]))
         return QueryAnalysis(
             query=question,
             doc_numbers=tuple(doc_numbers),
-            doc_types=tuple(all_types),
+            doc_types=tuple(word_types or all_types),
             vendor_ids=tuple(vendor_ids),
             vendor_names=tuple(self.finder.names[v] for v in vendor_ids),
             date_from=start,
             date_to=end,
+            needs_graph=needs_relationships(rest, all_types),
+            aggregation=is_aggregation(rest, doc_numbers),
         )
