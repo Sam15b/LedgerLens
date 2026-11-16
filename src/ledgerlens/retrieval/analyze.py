@@ -16,7 +16,10 @@
   (which payment settled an invoice, invoices without a PO, price vs contract rate), and
   ``aggregation`` when it is a total, count, average or ranking.
 
-Everything above is rules: fast, free and predictable.
+Everything above is rules: fast, free and predictable. When the rules find nothing to go
+on and an :class:`~ledgerlens.llm.router.LLMClient` is given, the ``fast`` model is asked
+for the same fields as structured output (:class:`LLMQueryAnalysis`), and its answer is
+checked the same way (vendors matched against the master, dates parsed).
 """
 
 from __future__ import annotations
@@ -28,12 +31,14 @@ from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from rapidfuzz import fuzz
 from sqlalchemy.orm import Session, sessionmaker
 
 from ledgerlens.core.schemas import DocType
-from ledgerlens.extraction.normalize import canonical_vendor, find_dates
+from ledgerlens.extraction.normalize import canonical_vendor, find_dates, parse_date
+from ledgerlens.llm.router import LLMClient
+from ledgerlens.llm.types import Message
 from ledgerlens.retrieval import QueryFilters
 from ledgerlens.storage.neo4j.linker import VendorCandidate
 from ledgerlens.storage.postgres.db import get_session_factory
@@ -424,18 +429,55 @@ def needs_relationships(text: str, doc_types: Sequence[DocType]) -> bool:
 # --------------------------------------------------------------------------- the analyzer
 
 
+class LLMQueryAnalysis(BaseModel):
+    """What the ``fast`` model is asked to fill in when the rules found nothing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    doc_numbers: list[str] = Field(
+        default_factory=list, description="Document numbers mentioned, e.g. INV-889, PO-1042"
+    )
+    doc_types: list[Literal["invoice", "receipt", "purchase_order", "payment", "contract"]] = Field(
+        default_factory=list, description="Kinds of document the question is about"
+    )
+    vendor_names: list[str] = Field(
+        default_factory=list, description="Vendor or supplier names as written in the question"
+    )
+    date_from: str | None = Field(default=None, description="Start of the period, YYYY-MM-DD")
+    date_to: str | None = Field(default=None, description="End of the period, YYYY-MM-DD")
+    needs_graph: bool = Field(
+        default=False,
+        description="True if the answer depends on links between documents (invoice -> PO -> "
+        "contract, payment -> invoice)",
+    )
+    aggregation: bool = Field(
+        default=False, description="True for totals, counts, averages, rankings or breakdowns"
+    )
+
+
+_SYSTEM = """You analyse questions about a company's accounts-payable documents (invoices,
+receipts, purchase orders, payments/remittances, vendor contracts) for a search system.
+Extract only what the question states or clearly implies; leave a field empty otherwise.
+Resolve relative periods ("last quarter", "in March") against today's date: {today}.
+Known vendors: {vendors}."""
+
+
 class QueryAnalyzer:
-    """Rules over the question text; nothing is sent anywhere."""
+    """Rules first; the ``fast`` LLM only when the rules find nothing to go on."""
 
     def __init__(
         self,
         vendors: Iterable[VendorCandidate] = (),
         *,
+        llm: LLMClient | None = None,
+        model: str = "fast",
         today: date | None = None,
         fiscal_start: int = 1,
         vendor_threshold: float = 88.0,
     ) -> None:
         self.finder = VendorFinder(vendors, threshold=vendor_threshold)
+        self.llm = llm
+        self.model = model
         self._today = today
         self.fiscal_start = fiscal_start
 
@@ -456,7 +498,14 @@ class QueryAnalyzer:
         return self._today or date.today()
 
     def analyze(self, question: str) -> QueryAnalysis:
-        return self.rules(question)
+        result = self.rules(question)
+        if result.found_anything or self.llm is None:
+            return result
+        try:
+            return self.ask_llm(question)
+        except Exception:  # an LLM outage must not break search: fall back to "anything"
+            logger.warning("LLM query analysis failed; using the rules result", exc_info=True)
+            return result
 
     def rules(self, question: str) -> QueryAnalysis:
         numbers = find_doc_numbers(question)
@@ -476,4 +525,33 @@ class QueryAnalyzer:
             date_to=end,
             needs_graph=needs_relationships(rest, all_types),
             aggregation=is_aggregation(rest, doc_numbers),
+        )
+
+    def ask_llm(self, question: str) -> QueryAnalysis:
+        assert self.llm is not None
+        names = ", ".join(sorted(self.finder.names.values())) or "(none)"
+        messages = [
+            Message.system(_SYSTEM.format(today=self.today.isoformat(), vendors=names)),
+            Message.user(question),
+        ]
+        answer = self.llm.structured(messages, LLMQueryAnalysis, model=self.model)
+        vendor_ids = list(
+            dict.fromkeys(v for name in answer.vendor_names for v in self.finder.find(name))
+        )
+        numbers = [n for raw in answer.doc_numbers for n, _ in find_doc_numbers(raw)]
+        start = parse_date(answer.date_from) if answer.date_from else None
+        end = parse_date(answer.date_to) if answer.date_to else None
+        if start and end and start > end:
+            start, end = end, start
+        return QueryAnalysis(
+            query=question,
+            doc_numbers=tuple(dict.fromkeys(numbers)),
+            doc_types=tuple(DocType(t) for t in dict.fromkeys(answer.doc_types)),
+            vendor_ids=tuple(vendor_ids),
+            vendor_names=tuple(self.finder.names[v] for v in vendor_ids),
+            date_from=start,
+            date_to=end,
+            needs_graph=answer.needs_graph,
+            aggregation=answer.aggregation,
+            method="llm",
         )
