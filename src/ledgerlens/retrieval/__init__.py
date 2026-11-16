@@ -12,11 +12,15 @@ GraphRAG + Text2Cypher -- implements :class:`Retriever`, so the benchmark
   type, vendor, document number, date range); retrievers turn them into store filters.
 * :class:`ScoredChunk` -- a retrieved chunk with its full text and why it matched.
 * :class:`GraphFact` -- a fact read from the knowledge graph (R4/R5), rendered as text.
-* :class:`RetrievalResult` -- chunks, graph facts, citations and per-stage timings.
+* :class:`RetrievalResult` -- chunks, graph facts, citations and per-stage timings
+  (recorded with :class:`StageTimer`).
 """
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
@@ -134,6 +138,35 @@ class RetrievalResult(BaseModel):
         return list(dict.fromkeys(chunk.document_id for chunk in self.chunks))
 
 
+class StageTimer:
+    """Wall time per retrieval stage, in milliseconds, plus ``total`` since creation::
+
+        timer = StageTimer()
+        with timer.stage("search"):
+            hits = ...
+        result = RetrievalResult.build(..., timings_ms=timer.done())
+
+    A stage entered twice adds up.
+    """
+
+    def __init__(self) -> None:
+        self.started = time.perf_counter()
+        self.timings_ms: dict[str, float] = {}
+
+    @contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - start) * 1000
+            self.timings_ms[name] = self.timings_ms.get(name, 0.0) + elapsed
+
+    def done(self) -> dict[str, float]:
+        """The stage timings with ``total`` added."""
+        return self.timings_ms | {"total": (time.perf_counter() - self.started) * 1000}
+
+
 @runtime_checkable
 class Retriever(Protocol):
     """Every retriever variant: one question in, the best ``k`` chunks (and facts) out."""
@@ -151,4 +184,5 @@ __all__ = [
     "RetrievalResult",
     "Retriever",
     "ScoredChunk",
+    "StageTimer",
 ]
