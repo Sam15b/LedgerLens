@@ -509,6 +509,11 @@ class PineconeStore:
         )
         return [vector_id for page in pages for vector_id in _page_ids(page)]
 
+    def all_ids(self, *, namespace: str | None = None) -> list[str]:
+        """Every vector id in a namespace (default: the store's)."""
+        pages = self.index.list(prefix="", namespace=self._namespace(namespace))
+        return [vector_id for page in pages for vector_id in _page_ids(page)]
+
     def delete_document(self, document_id: str, *, namespace: str | None = None) -> int:
         """Delete every vector of a document. Returns how many there were (0 is fine:
         deleting an unknown document is a no-op, so re-ingest can always call this)."""
