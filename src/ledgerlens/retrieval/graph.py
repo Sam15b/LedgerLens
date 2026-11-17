@@ -120,11 +120,12 @@ class _Cites:
         if number and document_id:
             self.tags.setdefault(f"doc:{number}", document_id)
 
-    def fact(self, text: str, source: str, data: Row) -> GraphFact:
+    def fact(self, text: str, source: str, data: Row, subject: str) -> GraphFact:
         return GraphFact(
             text=text,
             document_ids=tuple(dict.fromkeys(self.tags.values())),
             source=source,
+            subject=subject,
             citations=self.tags,
             data=data,
         )
@@ -182,7 +183,7 @@ def render_invoice(row: Row, source: str = INVOICE_NEIGHBORHOOD.name) -> GraphFa
     for payment in row.get("payments") or []:
         cites.add(payment.get("payment_reference"), payment.get("document_id"))
     parts.append(_paid_part(row))
-    return cites.fact(ARROW.join(parts), source, row)
+    return cites.fact(ARROW.join(parts), source, row, f"invoice:{row.get('invoice_id')}")
 
 
 def render_ledger(row: Row) -> GraphFact:
@@ -205,7 +206,8 @@ def render_ledger(row: Row) -> GraphFact:
     if contracts:
         numbers = (str(c.get("contract_number") or c.get("id")) for c in contracts)
         text += "; contract " + ", ".join(numbers)
-    return cites.fact(text, VENDOR_LEDGER.name, row)
+    subject = f"vendor:{row.get('vendor_id')}:{currency}"
+    return cites.fact(text, VENDOR_LEDGER.name, row, subject)
 
 
 Rates = dict[str, tuple[str, float, str]]
@@ -286,7 +288,7 @@ def render_contract(row: Row) -> GraphFact:
         text += f". Invoice {number} ({money(invoice.get('total'), currency)})"
         if invoice.get("lines"):
             text += f" lines: {_lines(invoice['lines'], rates)}"
-    return cites.fact(text, CONTRACT_FOR_PO.name, row)
+    return cites.fact(text, CONTRACT_FOR_PO.name, row, f"po:{row.get('po_id') or po_number}")
 
 
 def _render_unpaid(row: Row) -> GraphFact:

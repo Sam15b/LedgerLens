@@ -94,6 +94,9 @@ class GraphFact(BaseModel):
     """Documents the fact is about, for citations."""
     source: str = "graph"
     """Which query produced it (a template name, or ``text2cypher``)."""
+    subject: str | None = None
+    """The record the fact is about (``invoice:<id>``, ``po:<id>``, ...): two facts with the
+    same subject say the same thing, whichever query found them."""
     citations: dict[str, str] = Field(default_factory=dict)
     """Citation tag (``doc:INV-889``) -> document id, for the documents the fact names that
     have one (records loaded without a document have nothing to cite)."""
