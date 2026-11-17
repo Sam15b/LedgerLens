@@ -19,7 +19,15 @@ from functools import lru_cache
 from importlib.resources import files
 from typing import Any, Protocol
 
-from neo4j import READ_ACCESS, WRITE_ACCESS, Driver, GraphDatabase, ManagedTransaction, Session
+from neo4j import (
+    READ_ACCESS,
+    WRITE_ACCESS,
+    Driver,
+    GraphDatabase,
+    ManagedTransaction,
+    Session,
+    unit_of_work,
+)
 
 from ledgerlens.core.config import get_settings
 
@@ -86,10 +94,13 @@ def run_read(
     params: Mapping[str, Any] | None = None,
     *,
     database: str | None = None,
+    timeout_s: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Run ``query`` in a read transaction (retried on transient errors)."""
+    """Run ``query`` in a read transaction (retried on transient errors). The server
+    aborts it after ``timeout_s`` seconds, if given."""
     with read_session(driver, database=database) as session:
-        return session.execute_read(_records, query, params or {})
+        work = _records if timeout_s is None else unit_of_work(timeout=timeout_s)(_records)
+        return session.execute_read(work, query, params or {})
 
 
 def query_type(
@@ -112,12 +123,13 @@ def run_read_only(
     params: Mapping[str, Any] | None = None,
     *,
     database: str | None = None,
+    timeout_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Run untrusted Cypher only if it cannot write; raises :class:`WriteQueryError`."""
     kind = query_type(driver, query, params, database=database)
     if kind != "r":
         raise WriteQueryError(f"refusing a {kind!r} query: only read-only Cypher may run here")
-    return run_read(driver, query, params, database=database)
+    return run_read(driver, query, params, database=database, timeout_s=timeout_s)
 
 
 def split_cypher(script: str) -> list[str]:
