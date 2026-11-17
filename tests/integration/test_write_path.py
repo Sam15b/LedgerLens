@@ -148,6 +148,36 @@ def driver() -> Driver:
     return driver
 
 
+FIXTURE_VENDOR = "Acme Supplies Ltd"
+
+_RESTORE_VENDOR = """
+MERGE (v:Vendor {id: $id})
+SET v = $props
+WITH v
+CALL (v) { MATCH (i:Invoice {vendor_id: v.id}) MERGE (v)-[:ISSUED]->(i) }
+CALL (v) { MATCH (c:Contract {vendor_id: v.id}) MERGE (v)-[:PARTY_TO]->(c) }
+"""
+
+
+@pytest.fixture(scope="module", autouse=True)
+def shared_vendors(driver: Driver) -> Iterator[None]:
+    """Put back any vendor named like the fixtures' that was in the shared graph before.
+
+    The fixture documents come from "Acme Supplies Ltd", which can already be a vendor
+    in the development graph (the synthetic ledger's V001). The rebuild tests delete that
+    vendor along with everything this module created, so restore every one that existed
+    before the module, with its properties and its ISSUED / PARTY_TO edges.
+    """
+    before = run_read(
+        driver,
+        "MATCH (v:Vendor {name: $name}) RETURN v.id AS id, properties(v) AS props",
+        {"name": FIXTURE_VENDOR},
+    )
+    yield
+    for vendor in before:
+        run_write(driver, _RESTORE_VENDOR, vendor)
+
+
 @pytest.fixture
 def stores(sessions: Sessions, pinecone: PineconeStore, driver: Driver) -> Iterator[dict[str, Any]]:
     yield {"sessions": sessions, "pinecone": pinecone, "driver": driver}
