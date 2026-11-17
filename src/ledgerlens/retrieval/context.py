@@ -25,9 +25,12 @@ import functools
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Literal
 
+from ledgerlens.core.prompts import load_prompt
 from ledgerlens.ingestion.chunking import approx_token_count
+from ledgerlens.llm.types import Message
 from ledgerlens.retrieval import GraphFact, RetrievalResult, ScoredChunk
 
 UNCITABLE = "graph"
@@ -295,6 +298,22 @@ def assemble(
             "facts": len(all_facts) - len(taken_facts),
         },
     )
+
+
+ANSWER_PROMPT = "answer_grounded"
+
+
+def answer_messages(
+    question: str, context: AssembledContext, *, today: date | None = None
+) -> list[Message]:
+    """The ``answer_grounded`` prompt for ``question`` over ``context``, as one user
+    message (send it with the ``smart`` alias; :meth:`AssembledContext.resolve` checks the
+    reply's citations)."""
+    prompt = load_prompt(ANSWER_PROMPT)
+    text = prompt.render(
+        today=(today or date.today()).isoformat(), question=question, context=context.text
+    )
+    return [Message.user(text)]
 
 
 def assemble_context(
