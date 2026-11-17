@@ -140,7 +140,7 @@ untyped_calls_exclude = ["pymupdf"]
 # ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["pytesseract.*", "tokenizers.*"]  # untyped, or not installed by every extra
+module = ["pytesseract.*", "tokenizers.*", "tiktoken.*"]  # untyped, or not installed by every extra
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
