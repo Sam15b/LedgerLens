@@ -4,15 +4,21 @@ from collections.abc import Mapping
 from datetime import date
 from typing import Any
 
+import pytest
+
 from ledgerlens.retrieval import RetrievalResult, ScoredChunk
+from ledgerlens.retrieval.analyze import QueryAnalyzer
 from ledgerlens.retrieval.graph import (
     GraphExpander,
+    GraphQuery,
     native,
+    plan_query,
     render_contract,
     render_invoice,
     render_ledger,
 )
-from ledgerlens.storage.neo4j.queries import CypherTemplate
+from ledgerlens.storage.neo4j.linker import VendorCandidate
+from ledgerlens.storage.neo4j.queries import INVOICE_NEIGHBORHOOD, CypherTemplate
 
 
 def invoice_row(**overrides: Any) -> dict[str, Any]:
@@ -206,3 +212,79 @@ def test_expand_dedupes_seeds_and_skips_the_query_without_any() -> None:
     assert runner.calls == [
         ("invoice_neighborhood", {"seeds": ["INV-889", "doc-a"], "per_seed": 3, "limit": 9})
     ]
+
+
+# --------------------------------------------------------------------------- template choice
+
+TODAY = date(2026, 11, 17)
+ACME = VendorCandidate("V001", "Acme Supplies Ltd")
+ANALYZER = QueryAnalyzer([ACME, VendorCandidate("V002", "Brightline Packaging Ltd")], today=TODAY)
+
+
+def plan(question: str, seeds: tuple[str, ...] = ("doc-a",)) -> GraphQuery | None:
+    return plan_query(ANALYZER.analyze(question), seeds, today=TODAY, per_seed=4, limit=20)
+
+
+@pytest.mark.parametrize(
+    ("question", "template"),
+    [
+        ("Which payment settled INV-889?", "invoice_neighborhood"),
+        ("Is INV-889 overdue?", "invoice_neighborhood"),
+        ("What PO does INV-889 reference?", "invoice_neighborhood"),
+        ("Acme invoices whose PO has no payment?", "unpaid_with_po"),
+        ("Which Brightline invoices are still unpaid?", "unpaid_with_po"),
+        ("Total unpaid by vendor for Q1?", "vendor_ledger"),
+        ("How much have we spent with Acme this year?", "vendor_ledger"),
+        ("Does INV-889's unit price match the contract rate?", "contract_for_po"),
+        ("Which contract governs PO-1042?", "contract_for_po"),
+        ("What are the payment terms under the Acme agreement?", "contract_for_po"),
+    ],
+)
+def test_template_follows_the_question(question: str, template: str) -> None:
+    query = plan(question)
+    assert query is not None
+    assert query.template.name == template
+
+
+def test_question_numbers_lead_the_seeds() -> None:
+    query = plan("Which payment settled INV-889?", seeds=("doc-a", "doc-b", "doc-a"))
+
+    assert query == GraphQuery(
+        INVOICE_NEIGHBORHOOD, {"seeds": ["INV-889", "doc-a", "doc-b"], "per_seed": 4, "limit": 20}
+    )
+
+
+def test_vendor_and_dates_scope_the_vendor_wide_templates() -> None:
+    unpaid = plan("Acme invoices from March 2026 with no payment")
+    ledger = plan("Total spend per vendor in Q1 2026")
+
+    assert unpaid is not None and unpaid.params == {
+        "vendor_ids": ["V001"],
+        "date_from": "2026-03-01",
+        "date_to": "2026-03-31",
+        "limit": 20,
+    }
+    assert ledger is not None and ledger.params == {
+        "vendor_ids": [],
+        "date_from": "2026-01-01",
+        "date_to": "2026-03-31",
+        "as_of": "2026-11-17",
+        "limit": 20,
+    }
+
+
+def test_nothing_to_start_from_means_no_query() -> None:
+    assert plan("Tell me about the documents", seeds=()) is None
+    assert plan_query(None, [], today=TODAY) is None
+    assert plan_query(None, ["doc-a"], today=TODAY) is not None
+
+
+def test_facts_runs_the_planned_template() -> None:
+    runner = StubRunner([invoice_row()])
+    expander = GraphExpander(runner=runner, today=TODAY)
+
+    facts = expander.facts(ANALYZER.analyze("Acme invoices with no payment"))
+
+    assert [fact.source for fact in facts] == ["unpaid_with_po"]
+    assert runner.calls[0][0] == "unpaid_with_po"
+    assert GraphExpander(runner=runner).facts(None, []) == []

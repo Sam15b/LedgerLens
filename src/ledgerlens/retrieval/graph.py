@@ -17,11 +17,21 @@ read and cite::
 
 with ``citations`` mapping ``doc:INV-889``, ``doc:PO-1042``, ... to the document ids of the
 records that came from a document.
+
+:meth:`GraphExpander.facts` picks the template from the
+:class:`~ledgerlens.retrieval.analyze.QueryAnalysis` (:func:`plan_query`):
+
+* a total / count / ranking with no document number -> ``vendor_ledger``;
+* unpaid / outstanding / "no payment" with no document number -> ``unpaid_with_po``;
+* a contract rate, rate card, unit price or terms question with seeds -> ``contract_for_po``;
+* anything else with seeds -> ``invoice_neighborhood``.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any, Protocol
@@ -29,6 +39,7 @@ from typing import Any, Protocol
 from neo4j import Driver
 
 from ledgerlens.retrieval import GraphFact
+from ledgerlens.retrieval.analyze import QueryAnalysis
 from ledgerlens.storage.neo4j.driver import run_read
 from ledgerlens.storage.neo4j.queries import (
     CONTRACT_FOR_PO,
@@ -296,6 +307,68 @@ def render(template: CypherTemplate, rows: Sequence[Row]) -> list[GraphFact]:
     return [renderer(row) for row in rows]
 
 
+# --------------------------------------------------------------------------- template choice
+
+_UNPAID = re.compile(
+    r"\b(?:unpaid|unsettled|not\s+(?:yet\s+|been\s+)?(?:fully\s+)?paid|"
+    r"(?:no|without|missing|lacking)\s+(?:a\s+|any\s+)?payments?|outstanding|overdue|"
+    r"open\s+invoices?|still\s+(?:open|due)|owed?)\b",
+    re.IGNORECASE,
+)
+_CONTRACT_TERMS = re.compile(
+    r"\b(?:contract(?:ed)?\s+(?:rates?|prices?|terms?)|rate\s+cards?|agreed\s+(?:rates?|prices?)|"
+    r"unit\s+prices?|match(?:es|ed|ing)?\s+(?:the\s+)?(?:contract|agreement|rate)|"
+    r"(?:which|what)\s+(?:contract|agreement)|govern(?:s|ed|ing)?|payment\s+terms|"
+    r"under\s+(?:the\s+|which\s+)?(?:contract|agreement))\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class GraphQuery:
+    """A template and the parameters to run it with."""
+
+    template: CypherTemplate
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+def _iso(day: date | None) -> str | None:
+    return day.isoformat() if day else None
+
+
+def plan_query(
+    analysis: QueryAnalysis | None,
+    seeds: Sequence[str | None] = (),
+    *,
+    today: date,
+    per_seed: int = DEFAULT_PER_SEED,
+    limit: int = DEFAULT_LIMIT,
+) -> GraphQuery | None:
+    """The template that fits the question, or ``None`` when there is nothing to start from.
+
+    ``seeds`` are document ids from vector search; the question's own document numbers come
+    first. A question about named documents is always answered around those documents,
+    never by a vendor-wide template.
+    """
+    numbers = list(analysis.doc_numbers) if analysis else []
+    start = unique([*numbers, *seeds])
+    if analysis is not None and not numbers:
+        scope = {
+            "vendor_ids": list(analysis.vendor_ids),
+            "date_from": _iso(analysis.date_from),
+            "date_to": _iso(analysis.date_to),
+        }
+        if analysis.aggregation:
+            return GraphQuery(VENDOR_LEDGER, scope | {"as_of": today.isoformat(), "limit": limit})
+        if _UNPAID.search(analysis.query):
+            return GraphQuery(UNPAID_WITH_PO, scope | {"limit": limit})
+    if not start:
+        return None
+    if analysis is not None and _CONTRACT_TERMS.search(analysis.query):
+        return GraphQuery(CONTRACT_FOR_PO, {"seeds": start, "limit": min(limit, 10)})
+    return GraphQuery(INVOICE_NEIGHBORHOOD, {"seeds": start, "per_seed": per_seed, "limit": limit})
+
+
 # --------------------------------------------------------------------------- expansion
 
 
@@ -315,6 +388,7 @@ class GraphExpander:
         database: str | None = None,
         per_seed: int = DEFAULT_PER_SEED,
         limit: int = DEFAULT_LIMIT,
+        today: date | None = None,
     ) -> None:
         if runner is None:
             if driver is None:
@@ -323,6 +397,12 @@ class GraphExpander:
         self.runner = runner
         self.per_seed = per_seed
         self.limit = limit
+        self._today = today
+
+    @property
+    def today(self) -> date:
+        """The day "overdue" is measured against (today unless pinned)."""
+        return self._today or date.today()
 
     def rows(self, template: CypherTemplate, **params: Any) -> list[Row]:
         """Run one template (unknown or missing parameters are an error)."""
@@ -341,3 +421,20 @@ class GraphExpander:
     def expand_facts(self, seeds: Sequence[str | None]) -> list[GraphFact]:
         """:meth:`expand`, rendered as facts."""
         return render(INVOICE_NEIGHBORHOOD, self.expand(seeds))
+
+    def plan(
+        self, analysis: QueryAnalysis | None, seeds: Sequence[str | None] = ()
+    ) -> GraphQuery | None:
+        """:func:`plan_query` with this expander's limits and date."""
+        return plan_query(
+            analysis, seeds, today=self.today, per_seed=self.per_seed, limit=self.limit
+        )
+
+    def facts(
+        self, analysis: QueryAnalysis | None, seeds: Sequence[str | None] = ()
+    ) -> list[GraphFact]:
+        """The facts for a question: the template :meth:`plan` picks, run and rendered."""
+        query = self.plan(analysis, seeds)
+        if query is None:
+            return []
+        return render(query.template, self.rows(query.template, **query.params))
