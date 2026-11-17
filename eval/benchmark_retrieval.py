@@ -26,9 +26,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 
 from eval.golden_set.schema import DEFAULT_PATH as DEFAULT_GOLDEN
@@ -238,6 +240,152 @@ def build_retrievers(
     return {variant: built[variant] for variant in variants}
 
 
+# --------------------------------------------------------------------------- report
+
+CATEGORY_ORDER = ("lookup", "clause", "multi_hop", "aggregation", "reconciliation", "unanswerable")
+
+
+@dataclass(frozen=True)
+class Summary:
+    """One variant over a set of questions."""
+
+    questions: int
+    answerable: int
+    recall: float
+    mrr: float
+    evidence_recall: float
+    p50_ms: float
+    p95_ms: float
+    degraded: int
+    errors: int
+
+
+def summarize(results: Iterable[QuestionResult]) -> Summary:
+    items = list(results)
+    scored = [r for r in items if r.recall is not None]
+    latencies = [r.latency_ms for r in items]
+    return Summary(
+        questions=len(items),
+        answerable=len(scored),
+        recall=mean(r.recall or 0.0 for r in scored),
+        mrr=mean(r.reciprocal_rank or 0.0 for r in scored),
+        evidence_recall=mean(r.evidence_recall or 0.0 for r in scored),
+        p50_ms=percentile(latencies, 50),
+        p95_ms=percentile(latencies, 95),
+        degraded=sum(bool(r.degraded) for r in items),
+        errors=sum(r.error is not None for r in items),
+    )
+
+
+def _table(header: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    lines += ["| " + " | ".join(row) + " |" for row in rows]
+    return lines
+
+
+def _matrix(
+    results: Sequence[QuestionResult],
+    variants: Sequence[str],
+    groups: Sequence[tuple[str, Callable[[QuestionResult], bool]]],
+    metric: Callable[[Summary], float],
+) -> list[str]:
+    """Rows: groups of questions; columns: variants; cells: ``metric``, best in bold."""
+    rows = []
+    for label, member in groups:
+        summaries = {
+            v: summarize(r for r in results if r.variant == v and member(r)) for v in variants
+        }
+        n = next(iter(summaries.values())).answerable if summaries else 0
+        if n == 0:
+            continue
+        values = {v: metric(s) for v, s in summaries.items()}
+        best = max(values.values())
+        cells = [
+            f"**{value:.3f}**" if value == best else f"{value:.3f}" for value in values.values()
+        ]
+        rows.append([label, str(n), *cells])
+    return _table(["questions", "n", *variants], rows)
+
+
+def render_report(
+    results: Sequence[QuestionResult],
+    variants: Sequence[str],
+    *,
+    k: int,
+    setup: Mapping[str, str],
+) -> str:
+    """The comparison as markdown: overall, then recall@k, MRR and evidence recall per
+    category and for questions that do / do not need the graph."""
+    lines = [f"# Retrieval benchmark ({len({r.question_id for r in results})} questions)", ""]
+    lines += [f"- **{key}:** {value}" for key, value in setup.items()]
+    lines += ["", "## Overall", ""]
+    rows = []
+    for variant in variants:
+        s = summarize(r for r in results if r.variant == variant)
+        rows.append(
+            [
+                variant,
+                VARIANTS[variant],
+                f"{s.recall:.3f}",
+                f"{s.mrr:.3f}",
+                f"{s.evidence_recall:.3f}",
+                f"{s.p50_ms:,.0f}",
+                f"{s.p95_ms:,.0f}",
+                str(s.degraded),
+                str(s.errors),
+            ]
+        )
+    lines += _table(
+        [
+            "variant",
+            "retriever",
+            f"recall@{k}",
+            "MRR",
+            "evidence recall",
+            "p50 ms",
+            "p95 ms",
+            "degraded",
+            "errors",
+        ],
+        rows,
+    )
+    present = [c for c in CATEGORY_ORDER if any(r.category == c for r in results)]
+
+    def in_category(category: str) -> Callable[[QuestionResult], bool]:
+        return lambda r: r.category == category
+
+    groups: list[tuple[str, Callable[[QuestionResult], bool]]] = [
+        (category, in_category(category)) for category in present
+    ]
+    groups += [
+        ("needs graph", lambda r: r.requires_graph),
+        ("no graph", lambda r: not r.requires_graph),
+        ("all", lambda r: True),
+    ]
+    for title, metric in (
+        (f"recall@{k} by category", lambda s: s.recall),
+        ("MRR by category", lambda s: s.mrr),
+        ("Evidence recall by category (chunks + graph facts)", lambda s: s.evidence_recall),
+    ):
+        lines += ["", f"## {title}", ""]
+        lines += _matrix(results, variants, groups, metric)
+    unanswerable = sum(1 for r in results if r.recall is None and r.variant == variants[0])
+    lines += [
+        "",
+        "## Notes",
+        "",
+        f"- recall@{k} and MRR rank documents as the retriever returns them: chunk documents "
+        "first, then the documents graph facts cite. Evidence recall counts every document "
+        "in the result.",
+        f"- {unanswerable} unanswerable question(s) have no relevant documents: they count "
+        "towards latency but not towards recall or MRR.",
+        "- *degraded*: questions where a stage failed and the retriever fell back "
+        "(Neo4j for R4, Text2Cypher for R5). *errors*: the retriever raised.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def warm_up(retrievers: Mapping[str, Retriever]) -> None:
     """One untimed query per variant, so model loading (embedder, cross-encoder) does not
     land in the first question's latency."""
@@ -288,6 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--namespace", default=None, help="Pinecone namespace (default: env)")
     parser.add_argument("--out", type=Path, default=None, help="per-question results (JSONL)")
+    parser.add_argument("--report", type=Path, default=None, help="markdown comparison report")
     return parser
 
 
@@ -310,14 +459,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     results = run_benchmark(questions, retrievers, k=args.k, filters=filters, on_result=progress)
     if args.out:
         write_results(results, args.out)
-    for variant in args.variants:
-        mine = [r for r in results if r.variant == variant]
-        scored = [r for r in mine if r.recall is not None]
-        print(
-            f"{variant}: recall@{args.k} {mean(r.recall or 0.0 for r in scored):.3f}  "
-            f"MRR {mean(r.reciprocal_rank or 0.0 for r in scored):.3f}  "
-            f"p95 {percentile((r.latency_ms for r in mine), 95):.0f} ms"
-        )
+    setup = {
+        "date": date.today().isoformat(),
+        "golden set": f"`{args.golden}` ({len(questions)} questions)",
+        "k": str(args.k),
+        "filters": "query analyzer (same for every variant)"
+        if args.filters == "analyzer"
+        else "none",
+        "command": "`python -m eval.benchmark_retrieval " + " ".join(argv or sys.argv[1:]) + "`",
+    }
+    report = render_report(results, args.variants, k=args.k, setup=setup)
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(report, encoding="utf-8")
+        print(f"wrote {args.report}")
+    else:
+        print(report)
     return 0
 
 
