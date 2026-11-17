@@ -94,6 +94,9 @@ class GraphFact(BaseModel):
     """Documents the fact is about, for citations."""
     source: str = "graph"
     """Which query produced it (a template name, or ``text2cypher``)."""
+    citations: dict[str, str] = Field(default_factory=dict)
+    """Citation tag (``doc:INV-889``) -> document id, for the documents the fact names that
+    have one (records loaded without a document have nothing to cite)."""
     data: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -121,8 +124,12 @@ class RetrievalResult(BaseModel):
         facts = graph_facts or []
         citations = {chunk.citation: chunk.document_id for chunk in chunks}
         for fact in facts:
+            for tag, document_id in fact.citations.items():
+                citations.setdefault(tag, document_id)
+            cited = set(fact.citations.values())
             for document_id in fact.document_ids:
-                citations.setdefault(f"doc:{document_id[:8]}", document_id)
+                if document_id not in cited:
+                    citations.setdefault(f"doc:{document_id[:8]}", document_id)
         return cls(
             query=query,
             retriever=retriever,
