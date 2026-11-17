@@ -7,7 +7,9 @@
     (Invoice|PurchaseOrder)-[:HAS_LINE]->(LineItem)
 
 Node ids are the record ids used in Postgres, and nodes from a document carry its
-``document_id``, so graph results map back to rows and Pinecone chunks.
+``document_id``, so graph results map back to rows and Pinecone chunks. A ``Contract``
+keeps its rate card as three parallel lists, ``rate_items`` / ``rate_units`` /
+``rate_prices`` (Neo4j properties cannot hold maps; a missing unit is ``""``).
 
 A reference that finds no target -- an invoice's PO number with no PO, a remittance line
 naming an unknown invoice, a PO citing a contract that is not in the graph -- is recorded
@@ -677,6 +679,11 @@ class GraphLinker:
             "customer_name": record.customer_name,
             "payment_terms_days": record.payment_terms_days,
             "currency": record.currency,
+            # The rate card as parallel lists (Neo4j properties cannot hold maps), so
+            # graph retrieval can put an invoice's prices next to the agreed ones.
+            "rate_items": [entry.item for entry in record.rate_card],
+            "rate_units": [entry.unit or "" for entry in record.rate_card],
+            "rate_prices": [_money(entry.unit_price) for entry in record.rate_card],
         }
         params = base | {
             "props": props,

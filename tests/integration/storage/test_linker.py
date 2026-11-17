@@ -20,6 +20,7 @@ from ledgerlens.core.schemas import (
     Payment,
     PaymentAllocation,
     PurchaseOrder,
+    RateCardEntry,
     Receipt,
 )
 from ledgerlens.storage.neo4j.driver import apply_schema, get_driver, run_read, run_write
@@ -236,6 +237,35 @@ def test_given_vendor_ids_skip_resolution(driver: Driver, linker: GraphLinker, t
     assert result.vendor.method == "given"
     names = run_read(driver, "MATCH (v:Vendor {id: $id}) RETURN v.name AS n", {"id": f"V-{tag}"})
     assert names == [{"n": vendor_name(tag)}]
+
+
+def test_contract_rate_card_is_stored_as_parallel_lists(
+    driver: Driver, linker: GraphLinker, tag: str
+) -> None:
+    record = contract(tag).model_copy(
+        update={
+            "rate_card": [
+                RateCardEntry(item="Pallet wrap 500m", unit="roll", unit_price=D("44.67")),
+                RateCardEntry(item="Consulting", unit_price=D(120)),
+            ]
+        }
+    )
+
+    linker.link(record, id=f"c-{tag}")
+
+    rows = run_read(
+        driver,
+        "MATCH (c:Contract {id: $id}) RETURN c.rate_items AS items, c.rate_units AS units, "
+        "c.rate_prices AS prices",
+        {"id": f"c-{tag}"},
+    )
+    assert rows == [
+        {
+            "items": ["Pallet wrap 500m", "Consulting"],
+            "units": ["roll", ""],
+            "prices": [44.67, 120.0],
+        }
+    ]
 
 
 def test_receipts_become_invoice_nodes(driver: Driver, linker: GraphLinker, tag: str) -> None:
