@@ -59,12 +59,14 @@ Save adapter checkpoints to Google Drive / Kaggle output to survive session time
 
 | Model | F1 | JSON valid % | $/1k docs | p95 latency |
 |-------|----|--------------|-----------|-------------|
-| Rules baseline | | | 0 | |
+| Rules baseline | 0.601 | n/a | 0 | ~0 ms |
 | GPT-4o | | | | |
 | Llama 3 8B (base) | | | 0 | |
 | **Llama 3 8B + LoRA** | | | 0 | |
 
-*(Fill from `ml/finetune/runs/`.)*
+*(Filled from `python -m ml.finetune.eval_extraction --report ...`; latest:
+[eval/reports/2026-11-18/finetune.md](../../eval/reports/2026-11-18/finetune.md). The
+other rows need an API key, a GPU and the run-1 adapter.)*
 
 ## Serving
 1. Merge adapter into base weights (`merge_and_export.py`).
