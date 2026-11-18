@@ -375,9 +375,97 @@ def mix_synthetic(
     if wanted > len(pool):
         logger.warning("wanted %d synthetic examples, have %d; using all", wanted, len(pool))
     picked = random.Random(seed).sample(pool, min(wanted, len(pool)))
-    # all training data for now: synthetic has no official test split
-    mixed = [replace(example, split="train") for example in picked]
-    return [*real, *sorted(mixed, key=lambda example: example.doc_id)]
+    return [*real, *sorted(picked, key=lambda example: example.doc_id)]
+
+
+# --------------------------------------------------------------------------- splits
+
+SPLIT_ORDER = ("train", "val", "test")
+DEFAULT_FRACTIONS = {"train": 0.8, "val": 0.1, "test": 0.1}
+SROIE_VAL_SHARE = 0.1
+
+
+def stable_fraction(key: str, seed: int = DEFAULT_SEED) -> float:
+    """A number in [0, 1) fixed by ``key`` and ``seed`` (the same on every machine)."""
+    import hashlib
+
+    digest = hashlib.blake2b(f"{seed}:{key}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2**64
+
+
+def split_for(key: str, fractions: Mapping[str, float], seed: int = DEFAULT_SEED) -> str:
+    """The split a group lands in, by its stable fraction against cumulative ``fractions``."""
+    point, edge = stable_fraction(key, seed), 0.0
+    for split, share in fractions.items():
+        edge += share
+        if point < edge:
+            return split
+    return list(fractions)[-1]
+
+
+def assign_splits(examples: Sequence[Example], *, seed: int = DEFAULT_SEED) -> list[Example]:
+    """Split by source document (by group, so duplicates stay together):
+
+    * CORD keeps its official train / validation / test split;
+    * SROIE keeps its official test split and carves val from train (no official val);
+    * synthetic invoices go 80 / 10 / 10 by group.
+
+    The held-out test set is therefore the official CORD and SROIE test documents, plus
+    a synthetic test slice for the invoice-only fields.
+    """
+    assigned = []
+    for example in examples:
+        split = example.split
+        if example.source == "synthetic":
+            split = split_for(example.group_key, DEFAULT_FRACTIONS, seed)
+        elif (
+            example.source == "sroie"
+            and split == "train"
+            and stable_fraction(example.group_key, seed) < SROIE_VAL_SHARE
+        ):
+            split = "val"
+        assigned.append(replace(example, split=split))
+    return drop_leaks(assigned)
+
+
+def text_key(text: str) -> str:
+    """Whitespace- and case-insensitive identity of a document's text."""
+    return " ".join(text.split()).casefold()
+
+
+def drop_leaks(examples: Sequence[Example]) -> list[Example]:
+    """Drop examples whose text already sits in a later split (test before val before
+    train): two documents with the same text are the same document, whatever their ids."""
+    rank = {split: i for i, split in enumerate(SPLIT_ORDER)}
+    owner: dict[str, int] = {}
+    for example in examples:
+        key = text_key(example.input)
+        owner[key] = max(owner.get(key, -1), rank.get(example.split, -1))
+    kept = [e for e in examples if rank.get(e.split, -1) == owner[text_key(e.input)]]
+    if len(kept) < len(examples):
+        logger.warning(
+            "dropped %d examples whose text is in a later split", len(examples) - len(kept)
+        )
+    return kept
+
+
+def leakage(examples: Sequence[Example]) -> list[str]:
+    """Every document id, group or text found in more than one split (empty: no leaks)."""
+    problems = []
+    for name, key in (
+        ("document", lambda e: e.doc_id),
+        ("group", lambda e: e.group_key),
+        ("text", lambda e: text_key(e.input)),
+    ):
+        splits: dict[str, set[str]] = {}
+        for example in examples:
+            splits.setdefault(key(example), set()).add(example.split)
+        problems += [
+            f"{name} {value[:60]!r} is in {sorted(where)}"
+            for value, where in splits.items()
+            if len(where) > 1
+        ]
+    return problems
 
 
 # --------------------------------------------------------------------------- build
@@ -406,7 +494,7 @@ def collect(
         examples = mix_synthetic(examples, rendered, share=share, seed=seed)
     elif synthetic is not None:
         logger.warning("no rendered synthetic documents under %s; skipping them", synthetic)
-    return examples
+    return assign_splits(examples, seed=seed)
 
 
 def write_jsonl(examples: Iterable[Example], out: Path) -> dict[str, int]:
@@ -449,8 +537,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not examples:
         logger.error("no source data found")
         return 1
+    problems = leakage(examples)
+    if problems:
+        for problem in problems[:20]:
+            logger.error("leak: %s", problem)
+        return 1
     counts = write_jsonl(examples, args.out)
-    print(json.dumps({"examples": counts}, indent=2))
+    sources: dict[str, dict[str, int]] = {}
+    for example in examples:
+        per_split = sources.setdefault(example.source, {})
+        per_split[example.split] = per_split.get(example.split, 0) + 1
+    print(json.dumps({"examples": counts, "by_source": sources}, indent=2))
     return 0
 
 
