@@ -7,6 +7,9 @@ metric: dotproduct             # required for hybrid dense + sparse search
 spec: serverless
 namespaces: [dev, eval, prod]  # eval runs never pollute prod
 upsert_batch_size: 100
-hybrid_alpha: 0.7              # dense weight; sparse weight = 1 - alpha (tune on golden set)
+# Dense weight; sparse weight = 1 - alpha. Tuned on golden set v0 (2026-11-18, exact hybrid
+# scoring): flat at 0.4-0.7, best for R3/R4 at 0.7 (recall@5 0.836 vs 0.698 dense-only).
+# See eval/reports/2026-11-18/tuning_alpha.md.
+hybrid_alpha: 0.7
 query_top_k: 20                # candidates fetched before reranking
 metadata_text_max_bytes: 1024  # chunk text kept in metadata; full text lives in Postgres
