@@ -214,3 +214,14 @@ def test_sweep_scores_every_value_and_renders_the_pick() -> None:
     assert "| alpha | R2 | 0.5 | 1 |" in report
     assert "| **1** (picked) | 1.000 | 1.000 |" in report
     assert "| 0.5 (was) | 1.000 | 0.500 |" in report
+
+
+def test_parser_knows_every_knob() -> None:
+    from eval.tune_retrieval import build_parser
+
+    args = build_parser().parse_args(["candidates", "hops", "--candidates", "5,10", "--hops", "1"])
+    assert args.knobs == ["candidates", "hops"]
+    assert args.candidates == [5.0, 10.0]
+    assert args.hops == [1.0]
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["depth"])

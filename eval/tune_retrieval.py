@@ -8,7 +8,13 @@ the best value on the knob's metric, then MRR, then the cheaper value::
         --report eval/reports/<date>/tuning.md
 
 * ``alpha`` -- the dense weight of R2's hybrid query (``hybrid_alpha`` in
-  ``configs/pinecone.yaml``), on R2 and on R3 (whose rerank pool R2 supplies).
+  ``configs/pinecone.yaml``), on R2 and on R3 (whose rerank pool R2 supplies);
+* ``candidates`` -- how many of R2's chunks R3 reranks (``query_top_k`` in
+  ``configs/pinecone.yaml``), picked by recall@k, ties to fewer (the cross-encoder's cost
+  grows with each one);
+* ``hops`` -- how far R4 walks the graph from its seeds (``graph.max_hops`` in
+  ``configs/retrieval.yaml``), picked by evidence recall, ties to fewer facts per question
+  (a smaller context to answer from).
 
 **Exact hybrid scoring.** Pinecone Local stores no sparse values and ignores the sparse half
 of a query, so on it every ``alpha`` returns the dense ranking. :class:`ExactHybridStore`
@@ -344,6 +350,82 @@ def alpha_sweeps(
     ]
 
 
+def candidates_sweep(
+    live: Live,
+    questions: Sequence[GoldenQuestion],
+    values: Sequence[float],
+    *,
+    current: float,
+    k: int,
+    filters: Callable[[str], Any] | None,
+    on_result: Callable[[QuestionResult], None] | None = None,
+) -> Sweep:
+    """How many hybrid candidates R3 reranks: recall@k, ties to fewer candidates."""
+    from ledgerlens.retrieval.vector import RerankRetriever
+
+    def r3(candidates: float) -> Retriever:
+        return RerankRetriever(live_retriever(live), live.reranker, candidates=int(candidates))
+
+    return sweep(
+        questions,
+        "candidates",
+        "R3",
+        r3,
+        values,
+        metric="recall",
+        current=current,
+        k=k,
+        filters=filters,
+        cost=lambda row: row.value,
+        on_result=on_result,
+    )
+
+
+def hops_sweep(
+    live: Live,
+    questions: Sequence[GoldenQuestion],
+    values: Sequence[float],
+    *,
+    current: float,
+    candidates: int,
+    k: int,
+    filters: Callable[[str], Any] | None,
+    on_result: Callable[[QuestionResult], None] | None = None,
+) -> Sweep:
+    """R4's graph hops: evidence recall, ties to fewer facts per question."""
+    from ledgerlens.core.config import get_config
+    from ledgerlens.retrieval.analyze import QueryAnalyzer
+    from ledgerlens.retrieval.graph import GraphExpander
+    from ledgerlens.retrieval.graphrag import GraphRAGRetriever
+    from ledgerlens.retrieval.vector import RerankRetriever
+    from ledgerlens.storage.neo4j.driver import get_driver
+
+    graph = get_config().retrieval.graph
+    analyzer = QueryAnalyzer.from_postgres()
+    driver = get_driver()
+
+    def r4(hops: float) -> Retriever:
+        expander = GraphExpander(
+            driver, max_hops=int(hops), per_seed=graph.per_seed, limit=graph.limit
+        )
+        seeds = RerankRetriever(live_retriever(live), live.reranker, candidates=candidates)
+        return GraphRAGRetriever(seeds, expander, analyzer=analyzer)
+
+    return sweep(
+        questions,
+        "hops",
+        "R4",
+        r4,
+        values,
+        metric="evidence_recall",
+        current=current,
+        k=k,
+        filters=filters,
+        cost=lambda row: row.mean_facts,
+        on_result=on_result,
+    )
+
+
 def parse_floats(text: str) -> list[float]:
     try:
         return [float(v) for v in text.split(",") if v.strip()]
@@ -356,10 +438,17 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m eval.tune_retrieval",
         description="Sweep retrieval settings on the golden set.",
     )
-    parser.add_argument("knobs", nargs="+", choices=["alpha"])
+    parser.add_argument("knobs", nargs="+", choices=["alpha", "candidates", "hops"])
     parser.add_argument(
         "--alpha", type=parse_floats, default=[i / 10 for i in range(11)], help="alpha values"
     )
+    parser.add_argument(
+        "--candidates",
+        type=parse_floats,
+        default=[5, 10, 20, 30, 50],
+        help="rerank candidate counts",
+    )
+    parser.add_argument("--hops", type=parse_floats, default=[0, 1, 2], help="graph hop limits")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--golden", type=Path, default=DEFAULT_GOLDEN)
     parser.add_argument("--limit", type=int, default=None, help="first N questions only")
@@ -394,6 +483,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             k=args.k,
             filters=filters,
             on_result=progress,
+        )
+    candidates = config.pinecone.query_top_k
+    if "candidates" in args.knobs:
+        picked = candidates_sweep(
+            live,
+            questions,
+            args.candidates,
+            current=candidates,
+            k=args.k,
+            filters=filters,
+            on_result=progress,
+        )
+        sweeps.append(picked)
+        candidates = int(picked.best)
+    if "hops" in args.knobs:
+        sweeps.append(
+            hops_sweep(
+                live,
+                questions,
+                args.hops,
+                current=config.retrieval.graph.max_hops,
+                candidates=candidates,
+                k=args.k,
+                filters=filters,
+                on_result=progress,
+            )
         )
     print()
     setup = {

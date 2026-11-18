@@ -342,7 +342,10 @@ def build_retrievers(
     variants: Sequence[str], *, namespace: str | None = None, llm: LLMClient | None = None
 ) -> dict[str, Retriever]:
     """The live retrievers (Pinecone, Postgres, Neo4j, models) for ``R1``..``R5``, sharing
-    one embedder, reranker, analyzer and driver. R5 needs an LLM (``models.yaml``)."""
+    one embedder, reranker, analyzer and driver, sized by ``configs/`` (rerank candidates:
+    ``pinecone.query_top_k``; graph: ``retrieval.graph``). R5 needs an LLM
+    (``models.yaml``)."""
+    from ledgerlens.core.config import get_config
     from ledgerlens.ingestion.embedding import BM25Encoder, DenseEmbedder
     from ledgerlens.retrieval.analyze import QueryAnalyzer
     from ledgerlens.retrieval.graph import GraphExpander
@@ -366,11 +369,17 @@ def build_retrievers(
     texts = PostgresChunkTexts()
     r1 = DenseRetriever(store, embedder, texts=texts)
     r2 = HybridRetriever(store, embedder, BM25Encoder.load(), texts=texts)
-    r3 = RerankRetriever(r2, CrossEncoderReranker())
+    config = get_config()
+    reranker = CrossEncoderReranker(config.retrieval.rerank_model)
+    r3 = RerankRetriever(r2, reranker, candidates=config.pinecone.query_top_k)
     built: dict[str, Retriever] = {"R1": r1, "R2": r2, "R3": r3}
     if {"R4", "R5"} & set(variants):
         analyzer = QueryAnalyzer.from_postgres()
-        r4 = GraphRAGRetriever(r3, GraphExpander(get_driver()), analyzer=analyzer)
+        graph = config.retrieval.graph
+        expander = GraphExpander(
+            get_driver(), max_hops=graph.max_hops, per_seed=graph.per_seed, limit=graph.limit
+        )
+        r4 = GraphRAGRetriever(r3, expander, analyzer=analyzer)
         built["R4"] = r4
         if "R5" in variants:
             generator = CypherGenerator(llm or LLMClient())

@@ -210,8 +210,20 @@ def test_expand_dedupes_seeds_and_skips_the_query_without_any() -> None:
 
     assert [fact.text[:15] for fact in facts] == ["Invoice INV-889"]
     assert runner.calls == [
-        ("invoice_neighborhood", {"seeds": ["INV-889", "doc-a"], "per_seed": 3, "limit": 9})
+        (
+            "invoice_neighborhood",
+            {"seeds": ["INV-889", "doc-a"], "per_seed": 3, "limit": 9, "max_hops": 2},
+        )
     ]
+
+
+def test_expand_passes_max_hops_and_rejects_more_than_two() -> None:
+    runner = StubRunner([])
+    GraphExpander(runner=runner, max_hops=0).expand(["doc-a"])
+
+    assert runner.calls[0][1]["max_hops"] == 0
+    with pytest.raises(ValueError, match="max_hops"):
+        GraphExpander(runner=runner, max_hops=3)
 
 
 # --------------------------------------------------------------------------- template choice
@@ -250,7 +262,8 @@ def test_question_numbers_lead_the_seeds() -> None:
     query = plan("Which payment settled INV-889?", seeds=("doc-a", "doc-b", "doc-a"))
 
     assert query == GraphQuery(
-        INVOICE_NEIGHBORHOOD, {"seeds": ["INV-889", "doc-a", "doc-b"], "per_seed": 4, "limit": 20}
+        INVOICE_NEIGHBORHOOD,
+        {"seeds": ["INV-889", "doc-a", "doc-b"], "per_seed": 4, "limit": 20, "max_hops": 2},
     )
 
 

@@ -270,7 +270,7 @@ def test_r4_fuses_vector_seeds_with_graph_facts() -> None:
     assert runner.calls == [
         (
             "invoice_neighborhood",
-            {"seeds": ["INV-889", "d-inv", "d-x"], "per_seed": 10, "limit": 30},
+            {"seeds": ["INV-889", "d-inv", "d-x"], "per_seed": 10, "limit": 30, "max_hops": 2},
         )
     ]
     assert result.graph_facts[0].text.endswith("-> PO-1042 -> no payment")

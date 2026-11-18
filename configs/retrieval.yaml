@@ -1,0 +1,10 @@
+# Retrieval: how the retriever stages are sized. See docs/layers/03-retrieval.md.
+# Validated by ledgerlens.core.config.RetrievalConfig. R2's hybrid_alpha and the rerank
+# candidate count (query_top_k) live in pinecone.yaml. Values tuned on golden set v0:
+# eval/reports/2026-11-18/tuning_rerank_graph.md (python -m eval.tune_retrieval).
+rerank_model: BAAI/bge-reranker-base
+
+graph:                     # R4 graph expansion (GraphExpander)
+  max_hops: 1              # 0 seed invoices only, 1 + via payment / PO, 2 + via contract
+  per_seed: 10             # invoices per seed document, nearest first
+  limit: 30                # invoices per question
