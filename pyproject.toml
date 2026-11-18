@@ -163,5 +163,16 @@ module = ["pyarrow.*"]  # no type hints
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# QLoRA training (ml/finetune) calls into transformers / peft, which leave many functions
+# unannotated; peft and bitsandbytes are GPU installs (requirements-ml.txt), not in CI.
+module = ["ml.finetune.*"]
+disallow_untyped_calls = false
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = ["peft.*", "bitsandbytes.*", "transformers.*"]  # GPU-only or not in every env
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
 ignore_missing_imports = true
