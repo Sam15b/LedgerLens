@@ -19,6 +19,11 @@ Sources (docs/layers/06-fine-tuning.md):
 * **SROIE** (``data/raw/sroie``, manual download, see :mod:`eval.datasets.sroie`): scanned
   Malaysian receipts; the text is the annotated lines, the target is vendor, address, date
   and total. Skipped with a warning when it is not there.
+* **Synthetic invoices** (``data/synthetic``, ``ml.synthetic``): the rendered invoice PDFs,
+  read through the ingestion layout (the text the pipeline extracts from), with the record
+  they were rendered from as the target -- invoice number, PO, dates, tax and line items,
+  the fields receipts lack. They make up ``--synthetic-share`` (25 %) of the examples;
+  exact and near duplicates (``duplicate_of``) share a group with their original.
 
 Targets use the field names of :mod:`ledgerlens.core.schemas` (``Receipt``), so the
 fine-tuned model's output drops into the same validation as the API extractor's. Dates are
@@ -33,7 +38,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -45,6 +50,22 @@ SROIE_SPLITS = {"train": "train", "test": "test"}
 
 RECEIPT_KEYS = ("vendor_name", "vendor_address", "receipt_date", "total")
 CORD_KEYS = ("line_items", "subtotal", "tax", "total")
+INVOICE_KEYS = (
+    "invoice_number",
+    "vendor_name",
+    "vendor_tax_id",
+    "customer_name",
+    "invoice_date",
+    "due_date",
+    "po_number",
+    "currency",
+    "subtotal",
+    "tax",
+    "total",
+    "line_items",
+)
+DEFAULT_SYNTHETIC_SHARE = 0.25
+DEFAULT_SEED = 13
 
 
 # --------------------------------------------------------------------------- examples
@@ -268,11 +289,109 @@ def sroie_examples(root: Path) -> Iterator[Example]:
             )
 
 
+# --------------------------------------------------------------------------- synthetic
+
+
+def _amount_2dp(value: Any) -> str | None:
+    return None if value in (None, "") else f"{Decimal(str(value)):.2f}"
+
+
+def invoice_target(data: Mapping[str, Any]) -> dict[str, Any]:
+    """The rendered invoice's record, in :data:`INVOICE_KEYS` order, amounts to 2 places."""
+    target = {key: data.get(key) for key in INVOICE_KEYS}
+    for key in ("subtotal", "tax", "total"):
+        target[key] = _amount_2dp(target[key])
+    target["line_items"] = [
+        {
+            "description": line.get("description"),
+            "quantity": None if line.get("quantity") is None else str(line["quantity"]),
+            "unit_price": _amount_2dp(line.get("unit_price")),
+            "amount": _amount_2dp(line.get("amount")),
+        }
+        for line in data.get("line_items") or []
+    ]
+    return target
+
+
+def pdf_text(path: Path) -> str:
+    """A PDF's text as the ingestion pipeline lays it out (text layer, blocks in order)."""
+    import pymupdf
+
+    from ledgerlens.ingestion.layout import read_text_page
+
+    with pymupdf.open(path) as doc:
+        return "\n\n".join(read_text_page(page).text for page in doc)
+
+
+def synthetic_examples(root: Path) -> Iterator[Example]:
+    """Every rendered synthetic invoice, not yet assigned a split (``split`` is empty)."""
+    records: dict[str, dict[str, Any]] = {}
+    with (root / "records.jsonl").open(encoding="utf-8") as lines:
+        for line in lines:
+            record = json.loads(line)
+            if record.get("record_type") == "invoice":
+                records[record["id"]] = record
+    manifest = root / "pdf" / "manifest.jsonl"
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line) if line.strip() else None
+        if not entry or entry.get("doc_type") != "invoice":
+            continue
+        record = records.get(entry["record_id"])
+        if record is None:
+            logger.warning("no record for rendered invoice %s", entry["record_id"])
+            continue
+        yield Example(
+            source="synthetic",
+            doc_id=f"synthetic-{record['id']}",
+            split="",
+            doc_type="invoice",
+            input=pdf_text(root / entry["pdf"]),
+            target=invoice_target(record["data"]),
+            group=f"synthetic-{record.get('duplicate_of') or record['id']}",
+            meta={"template": entry.get("template"), "anomalies": entry.get("anomalies", [])},
+        )
+
+
+def synthetic_count(real: int, share: float) -> int:
+    """How many synthetic examples make them ``share`` of ``real`` + synthetic."""
+    if not 0 <= share < 1:
+        raise ValueError(f"synthetic share must be in [0, 1), got {share}")
+    return round(real * share / (1 - share))
+
+
+def mix_synthetic(
+    real: Sequence[Example],
+    synthetic: Sequence[Example],
+    *,
+    share: float = DEFAULT_SYNTHETIC_SHARE,
+    seed: int = DEFAULT_SEED,
+) -> list[Example]:
+    """``real`` plus a seeded sample of ``synthetic`` sized to ``share`` of the result. All
+    of ``synthetic`` is used, with a warning, if there is less than that."""
+    import random
+
+    wanted = synthetic_count(len(real), share)
+    pool = sorted(synthetic, key=lambda example: example.doc_id)
+    if wanted > len(pool):
+        logger.warning("wanted %d synthetic examples, have %d; using all", wanted, len(pool))
+    picked = random.Random(seed).sample(pool, min(wanted, len(pool)))
+    # all training data for now: synthetic has no official test split
+    mixed = [replace(example, split="train") for example in picked]
+    return [*real, *sorted(mixed, key=lambda example: example.doc_id)]
+
+
 # --------------------------------------------------------------------------- build
 
 
-def collect(cord: Path | None, sroie: Path | None) -> list[Example]:
-    """Every example from the sources that are present."""
+def collect(
+    cord: Path | None,
+    sroie: Path | None,
+    synthetic: Path | None = None,
+    *,
+    share: float = DEFAULT_SYNTHETIC_SHARE,
+    seed: int = DEFAULT_SEED,
+) -> list[Example]:
+    """Every example from the sources that are present, synthetic mixed in at ``share``."""
     examples: list[Example] = []
     if cord is not None and cord.exists():
         examples += cord_examples(cord)
@@ -282,6 +401,11 @@ def collect(cord: Path | None, sroie: Path | None) -> list[Example]:
         examples += sroie_examples(sroie)
     elif sroie is not None:
         logger.warning("SROIE not found at %s (manual download); skipping it", sroie)
+    if synthetic is not None and (synthetic / "pdf" / "manifest.jsonl").is_file():
+        rendered = list(synthetic_examples(synthetic))
+        examples = mix_synthetic(examples, rendered, share=share, seed=seed)
+    elif synthetic is not None:
+        logger.warning("no rendered synthetic documents under %s; skipping them", synthetic)
     return examples
 
 
@@ -304,6 +428,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cord", type=Path, default=Path("data/raw/cord"))
     parser.add_argument("--sroie", type=Path, default=Path("data/raw/sroie"))
+    parser.add_argument("--synthetic", type=Path, default=Path("data/synthetic"))
+    parser.add_argument(
+        "--synthetic-share",
+        type=float,
+        default=DEFAULT_SYNTHETIC_SHARE,
+        help="synthetic share of all examples (0.2-0.3 recommended)",
+    )
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--out", type=Path, default=Path("data/processed/finetune"))
     return parser
 
@@ -311,7 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    examples = collect(args.cord, args.sroie)
+    examples = collect(
+        args.cord, args.sroie, args.synthetic, share=args.synthetic_share, seed=args.seed
+    )
     if not examples:
         logger.error("no source data found")
         return 1
