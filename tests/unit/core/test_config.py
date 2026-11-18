@@ -234,3 +234,17 @@ def test_every_aliased_model_has_a_price() -> None:
     aliased = {ref for refs in models.aliases.values() for ref in refs}
 
     assert aliased <= set(models.pricing_usd_per_1m_tokens)
+
+
+def test_retrieval_graph_hops_are_bounded(tmp_path: Path) -> None:
+    (tmp_path / "retrieval.yaml").write_text("graph:\n  max_hops: 3\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        load_config(tmp_path)
+
+
+def test_repo_retrieval_config_loads() -> None:
+    config = load_config()
+
+    assert 0 <= config.retrieval.graph.max_hops <= 2
+    assert config.retrieval.rerank_model

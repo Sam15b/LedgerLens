@@ -7,7 +7,7 @@ document ids (R3's top chunks) and document numbers from the question -- and run
 parameterized template from :mod:`ledgerlens.storage.neo4j.queries` to collect them::
 
     expander = GraphExpander(get_driver())
-    facts = expander.expand_facts(["INV-889", "5a0aef53-..."])  # invoices within two hops
+    facts = expander.expand_facts(["INV-889", "5a0aef53-..."])  # invoices within max_hops (2)
 
 Each row is rendered as one compact :class:`~ledgerlens.retrieval.GraphFact` an LLM can
 read and cite::
@@ -54,6 +54,7 @@ Row = dict[str, Any]
 
 DEFAULT_PER_SEED = 10
 DEFAULT_LIMIT = 30
+DEFAULT_MAX_HOPS = 2
 
 
 def native(value: Any) -> Any:
@@ -345,6 +346,7 @@ def plan_query(
     today: date,
     per_seed: int = DEFAULT_PER_SEED,
     limit: int = DEFAULT_LIMIT,
+    max_hops: int = DEFAULT_MAX_HOPS,
 ) -> GraphQuery | None:
     """The template that fits the question, or ``None`` when there is nothing to start from.
 
@@ -368,7 +370,10 @@ def plan_query(
         return None
     if analysis is not None and _CONTRACT_TERMS.search(analysis.query):
         return GraphQuery(CONTRACT_FOR_PO, {"seeds": start, "limit": min(limit, 10)})
-    return GraphQuery(INVOICE_NEIGHBORHOOD, {"seeds": start, "per_seed": per_seed, "limit": limit})
+    return GraphQuery(
+        INVOICE_NEIGHBORHOOD,
+        {"seeds": start, "per_seed": per_seed, "limit": limit, "max_hops": max_hops},
+    )
 
 
 # --------------------------------------------------------------------------- expansion
@@ -390,8 +395,11 @@ class GraphExpander:
         database: str | None = None,
         per_seed: int = DEFAULT_PER_SEED,
         limit: int = DEFAULT_LIMIT,
+        max_hops: int = DEFAULT_MAX_HOPS,
         today: date | None = None,
     ) -> None:
+        if not 0 <= max_hops <= 2:
+            raise ValueError(f"max_hops must be 0, 1 or 2, got {max_hops}")
         if runner is None:
             if driver is None:
                 raise ValueError("GraphExpander needs a Neo4j driver or a runner")
@@ -399,6 +407,7 @@ class GraphExpander:
         self.runner = runner
         self.per_seed = per_seed
         self.limit = limit
+        self.max_hops = max_hops
         self._today = today
 
     @property
@@ -411,13 +420,18 @@ class GraphExpander:
         return self.runner.run(template, template.bind(**params))
 
     def expand(self, seeds: Sequence[str | None]) -> list[Row]:
-        """Invoices within two hops of the seeds -- document ids or document numbers, best
-        first -- with their vendor, PO, contract and payments (``invoice_neighborhood``)."""
+        """Invoices within ``max_hops`` hops of the seeds -- document ids or document
+        numbers, best first -- with their vendor, PO, contract and payments
+        (``invoice_neighborhood``)."""
         wanted = unique(seeds)
         if not wanted:
             return []
         return self.rows(
-            INVOICE_NEIGHBORHOOD, seeds=wanted, per_seed=self.per_seed, limit=self.limit
+            INVOICE_NEIGHBORHOOD,
+            seeds=wanted,
+            per_seed=self.per_seed,
+            limit=self.limit,
+            max_hops=self.max_hops,
         )
 
     def expand_facts(self, seeds: Sequence[str | None]) -> list[GraphFact]:
@@ -429,7 +443,12 @@ class GraphExpander:
     ) -> GraphQuery | None:
         """:func:`plan_query` with this expander's limits and date."""
         return plan_query(
-            analysis, seeds, today=self.today, per_seed=self.per_seed, limit=self.limit
+            analysis,
+            seeds,
+            today=self.today,
+            per_seed=self.per_seed,
+            limit=self.limit,
+            max_hops=self.max_hops,
         )
 
     def facts(

@@ -27,7 +27,7 @@ have -- the truncated copy is used.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -41,9 +41,25 @@ from ledgerlens.retrieval import (
     StageTimer,
 )
 from ledgerlens.retrieval.filters import to_pinecone_filter
-from ledgerlens.storage.pinecone_store import PineconeStore, VectorHit
+from ledgerlens.storage.pinecone_store import VectorHit
 from ledgerlens.storage.postgres.db import get_session_factory
 from ledgerlens.storage.postgres.repositories import ChunkRepository
+
+
+class VectorIndex(Protocol):
+    """What a retriever queries: :class:`~ledgerlens.storage.pinecone_store.PineconeStore`,
+    or a stand-in with the same :meth:`query` (``eval.tune_retrieval.ExactHybridStore``)."""
+
+    def query(
+        self,
+        dense: Sequence[float],
+        sparse: SparseVector | None = None,
+        *,
+        top_k: int | None = None,
+        filter: Mapping[str, Any] | None = None,
+        namespace: str | None = None,
+        alpha: float | None = None,
+    ) -> list[VectorHit]: ...
 
 
 class QueryEmbedder(Protocol):
@@ -124,7 +140,7 @@ class DenseRetriever:
     """The key of the vector score in :attr:`ScoredChunk.scores`."""
 
     def __init__(
-        self, store: PineconeStore, embedder: QueryEmbedder, *, texts: ChunkTexts | None = None
+        self, store: VectorIndex, embedder: QueryEmbedder, *, texts: ChunkTexts | None = None
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -163,7 +179,7 @@ class HybridRetriever(DenseRetriever):
 
     def __init__(
         self,
-        store: PineconeStore,
+        store: VectorIndex,
         embedder: QueryEmbedder,
         sparse: SparseQueryEncoder,
         *,

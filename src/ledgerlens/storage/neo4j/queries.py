@@ -85,10 +85,10 @@ _DATE_RANGE = """
 
 INVOICE_NEIGHBORHOOD = CypherTemplate(
     name="invoice_neighborhood",
-    description="Invoices within two hops of seed documents, with vendor, PO, contract and "
-    "payments.",
-    params=("seeds", "per_seed", "limit"),
-    defaults={"per_seed": 10, "limit": 50},
+    description="Invoices within ``max_hops`` (at most two) hops of seed documents, with "
+    "vendor, PO, contract and payments.",
+    params=("seeds", "per_seed", "limit", "max_hops"),
+    defaults={"per_seed": 10, "limit": 50, "max_hops": 2},
     cypher="""
 UNWIND range(0, size($seeds) - 1) AS rank
 WITH rank, $seeds[rank] AS seed
@@ -109,6 +109,7 @@ CALL (seed) {
     WHERE c.document_id = seed OR c.contract_number = seed
     RETURN i, 2 AS hops
   }
+  WITH i, hops WHERE hops <= $max_hops
   WITH i, hops ORDER BY hops, i.invoice_date DESC, i.id LIMIT $per_seed
   RETURN i, hops
 }
@@ -125,7 +126,9 @@ OPTIONAL MATCH (c:Contract)-[:GOVERNS]->(po)
 )
 """``seeds``: document ids and/or document numbers (invoice, payment, PO or contract), best
 first. At most ``per_seed`` invoices per seed (nearest first, then newest), ``limit`` in
-all, in seed order."""
+all, in seed order. ``max_hops`` bounds the walk: 0 keeps only seed invoices, 1 adds the
+invoices a seed payment settles or a seed PO is referenced by, 2 adds the invoices under a
+seed contract."""
 
 
 UNPAID_WITH_PO = CypherTemplate(

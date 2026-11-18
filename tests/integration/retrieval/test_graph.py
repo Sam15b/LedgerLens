@@ -199,6 +199,24 @@ def test_contract_seed_reaches_invoices_two_hops_away(
     ]
 
 
+@pytest.mark.parametrize(("max_hops", "expected"), [(0, []), (1, []), (2, ["INV-1", "INV-3"])])
+def test_max_hops_bounds_the_walk_from_a_contract(
+    driver: Driver, ledger: dict[str, str], tag: str, max_hops: int, expected: list[str]
+) -> None:
+    rows = GraphExpander(driver, today=TODAY, max_hops=max_hops).expand([f"doc-CT-{tag}"])
+
+    assert sorted(str(row["invoice_number"]).rsplit("-", 1)[0] for row in rows) == expected
+
+
+def test_one_hop_reaches_the_invoice_a_payment_settled(
+    driver: Driver, ledger: dict[str, str], tag: str
+) -> None:
+    expander = GraphExpander(driver, today=TODAY, max_hops=1)
+
+    assert short(expander.expand_facts([f"doc-PAY-2-{tag}"])) == ["INV-3"]
+    assert GraphExpander(driver, today=TODAY, max_hops=0).expand([f"doc-PAY-2-{tag}"]) == []
+
+
 def test_document_number_in_the_question_is_a_seed(
     analyzer: QueryAnalyzer, expander: GraphExpander, ledger: dict[str, str]
 ) -> None:

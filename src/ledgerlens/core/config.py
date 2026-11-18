@@ -284,6 +284,24 @@ class EvalConfig(_Section):
     targets: dict[str, float] = Field(default_factory=dict)
 
 
+# retrieval.yaml ---------------------------------------------------------------------
+
+
+class GraphExpansionConfig(_Section):
+    """How far R4 walks the graph from its seed documents (``GraphExpander``)."""
+
+    max_hops: int = Field(default=2, ge=0, le=2)
+    per_seed: int = Field(default=10, gt=0)
+    limit: int = Field(default=30, gt=0)
+
+
+class RetrievalConfig(_Section):
+    default: Literal["R1", "R2", "R3", "R4", "R5"] = "R4"
+    """The retriever questions go to (``ledgerlens.retrieval.factory.build_retriever``)."""
+    rerank_model: str = "BAAI/bge-reranker-base"
+    graph: GraphExpansionConfig = Field(default_factory=GraphExpansionConfig)
+
+
 # aggregate --------------------------------------------------------------------------
 
 
@@ -293,9 +311,10 @@ class AppConfig(_Section):
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 
 
-_CONFIG_FILES = ("models", "pinecone", "ingestion", "agents", "eval")
+_CONFIG_FILES = ("models", "pinecone", "ingestion", "agents", "eval", "retrieval")
 
 
 def resolve_configs_dir(override: Path | None = None) -> Path:

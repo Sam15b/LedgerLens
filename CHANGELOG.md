@@ -8,6 +8,61 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-18
+
+Phase 4 — Retrieval: five retrievers behind one `Retriever` protocol, from plain vector
+search to GraphRAG with Text2Cypher, measured on a reviewed golden set. On golden set v0
+the default, R4 GraphRAG, reaches recall@5 0.889, MRR 0.904 and evidence recall 0.953,
+against 0.649 / 0.633 / 0.649 for dense vector search
+([eval/reports/2026-11-18/retrieval.md](eval/reports/2026-11-18/retrieval.md)).
+
+### Added
+
+- `ledgerlens.retrieval`, the retriever variants. Each returns cited chunks, graph facts
+  and per-stage timings:
+  - **R1** dense search, with full chunk text from Postgres and metadata filters;
+  - **R2** α-weighted hybrid dense + BM25;
+  - **R3** R2's candidates reranked by a cross-encoder (`BAAI/bge-reranker-base`);
+  - **R4** GraphRAG: R3's documents expanded through parameterized Cypher templates
+    (invoice neighbourhood, unpaid with PO, contract for PO, vendor ledger) into compact,
+    citable facts, plus budgeted context assembly and a grounded answer prompt;
+  - **R5** Text2Cypher: LLM-written read-only Cypher with guardrails and one retry, and
+    R4 as the fallback.
+- A query analyzer: document numbers, vendors, date ranges and intent, with an LLM
+  fallback. Its filters and the graph template choice come from it.
+- `ledgerlens.retrieval.factory`: builds any variant from `configs/`, and
+  `build_retriever()` returns the default.
+- `configs/retrieval.yaml`: default retriever, rerank model and graph expansion
+  (`max_hops`, `per_seed`, `limit`).
+- Evaluation:
+  - golden set v0 (`data/golden/golden_set.jsonl`): 51 reviewed questions over the
+    synthetic ledger in six categories, with a schema, a builder and CI validation;
+  - `eval/benchmark_retrieval.py`: recall@k, MRR, evidence recall, per-category tables,
+    latency and, with `--answers`, answer correctness, citations and cost;
+  - `eval/tune_retrieval.py`: one-knob sweeps (hybrid α, rerank candidates, graph hops)
+    with exact client-side hybrid scoring for Pinecone Local.
+- Reports in `eval/reports/2026-11-18/`: `tuning_alpha.md`, `tuning_rerank_graph.md` and
+  `retrieval.md`.
+
+### Changed
+
+- Tuned on golden set v0:
+  - `pinecone.query_top_k` (rerank candidates) 20 → 50: R3 recall@5 0.836 → 0.868;
+  - `retrieval.graph.max_hops` 2 → 1: same evidence, 4.5 → 2.6 facts per question;
+  - `pinecone.hybrid_alpha` stays 0.7 (best for R3 and R4).
+- Retrievers accept any `VectorIndex`, not only `PineconeStore`.
+- Package version 0.4.0.
+
+### Known issues
+
+- R5 and the answer columns (correctness, citations, cost) are not measured yet: they need
+  a working LLM key.
+- Pinecone Local ignores sparse vectors, so the hybrid numbers come from exact
+  client-side scoring (`--exact-hybrid`). Re-check them on the serverless index.
+- Aggregation questions stay at recall@5 0.756 for every variant: totals come from the
+  graph, but the golden evidence lists every invoice in the total.
+- On CPU the cross-encoder dominates the latency tail (p95 ~7.5 s with 50 candidates).
+
 ## [0.3.0] - 2026-11-16
 
 Phase 3 — Storage: every document is stored three ways, all keyed by the same
@@ -260,7 +315,9 @@ command and reports its health.
 - Package version is read from `src/ledgerlens/__init__.py` (single source) and reset to
   `0.0.0` to match the roadmap's `v0.<phase>.0` scheme.
 
-[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Sam15b/LedgerLens/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Sam15b/LedgerLens/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/Sam15b/LedgerLens/compare/v0.2.0...v0.1.0
 [0.2.0]: https://github.com/Sam15b/LedgerLens/compare/v0.0.0...v0.2.0
 [0.0.0]: https://github.com/Sam15b/LedgerLens/releases/tag/v0.0.0
