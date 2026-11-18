@@ -69,6 +69,11 @@ synthetic = [
     # img2img (diffusers) runs on a GPU from requirements-ml.txt, not here.
     "albumentations>=1.4",
 ]
+finetune = [
+    # Fine-tuning data prep (ml/finetune/prepare_dataset.py) reads CORD's parquet files;
+    # training itself runs on a GPU from requirements-ml.txt.
+    "pyarrow>=15",
+]
 eval = [
     "ragas",
     "langsmith",
@@ -151,6 +156,10 @@ disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
 module = ["albumentations.*", "diffusers.*", "matplotlib.*"]  # untyped, or not in CI
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*"]  # no type hints
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
