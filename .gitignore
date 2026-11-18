@@ -37,6 +37,10 @@ models/
 *.h5
 *.pt
 ml/**/runs/
+# fine-tuning run logs are small JSON files (config, data hashes, metrics); the
+# checkpoints and adapter weights go to the run's checkpoint_dir instead
+!ml/finetune/runs/
+outputs/
 ml/**/checkpoints/
 wandb/
 mlruns/

@@ -11,15 +11,27 @@ train. The data is the output of ``prepare_dataset.py``, tokenized with the Llam
 template and the loss on the response tokens only::
 
     python -m ml.finetune.train_lora --data-dir data/processed/finetune --max-steps 10
+
+Free GPU sessions end without warning, so checkpoints go to persistent storage
+(``--checkpoint-dir``: a mounted Google Drive folder on Colab, ``/kaggle/working`` on
+Kaggle) under the run id, and a rerun with the same ``--run-id`` resumes from the last one.
+Each run is logged to ``ml/finetune/runs/<run_id>/``: ``run.json`` (config, environment,
+dataset files and hashes, final metrics) and ``metrics.jsonl`` (every logged step). Those
+are small JSON files for git; adapter weights stay in the checkpoint folder.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+import platform
+import subprocess
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +88,29 @@ class TrainConfig:
     seed: int = DEFAULT_SEED
     # data and outputs
     data_dir: str = "data/processed/finetune"
-    output_dir: str = "outputs/finetune"
+    checkpoint_dir: str = "outputs/finetune"
+    """Persistent storage for checkpoints and the adapter (Drive / Kaggle output)."""
+    runs_dir: str = "ml/finetune/runs"
+    """Where the run's JSON log goes (committed; no weights)."""
+    run_id: str = ""
+    """Empty: a new id from the time and LoRA rank. Reuse an id to resume that run."""
+    save_steps: int = 50
+    save_total_limit: int = 3
 
     @property
     def effective_batch_size(self) -> int:
         return self.per_device_train_batch_size * self.gradient_accumulation_steps
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self) | {"effective_batch_size": self.effective_batch_size}
+
+
+def make_run_id(config: TrainConfig, now: datetime | None = None) -> str:
+    """``config.run_id``, or ``<UTC time>-qlora-r<rank>`` for a new run."""
+    if config.run_id:
+        return config.run_id
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-qlora-r{config.lora_r}"
 
 
 def torch_dtype(name: str) -> Any:
@@ -236,14 +266,127 @@ def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
         num_train_epochs=config.num_train_epochs,
         max_steps=config.max_steps,
         logging_steps=config.logging_steps,
+        save_strategy="steps",
+        save_steps=config.save_steps,
+        save_total_limit=config.save_total_limit,
         fp16=config.load_in_4bit and config.compute_dtype == "float16",
         bf16=config.load_in_4bit and config.compute_dtype == "bfloat16",
         seed=config.seed,
         report_to=[],
-        save_strategy="no",
     )
     kwargs.update(warmup_arguments(names, config.warmup_ratio))
     return TrainingArguments(**kwargs)
+
+
+# --------------------------------------------------------------------------- run log
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def dataset_summary(data_dir: Path) -> dict[str, Any]:
+    """Examples per split and source, and each file's hash: which data a run saw."""
+    summary: dict[str, Any] = {"dir": str(data_dir), "splits": {}}
+    for path in sorted(data_dir.glob("*.jsonl")):
+        if path.name.endswith(".chat.jsonl"):
+            continue
+        sources: dict[str, int] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                source = json.loads(line)["source"]
+                sources[source] = sources.get(source, 0) + 1
+        summary["splits"][path.stem] = {
+            "examples": sum(sources.values()),
+            "by_source": sources,
+            "sha256": sha256(path),
+        }
+    return summary
+
+
+def _version(module: str) -> str | None:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(module)
+    except PackageNotFoundError:
+        return None
+
+
+def environment() -> dict[str, Any]:
+    """Library versions, the GPU and the git commit the run used."""
+    env: dict[str, Any] = {
+        "python": platform.python_version(),
+        **{m: _version(m) for m in ("torch", "transformers", "peft", "bitsandbytes")},
+    }
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            env["gpu"] = {"name": props.name, "memory_gib": round(props.total_memory / 2**30, 1)}
+        else:
+            env["gpu"] = None
+    except ImportError:
+        env["gpu"] = None
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        )
+        env["git_commit"] = commit.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        env["git_commit"] = None
+    return env
+
+
+class RunLog:
+    """``runs/<run_id>/run.json`` and ``metrics.jsonl`` for one run."""
+
+    def __init__(self, runs_dir: Path, run_id: str) -> None:
+        self.dir = runs_dir / run_id
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.run_path = self.dir / "run.json"
+        self.metrics_path = self.dir / "metrics.jsonl"
+
+    def read(self) -> dict[str, Any]:
+        if self.run_path.is_file():
+            data: dict[str, Any] = json.loads(self.run_path.read_text(encoding="utf-8"))
+            return data
+        return {}
+
+    def update(self, **values: Any) -> None:
+        run = self.read() | values
+        self.run_path.write_text(json.dumps(run, indent=2, default=str) + "\n", encoding="utf-8")
+
+    def log(self, step: int, metrics: Mapping[str, Any]) -> None:
+        with self.metrics_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"step": step, **metrics}, default=str) + "\n")
+
+
+def log_callback(run_log: RunLog) -> Any:
+    """A Trainer callback that appends every logged metric dict to ``metrics.jsonl``."""
+    from transformers import TrainerCallback
+
+    class _Log(TrainerCallback):
+        def on_log(self, args: Any, state: Any, control: Any, logs: Any = None, **kw: Any) -> None:
+            if logs:
+                run_log.log(state.global_step, logs)
+
+    return _Log()
+
+
+def last_checkpoint(output_dir: Path) -> str | None:
+    """The newest ``checkpoint-<step>`` folder to resume from, if any."""
+    if not output_dir.is_dir():
+        return None
+    from transformers.trainer_utils import get_last_checkpoint
+
+    found: str | None = get_last_checkpoint(str(output_dir))
+    return found
 
 
 def build_trainer(config: TrainConfig, output_dir: Path) -> Any:
@@ -267,13 +410,41 @@ def build_trainer(config: TrainConfig, output_dir: Path) -> Any:
 
 
 def train(config: TrainConfig) -> Path:
-    """Train, then save the adapter (not the base weights) to ``output_dir/adapter``."""
-    output_dir = Path(config.output_dir)
+    """Train (resuming from the run's last checkpoint if there is one), save the adapter to
+    ``checkpoint_dir/<run_id>/adapter`` and log the run. Returns the adapter folder."""
+    run_id = make_run_id(config)
+    output_dir = Path(config.checkpoint_dir) / run_id
+    run_log = RunLog(Path(config.runs_dir), run_id)
+    resume = last_checkpoint(output_dir)
+    run_log.update(
+        run_id=run_id,
+        status="running",
+        started_at=run_log.read().get("started_at") or datetime.now(UTC).isoformat(),
+        resumed_from=resume,
+        config=config.to_json(),
+        environment=environment(),
+        dataset=dataset_summary(Path(config.data_dir)),
+        checkpoint_dir=str(output_dir),
+    )
     trainer = build_trainer(config, output_dir)
-    trainer.train()
+    trainer.add_callback(log_callback(run_log))
+    start = time.perf_counter()
+    try:
+        result = trainer.train(resume_from_checkpoint=resume)
+    except BaseException:
+        run_log.update(status="failed")
+        raise
     adapter = output_dir / "adapter"
     trainer.model.save_pretrained(adapter)
-    logger.info("adapter saved to %s", adapter)
+    run_log.update(
+        status="finished",
+        finished_at=datetime.now(UTC).isoformat(),
+        train_seconds=round(time.perf_counter() - start, 1),
+        global_step=result.global_step,
+        metrics=result.metrics,
+        adapter=str(adapter),
+    )
+    logger.info("adapter saved to %s; run logged to %s", adapter, run_log.dir)
     return adapter
 
 
@@ -284,7 +455,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
     parser.add_argument("--data-dir", default=TrainConfig.data_dir)
-    parser.add_argument("--output-dir", default=TrainConfig.output_dir)
+    parser.add_argument("--checkpoint-dir", default=TrainConfig.checkpoint_dir)
+    parser.add_argument("--runs-dir", default=TrainConfig.runs_dir)
+    parser.add_argument("--run-id", default="", help="reuse an id to resume that run")
     parser.add_argument("--max-steps", type=int, default=-1, help="e.g. 10 for a dry run")
     return parser
 
@@ -295,7 +468,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = TrainConfig(
         base_model=args.base_model,
         data_dir=args.data_dir,
-        output_dir=args.output_dir,
+        checkpoint_dir=args.checkpoint_dir,
+        runs_dir=args.runs_dir,
+        run_id=args.run_id,
         max_steps=args.max_steps,
     )
     train(config)
