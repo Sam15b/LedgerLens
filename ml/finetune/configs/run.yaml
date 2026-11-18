@@ -37,5 +37,11 @@ data_dir: data/processed/finetune
 checkpoint_dir: outputs/finetune  # Colab: /content/drive/MyDrive/ledgerlens/finetune
 runs_dir: ml/finetune/runs
 run_id: ""                      # empty: new id; reuse an id to resume that run
-save_steps: 50
+save_steps: 50                  # a multiple of eval_steps: the best checkpoint is kept
 save_total_limit: 3
+
+# validation loss every eval_steps; stop after `patience` evaluations without improvement
+eval_steps: 50
+early_stopping_patience: 3
+early_stopping_threshold: 0.0
+max_eval_samples: 0             # 0: the whole val split (130 examples)

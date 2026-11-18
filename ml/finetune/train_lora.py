@@ -21,6 +21,10 @@ Hyperparameters come from the YAML config (every key a :class:`TrainConfig` fiel
 Free GPU sessions end without warning, so checkpoints go to persistent storage
 (``--checkpoint-dir``: a mounted Google Drive folder on Colab, ``/kaggle/working`` on
 Kaggle) under the run id, and a rerun with the same ``--run-id`` resumes from the last one.
+The validation split is scored every ``eval_steps``; training stops early when the
+validation loss has not improved for ``early_stopping_patience`` evaluations, and the
+checkpoint with the lowest validation loss is the adapter that gets saved.
+
 Each run is logged to ``ml/finetune/runs/<run_id>/``: ``run.json`` (config, environment,
 dataset files and hashes, final metrics) and ``metrics.jsonl`` (every logged step). Those
 are small JSON files for git; adapter weights stay in the checkpoint folder.
@@ -108,6 +112,15 @@ class TrainConfig:
     """Empty: a new id from the time and LoRA rank. Reuse an id to resume that run."""
     save_steps: int = 50
     save_total_limit: int = 3
+    # validation and early stopping
+    eval_steps: int = 50
+    """Score the validation split every this many steps (``save_steps`` must be a multiple:
+    the best checkpoint is kept)."""
+    early_stopping_patience: int = 3
+    """Stop after this many evaluations without a lower validation loss (0: never)."""
+    early_stopping_threshold: float = 0.0
+    max_eval_samples: int = 0
+    """Validate on the first N val examples only (0: all of them)."""
 
     @property
     def effective_batch_size(self) -> int:
@@ -343,6 +356,15 @@ def warmup_arguments(fields: set[str], ratio: float) -> dict[str, float]:
     return {"warmup_ratio": ratio} if "warmup_ratio" in fields else {"warmup_steps": ratio}
 
 
+def check_steps(config: TrainConfig) -> None:
+    """Keeping the best checkpoint needs a checkpoint at every evaluation it might pick."""
+    if config.eval_steps < 1 or config.save_steps % config.eval_steps:
+        raise ValueError(
+            f"save_steps ({config.save_steps}) must be a multiple of eval_steps "
+            f"({config.eval_steps})"
+        )
+
+
 def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
     import dataclasses
 
@@ -371,7 +393,15 @@ def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
         optim=config.optim if capability is not None else "adamw_torch",
         seed=config.seed,
         report_to=[],
+        eval_steps=config.eval_steps,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
+    check_steps(config)
+    # renamed from evaluation_strategy in transformers 4.41
+    strategy = "eval_strategy" if "eval_strategy" in names else "evaluation_strategy"
+    kwargs[strategy] = "steps"
     kwargs.update(warmup_arguments(names, config.warmup_ratio))
     return TrainingArguments(**kwargs)
 
@@ -477,6 +507,48 @@ def log_callback(run_log: RunLog) -> Any:
     return _Log()
 
 
+def val_loss_summary(log_history: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """First, best and last validation loss from a Trainer's ``log_history`` and whether
+    it went down (``None`` before the first evaluation)."""
+    points = [
+        (int(e.get("step", 0)), float(e["eval_loss"])) for e in log_history if "eval_loss" in e
+    ]
+    if not points:
+        return None
+    best_step, best = min(points, key=lambda point: point[1])
+    return {
+        "evaluations": len(points),
+        "first": points[0][1],
+        "best": best,
+        "best_step": best_step,
+        "last": points[-1][1],
+        "went_down": best < points[0][1],
+    }
+
+
+def val_loss_callback(run_log: RunLog) -> Any:
+    """Writes the validation-loss summary to ``run.json`` after every evaluation, so a
+    session that times out still leaves it behind."""
+    from transformers import TrainerCallback
+
+    class _ValLoss(TrainerCallback):
+        def on_evaluate(
+            self, args: Any, state: Any, control: Any, metrics: Any = None, **kw: Any
+        ) -> None:
+            summary = val_loss_summary(state.log_history)
+            if summary is not None:
+                run_log.update(val_loss=summary)
+                logger.info(
+                    "step %d: val loss %.4f (best %.4f at step %d)",
+                    state.global_step,
+                    summary["last"],
+                    summary["best"],
+                    summary["best_step"],
+                )
+
+    return _ValLoss()
+
+
 def last_checkpoint(output_dir: Path) -> str | None:
     """The newest ``checkpoint-<step>`` folder to resume from, if any."""
     if not output_dir.is_dir():
@@ -495,15 +567,29 @@ def build_trainer(config: TrainConfig, output_dir: Path) -> Any:
     tokenizer = load_tokenizer(config)
     data = Path(config.data_dir)
     train = tokenize(load_examples(data / "train.jsonl"), tokenizer, max_length=config.max_length)
-    val = tokenize(load_examples(data / "val.jsonl"), tokenizer, max_length=config.max_length)
+    val_examples = load_examples(data / "val.jsonl")
+    if config.max_eval_samples:
+        val_examples = val_examples[: config.max_eval_samples]
+    val = tokenize(val_examples, tokenizer, max_length=config.max_length)
     model = get_peft_model(load_base_model(config), lora_config(config))
     model.print_trainable_parameters()
+    callbacks: list[Any] = []
+    if config.early_stopping_patience > 0:
+        from transformers import EarlyStoppingCallback
+
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=config.early_stopping_patience,
+                early_stopping_threshold=config.early_stopping_threshold,
+            )
+        )
     return Trainer(
         model=model,
         args=training_arguments(config, output_dir),
         train_dataset=train,
         eval_dataset=val,
         data_collator=SFTCollator(tokenizer.pad_token_id),
+        callbacks=callbacks,
     )
 
 
@@ -527,6 +613,7 @@ def train(config: TrainConfig) -> Path:
     )
     trainer = build_trainer(config, output_dir)
     trainer.add_callback(log_callback(run_log))
+    trainer.add_callback(val_loss_callback(run_log))
     start = time.perf_counter()
     try:
         result = trainer.train(resume_from_checkpoint=resume)
@@ -540,10 +627,13 @@ def train(config: TrainConfig) -> Path:
         finished_at=datetime.now(UTC).isoformat(),
         train_seconds=round(time.perf_counter() - start, 1),
         global_step=result.global_step,
+        stopped_early=trainer.state.global_step < trainer.state.max_steps,
         metrics=result.metrics,
+        val_loss=val_loss_summary(trainer.state.log_history),
+        best_checkpoint=trainer.state.best_model_checkpoint,
         adapter=str(adapter),
     )
-    logger.info("adapter saved to %s; run logged to %s", adapter, run_log.dir)
+    logger.info("adapter (best val loss) saved to %s; run logged to %s", adapter, run_log.dir)
     return adapter
 
 
