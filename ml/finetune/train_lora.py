@@ -10,7 +10,10 @@ adapters (r=16, alpha=32, dropout 0.05) go on every attention and MLP projection
 train. The data is the output of ``prepare_dataset.py``, tokenized with the Llama 3 chat
 template and the loss on the response tokens only::
 
-    python -m ml.finetune.train_lora --data-dir data/processed/finetune --max-steps 10
+    python -m ml.finetune.train_lora --config ml/finetune/configs/run.yaml --set max_steps=10
+
+Hyperparameters come from the YAML config (every key a :class:`TrainConfig` field), and
+``--set key=value`` overrides any of them for one run.
 
 Free GPU sessions end without warning, so checkpoints go to persistent storage
 (``--checkpoint-dir``: a mounted Google Drive folder on Colab, ``/kaggle/working`` on
@@ -30,10 +33,12 @@ import platform
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from ml.finetune.prepare_dataset import (
     DEFAULT_BASE_MODEL,
@@ -103,6 +108,61 @@ class TrainConfig:
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self) | {"effective_batch_size": self.effective_batch_size}
+
+
+DEFAULT_CONFIG = Path(__file__).parent / "configs" / "run.yaml"
+
+
+def _coerce(name: str, current: Any, value: Any) -> Any:
+    """``value`` (from YAML or ``--set``) as the type of the field's default."""
+    if isinstance(value, str) and not isinstance(current, str):
+        value = yaml.safe_load(value)  # "10" -> 10, "true" -> True, "[a, b]" -> [a, b]
+    if isinstance(current, bool):
+        if not isinstance(value, bool):
+            raise ValueError(f"{name}: expected true or false, got {value!r}")
+        return value
+    if isinstance(current, int | float) and not isinstance(value, bool):
+        try:
+            return type(current)(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}: expected a number, got {value!r}") from exc
+    if isinstance(current, list):
+        if not isinstance(value, list):
+            raise ValueError(f"{name}: expected a list, got {value!r}")
+        return [str(item) for item in value]
+    return str(value) if isinstance(current, str) and value is not None else value
+
+
+def parse_overrides(pairs: Sequence[str]) -> dict[str, str]:
+    """``["max_steps=10", "run_id=run-1"]`` -> ``{"max_steps": "10", "run_id": "run-1"}``."""
+    overrides = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"--set expects key=value, got {pair!r}")
+        overrides[key.strip()] = value.strip()
+    return overrides
+
+
+def load_train_config(
+    path: Path | None = None, overrides: Mapping[str, Any] | None = None
+) -> TrainConfig:
+    """:class:`TrainConfig` from a YAML file (default: ``configs/run.yaml``), then
+    ``overrides``. Unknown keys are an error, so a typo cannot silently fall back to a
+    default."""
+    path = path or DEFAULT_CONFIG
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} must hold a mapping of TrainConfig fields")
+    values = {**raw, **(overrides or {})}
+    defaults = TrainConfig()
+    known = {f.name for f in fields(TrainConfig)}
+    unknown = sorted(set(values) - known)
+    if unknown:
+        raise ValueError(f"unknown TrainConfig field(s): {', '.join(unknown)}")
+    return TrainConfig(
+        **{name: _coerce(name, getattr(defaults, name), v) for name, v in values.items()}
+    )
 
 
 def make_run_id(config: TrainConfig, now: datetime | None = None) -> str:
@@ -453,26 +513,28 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m ml.finetune.train_lora",
         description="QLoRA fine-tuning of the extraction model.",
     )
-    parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
-    parser.add_argument("--data-dir", default=TrainConfig.data_dir)
-    parser.add_argument("--checkpoint-dir", default=TrainConfig.checkpoint_dir)
-    parser.add_argument("--runs-dir", default=TrainConfig.runs_dir)
-    parser.add_argument("--run-id", default="", help="reuse an id to resume that run")
-    parser.add_argument("--max-steps", type=int, default=-1, help="e.g. 10 for a dry run")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="run YAML")
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a config field, e.g. --set max_steps=10 (repeatable)",
+    )
+    parser.add_argument(
+        "--print-config", action="store_true", help="print the resolved config and exit"
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    config = TrainConfig(
-        base_model=args.base_model,
-        data_dir=args.data_dir,
-        checkpoint_dir=args.checkpoint_dir,
-        runs_dir=args.runs_dir,
-        run_id=args.run_id,
-        max_steps=args.max_steps,
-    )
+    config = load_train_config(args.config, parse_overrides(args.overrides))
+    if args.print_config:
+        print(json.dumps(config.to_json(), indent=2))
+        return 0
     train(config)
     return 0
 

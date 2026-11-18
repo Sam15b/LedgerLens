@@ -1,0 +1,37 @@
+# QLoRA run config for ml/finetune/train_lora.py (docs/layers/06-fine-tuning.md).
+# Every key is a TrainConfig field; override any of them on the command line with
+# --set key=value (e.g. --set max_steps=10 --set checkpoint_dir=/content/drive/MyDrive/ll).
+
+base_model: meta-llama/Meta-Llama-3-8B-Instruct   # gated: accept the license on Hugging Face
+
+# 4-bit NF4 base (QLoRA): fits a 16 GB T4 / P100
+load_in_4bit: true
+quant_type: nf4
+double_quant: true
+compute_dtype: float16          # T4 has no bfloat16; use bfloat16 on A100 / L4
+
+# LoRA on every attention and MLP projection
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+# optimisation: effective batch 16 = micro-batch 2 x gradient accumulation 8
+learning_rate: 2.0e-4
+lr_scheduler: cosine
+warmup_ratio: 0.03
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+num_train_epochs: 3
+max_steps: -1                   # set 10 for a dry run
+max_length: 2048
+logging_steps: 10
+seed: 13
+
+# data and outputs
+data_dir: data/processed/finetune
+checkpoint_dir: outputs/finetune  # Colab: /content/drive/MyDrive/ledgerlens/finetune
+runs_dir: ml/finetune/runs
+run_id: ""                      # empty: new id; reuse an id to resume that run
+save_steps: 50
+save_total_limit: 3
