@@ -29,6 +29,11 @@ Targets use the field names of :mod:`ledgerlens.core.schemas` (``Receipt``), so 
 fine-tuned model's output drops into the same validation as the API extractor's. Dates are
 ISO, amounts plain decimal strings with two places (``"16500.00"``); a field the source does
 not label is ``null`` and still listed, so the model learns to say "not shown".
+
+Splits are by source document (:func:`assign_splits`), and the output is written twice per
+split: ``<split>.jsonl`` with the fields above and ``<split>.chat.jsonl`` with the Llama 3
+chat ``messages`` that ``train_lora.py`` tokenizes with :func:`encode` -- the loss falls on
+the response tokens only.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -497,16 +502,107 @@ def collect(
     return assign_splits(examples, seed=seed)
 
 
-def write_jsonl(examples: Iterable[Example], out: Path) -> dict[str, int]:
-    """``out/<split>.jsonl`` for each split; returns the count per split."""
-    out.mkdir(parents=True, exist_ok=True)
-    by_split: dict[str, list[str]] = {}
+# --------------------------------------------------------------------------- chat format
+
+DEFAULT_BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+DEFAULT_MAX_LENGTH = 2048
+IGNORE_INDEX = -100
+"""Label for tokens the loss skips (PyTorch cross-entropy's ``ignore_index``)."""
+SYSTEM_PROMPT = (
+    "You extract structured fields from business documents. Reply with one JSON object and "
+    "nothing else."
+)
+
+
+def chat_messages(example: Example, *, with_answer: bool = True) -> list[dict[str, str]]:
+    """The example as a chat: system rules, the task and document as the user turn, the
+    JSON as the assistant turn (left out for generation)."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"{example.instruction}\n\nDocument text:\n{example.input}"},
+    ]
+    if with_answer:
+        messages.append({"role": "assistant", "content": example.output})
+    return messages
+
+
+class ChatTokenizer(Protocol):
+    """The part of a Hugging Face tokenizer used here (Llama 3's carries its template)."""
+
+    def apply_chat_template(
+        self,
+        conversation: list[dict[str, str]],
+        *,
+        tokenize: bool = ...,
+        add_generation_prompt: bool = ...,
+    ) -> Any: ...
+
+
+def _ids(tokens: Any) -> list[int]:
+    """Token ids from ``apply_chat_template``, which returns a list or (newer releases) a
+    mapping with ``input_ids``."""
+    if isinstance(tokens, Mapping):
+        tokens = tokens["input_ids"]
+    if tokens and isinstance(tokens[0], list):  # a batch of one
+        tokens = tokens[0]
+    return [int(t) for t in tokens]
+
+
+def encode(
+    example: Example, tokenizer: ChatTokenizer, *, max_length: int = DEFAULT_MAX_LENGTH
+) -> dict[str, list[int]] | None:
+    """Token ids with the loss on the response only: every prompt token (system, user and
+    the assistant header) is labelled :data:`IGNORE_INDEX`, the JSON and the end-of-turn
+    token keep their ids. ``None`` if the chat is longer than ``max_length``: cutting it
+    would cut the answer the model is meant to learn."""
+    prompt = _ids(
+        tokenizer.apply_chat_template(
+            chat_messages(example, with_answer=False), tokenize=True, add_generation_prompt=True
+        )
+    )
+    full = _ids(
+        tokenizer.apply_chat_template(
+            chat_messages(example), tokenize=True, add_generation_prompt=False
+        )
+    )
+    if full[: len(prompt)] != prompt:
+        raise ValueError("the chat template does not extend the generation prompt")
+    if len(full) > max_length:
+        return None
+    labels = [IGNORE_INDEX] * len(prompt) + full[len(prompt) :]
+    return {"input_ids": full, "attention_mask": [1] * len(full), "labels": labels}
+
+
+def fit_length(
+    examples: Sequence[Example], tokenizer: ChatTokenizer, *, max_length: int
+) -> tuple[list[Example], list[str]]:
+    """``examples`` that fit ``max_length`` tokens, and the ids of those that do not."""
+    kept, dropped = [], []
     for example in examples:
-        line = json.dumps(example.to_json(), ensure_ascii=False)
-        by_split.setdefault(example.split, []).append(line)
-    for split, lines in by_split.items():
-        (out / f"{split}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {split: len(lines) for split, lines in sorted(by_split.items())}
+        if encode(example, tokenizer, max_length=max_length) is None:
+            dropped.append(example.doc_id)
+        else:
+            kept.append(example)
+    return kept, dropped
+
+
+def write_jsonl(examples: Iterable[Example], out: Path) -> dict[str, int]:
+    """For each split, ``out/<split>.jsonl`` (instruction / input / output fields) and
+    ``out/<split>.chat.jsonl`` (``messages``, what the trainer reads). Returns the count
+    per split."""
+    out.mkdir(parents=True, exist_ok=True)
+    by_split: dict[str, list[Example]] = {}
+    for example in examples:
+        by_split.setdefault(example.split, []).append(example)
+    for split, items in by_split.items():
+        plain = [json.dumps(e.to_json(), ensure_ascii=False) for e in items]
+        chats = [
+            json.dumps({"id": e.doc_id, "messages": chat_messages(e)}, ensure_ascii=False)
+            for e in items
+        ]
+        (out / f"{split}.jsonl").write_text("\n".join(plain) + "\n", encoding="utf-8")
+        (out / f"{split}.chat.jsonl").write_text("\n".join(chats) + "\n", encoding="utf-8")
+    return {split: len(items) for split, items in sorted(by_split.items())}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -525,6 +621,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--out", type=Path, default=Path("data/processed/finetune"))
+    parser.add_argument(
+        "--tokenizer",
+        default=None,
+        help=f"drop examples longer than --max-length with this tokenizer's chat template "
+        f"(e.g. {DEFAULT_BASE_MODEL}; gated: accept the license and log in first)",
+    )
+    parser.add_argument("--max-length", type=int, default=DEFAULT_MAX_LENGTH)
     return parser
 
 
@@ -542,6 +645,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         for problem in problems[:20]:
             logger.error("leak: %s", problem)
         return 1
+    if args.tokenizer:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        examples, too_long = fit_length(examples, tokenizer, max_length=args.max_length)
+        if too_long:
+            logger.warning("dropped %d examples over %d tokens", len(too_long), args.max_length)
     counts = write_jsonl(examples, args.out)
     sources: dict[str, dict[str, int]] = {}
     for example in examples:
