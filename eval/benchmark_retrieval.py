@@ -339,12 +339,18 @@ def run_benchmark(
 
 
 def build_retrievers(
-    variants: Sequence[str], *, namespace: str | None = None, llm: LLMClient | None = None
+    variants: Sequence[str],
+    *,
+    namespace: str | None = None,
+    llm: LLMClient | None = None,
+    exact_hybrid: bool = False,
 ) -> dict[str, Retriever]:
     """The live retrievers (Pinecone, Postgres, Neo4j, models) for ``R1``..``R5``, sharing
     one embedder, reranker, analyzer and driver, sized by ``configs/`` (rerank candidates:
     ``pinecone.query_top_k``; graph: ``retrieval.graph``). R5 needs an LLM
-    (``models.yaml``)."""
+    (``models.yaml``). ``exact_hybrid`` scores the hybrid query client-side
+    (:class:`eval.tune_retrieval.ExactHybridStore`), for Pinecone Local, which ignores
+    sparse vectors."""
     from ledgerlens.core.config import get_config
     from ledgerlens.ingestion.embedding import BM25Encoder, DenseEmbedder
     from ledgerlens.retrieval.analyze import QueryAnalyzer
@@ -357,6 +363,7 @@ def build_retrievers(
         HybridRetriever,
         PostgresChunkTexts,
         RerankRetriever,
+        VectorIndex,
     )
     from ledgerlens.storage.neo4j.driver import get_driver
     from ledgerlens.storage.pinecone_store import PineconeStore
@@ -364,9 +371,19 @@ def build_retrievers(
     unknown = [v for v in variants if v not in VARIANTS]
     if unknown:
         raise ValueError(f"unknown variants {unknown}; choose from {', '.join(VARIANTS)}")
-    store = PineconeStore.from_settings(namespace=namespace)
+    store: VectorIndex = PineconeStore.from_settings(namespace=namespace)
     embedder = DenseEmbedder()
     texts = PostgresChunkTexts()
+    if exact_hybrid:
+        from eval.tune_retrieval import BM25Documents, ExactHybridStore
+
+        pinecone = get_config().pinecone
+        store = ExactHybridStore(
+            store,
+            BM25Documents(BM25Encoder.load(), texts),
+            alpha=pinecone.hybrid_alpha,
+            top_k=pinecone.query_top_k,
+        )
     r1 = DenseRetriever(store, embedder, texts=texts)
     r2 = HybridRetriever(store, embedder, BM25Encoder.load(), texts=texts)
     config = get_config()
@@ -633,6 +650,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also answer every question with the LLM (paid calls) and score the answers",
     )
     parser.add_argument("--answer-model", default="smart", help="model alias for answers")
+    parser.add_argument(
+        "--exact-hybrid",
+        action="store_true",
+        help="score R2's hybrid query client-side (Pinecone Local ignores sparse vectors)",
+    )
     return parser
 
 
@@ -642,7 +664,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     questions = load_golden_set(args.golden)[: args.limit]
     meter = CostMeter()
     llm = metered(LLMClient(), meter) if args.answers or "R5" in args.variants else None
-    retrievers = build_retrievers(args.variants, namespace=args.namespace, llm=llm)
+    retrievers = build_retrievers(
+        args.variants, namespace=args.namespace, llm=llm, exact_hybrid=args.exact_hybrid
+    )
     answerer = llm_answerer(llm, model=args.answer_model) if args.answers and llm else None
     filters = analyzer_filters() if args.filters == "analyzer" else None
 
@@ -671,6 +695,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "golden set": f"`{args.golden}` ({len(questions)} questions)",
         "k": str(args.k),
         "answers": f"`{args.answer_model}` alias" if args.answers else "not generated",
+        "hybrid scoring": "exact, client-side (Pinecone Local ignores sparse vectors)"
+        if args.exact_hybrid
+        else "by the index",
         "filters": "query analyzer (same for every variant)"
         if args.filters == "analyzer"
         else "none",
