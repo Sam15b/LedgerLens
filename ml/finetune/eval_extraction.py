@@ -23,6 +23,11 @@ keys it wants; the model answers with one JSON object.
   item: an item matches a gold item with the same description and amount.
 * **JSON validity** -- the reply is one JSON object with exactly the requested keys and
   well-formed values (amounts and dates that parse, line items as objects with an amount).
+* **Cost per document** -- wall-clock latency (p50 / p95), prompt and completion tokens,
+  and USD per 1k documents (router price table for API models; 0 for local ones).
+
+``--report`` writes the comparison table of docs/layers/06-fine-tuning.md as markdown,
+``--out`` one JSON line per model and document.
 """
 
 from __future__ import annotations
@@ -30,9 +35,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
+import sys
+import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +65,12 @@ class Prediction:
     error: str | None = None
     json_output: bool = True
     """``False`` for a model that returns fields directly (rules): JSON validity is n/a."""
+    seconds: float = 0.0
+    """Wall-clock time for the document (set by :func:`evaluate`)."""
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = 0.0
+    """``None``: an API model the price table does not know."""
 
 
 Predictor = Callable[[Example], Prediction]
@@ -138,10 +153,35 @@ class ModelScore:
     failures: Counter[str] = field(default_factory=Counter)
     """Why replies were invalid, by reason."""
     json_output: bool = True
+    seconds: list[float] = field(default_factory=list)
+    tokens_in: list[int] = field(default_factory=list)
+    tokens_out: list[int] = field(default_factory=list)
+    costs: list[float | None] = field(default_factory=list)
+
+    @property
+    def p50_ms(self) -> float:
+        return percentile(self.seconds, 50) * 1000
+
+    @property
+    def p95_ms(self) -> float:
+        return percentile(self.seconds, 95) * 1000
+
+    @property
+    def usd_per_1k(self) -> float | None:
+        """USD per 1,000 documents (``None`` if any call had no known price)."""
+        if not self.costs or any(cost is None for cost in self.costs):
+            return None
+        return sum(cost or 0.0 for cost in self.costs) / len(self.costs) * 1000
 
     def add(self, example: Example, prediction: Prediction) -> None:
         keys = list(example.target)
         self.json_output = self.json_output and prediction.json_output
+        self.seconds.append(prediction.seconds)
+        self.costs.append(prediction.cost_usd)
+        if prediction.tokens_in is not None:
+            self.tokens_in.append(prediction.tokens_in)
+        if prediction.tokens_out is not None:
+            self.tokens_out.append(prediction.tokens_out)
         problems = json_problems(prediction.fields, keys) if prediction.json_output else []
         for problem in problems:
             self.failures[problem.split(":")[0]] += 1
@@ -159,6 +199,20 @@ class ModelScore:
                 total.fn += items.fn
 
 
+def percentile(values: Sequence[float], pct: float) -> float:
+    """Nearest-rank percentile (0 for no values)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = max(1, math.ceil(pct / 100 * len(ordered)))
+    return ordered[min(rank, len(ordered)) - 1]
+
+
+def mean(values: Iterable[float]) -> float | None:
+    items = list(values)
+    return sum(items) / len(items) if items else None
+
+
 def evaluate(
     examples: Sequence[Example],
     predictor: Predictor,
@@ -170,11 +224,13 @@ def evaluate(
     document (invalid, every gold field missed) instead of stopping the run."""
     score = ModelScore(model)
     for example in examples:
+        start = time.perf_counter()
         try:
             prediction = predictor(example)
         except Exception as exc:  # one bad document must not end the evaluation
             logger.warning("%s failed on %s", model, example.doc_id, exc_info=True)
             prediction = Prediction(None, error=f"{type(exc).__name__}: {exc}")
+        prediction = replace(prediction, seconds=time.perf_counter() - start)
         score.add(example, prediction)
         if on_result is not None:
             on_result(example, prediction)
@@ -215,7 +271,13 @@ def llm_predictor(model: str, client: Any = None) -> Predictor:
     def predict(example: Example) -> Prediction:
         messages = [Message.model_validate(m) for m in chat_messages(example, with_answer=False)]
         response = llm.complete(messages, model=model, temperature=0.0, json_mode=True)
-        return Prediction(parse_json_object(response.text), raw=response.text)
+        return Prediction(
+            parse_json_object(response.text),
+            raw=response.text,
+            tokens_in=response.usage.tokens_in,
+            tokens_out=response.usage.tokens_out,
+            cost_usd=response.cost_usd,
+        )
 
     return predict
 
@@ -226,9 +288,124 @@ def adapter_predictor(extractor: Any) -> Predictor:
 
     def predict(example: Example) -> Prediction:
         generation = extractor.generate(example)
-        return Prediction(generation.fields, raw=generation.text)
+        return Prediction(
+            generation.fields,
+            raw=generation.text,
+            tokens_in=generation.prompt_tokens,
+            tokens_out=generation.completion_tokens,
+        )
 
     return predict
+
+
+# --------------------------------------------------------------------------- report
+
+
+def _cell(value: float | None, fmt: str) -> str:
+    return "n/a" if value is None else format(value, fmt)
+
+
+def _table(header: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    return lines + ["| " + " | ".join(row) + " |" for row in rows]
+
+
+def render_report(scores: Sequence[ModelScore], *, setup: Mapping[str, str]) -> str:
+    """The comparison as markdown: the overall table, F1 by source and by field."""
+    lines = ["# Extraction model comparison", ""]
+    lines += [f"- **{key}:** {value}" for key, value in setup.items()]
+    lines += ["", "## Overall (micro F1 over every field)", ""]
+    lines += _table(
+        [
+            "model",
+            "F1",
+            "precision",
+            "recall",
+            "JSON valid",
+            "$ / 1k docs",
+            "p50 ms",
+            "p95 ms",
+            "tokens in / out",
+        ],
+        [
+            [
+                s.model,
+                f"{s.report.micro.f1:.3f}",
+                f"{s.report.micro.precision:.3f}",
+                f"{s.report.micro.recall:.3f}",
+                f"{s.report.json_validity:.1%}" if s.json_output else "n/a",
+                _cell(s.usd_per_1k, ".2f"),
+                f"{s.p50_ms:,.0f}",
+                f"{s.p95_ms:,.0f}",
+                f"{_cell(mean(s.tokens_in), ',.0f')} / {_cell(mean(s.tokens_out), ',.0f')}",
+            ]
+            for s in scores
+        ],
+    )
+    sources = sorted({source for s in scores for source in s.by_source})
+    lines += ["", "## F1 by source", ""]
+    lines += _table(
+        ["model", *(f"{source} (n={_docs(scores, source)})" for source in sources)],
+        [[s.model, *(_f1(s.by_source.get(source)) for source in sources)] for s in scores],
+    )
+    names = list(dict.fromkeys(name for s in scores for name in s.report.fields))
+    lines += ["", "## F1 by field", ""]
+    lines += _table(
+        ["field", "support", *(s.model for s in scores)],
+        [
+            [
+                name,
+                str(max(s.report.fields[name].support for s in scores if name in s.report.fields)),
+                *(_f1_field(s, name) for s in scores),
+            ]
+            for name in names
+        ],
+    )
+    failures = [s for s in scores if s.failures]
+    if failures:
+        lines += ["", "## Why replies were invalid", ""]
+        for s in failures:
+            reasons = ", ".join(f"{reason} ({n})" for reason, n in s.failures.most_common())
+            lines.append(f"- **{s.model}:** {reasons}")
+    return "\n".join(lines) + "\n"
+
+
+def _docs(scores: Sequence[ModelScore], source: str) -> int:
+    return max(s.by_source[source].documents for s in scores if source in s.by_source)
+
+
+def _f1(report: F1Report | None) -> str:
+    return "n/a" if report is None else f"{report.micro.f1:.3f}"
+
+
+def _f1_field(score: ModelScore, name: str) -> str:
+    found = score.report.fields.get(name)
+    return "n/a" if found is None else f"{found.f1:.3f}"
+
+
+def write_predictions(path: Path, rows: Sequence[tuple[str, Example, Prediction]]) -> None:
+    """One JSON line per model and document: what it said and what it cost."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps(
+            {
+                "model": model,
+                "doc_id": example.doc_id,
+                "source": example.source,
+                "fields": prediction.fields,
+                "raw": prediction.raw,
+                "error": prediction.error,
+                "seconds": round(prediction.seconds, 4),
+                "tokens_in": prediction.tokens_in,
+                "tokens_out": prediction.tokens_out,
+                "cost_usd": prediction.cost_usd,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        for model, example, prediction in rows
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def summary_line(score: ModelScore) -> str:
@@ -256,6 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-4bit", action="store_true", help="load unquantized (CPU tests)")
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--limit", type=int, default=None, help="first N documents only")
+    parser.add_argument("--report", type=Path, default=None, help="markdown comparison")
+    parser.add_argument("--out", type=Path, default=None, help="per-document JSONL")
     return parser
 
 
@@ -283,10 +462,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     examples = load_examples(args.data)[: args.limit]
+    scores, rows = [], []
     for name in [m.strip() for m in args.models.split(",") if m.strip()]:
-        score = evaluate(examples, make_predictor(name, args), name)
+
+        def keep(example: Example, prediction: Prediction, model: str = name) -> None:
+            rows.append((model, example, prediction))
+
+        score = evaluate(examples, make_predictor(name, args), name, on_result=keep)
+        scores.append(score)
         print(summary_line(score))
-        print(json.dumps({field: round(s.f1, 3) for field, s in score.report.fields.items()}))
+    if args.out:
+        write_predictions(args.out, rows)
+    sources = Counter(example.source for example in examples)
+    setup = {
+        "date": date.today().isoformat(),
+        "test set": f"`{args.data.as_posix()}` ({len(examples)} documents: "
+        + ", ".join(f"{n} {source}" for source, n in sorted(sources.items()))
+        + ")",
+        "command": "`python -m ml.finetune.eval_extraction "
+        + " ".join(argv if argv is not None else sys.argv[1:])
+        + "`",
+    }
+    report = render_report(scores, setup=setup)
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(report, encoding="utf-8")
+        print(f"wrote {args.report}")
+    else:
+        print(report)
     return 0
 
 
