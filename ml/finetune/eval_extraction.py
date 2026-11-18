@@ -1,7 +1,16 @@
-"""Score an extraction model on the held-out test set: field F1 and JSON validity.
+"""Score extraction models on the held-out test set: field F1 and JSON validity.
 
-    python -m ml.finetune.eval_extraction --adapter $DRIVE/ledgerlens/finetune/run-1/adapter \\
-        --data data/processed/finetune/test.jsonl
+    python -m ml.finetune.eval_extraction --models rules,smart,base,lora \\
+        --adapter $DRIVE/ledgerlens/finetune/run-1/adapter
+
+Every model goes through the same harness on the same documents:
+
+* ``rules`` -- the Phase 1 rules extractor (:class:`ledgerlens.extraction.rules.RulesExtractor`);
+  it returns fields, not JSON, so it has no JSON-validity score;
+* ``base`` / ``lora`` -- Llama 3 8B Instruct without / with the adapter
+  (:class:`ml.finetune.infer.AdapterExtractor`), on a GPU;
+* any other name -- a model router alias or ``provider/model`` (``smart`` for GPT-4o,
+  ``extractor``, ...), asked with the same chat messages the adapter was trained on.
 
 The test set is ``prepare_dataset.py``'s ``test`` split: the official CORD (and SROIE, when
 downloaded) test documents plus the synthetic invoice test slice. Every example names the
@@ -28,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from eval.extraction_f1 import DATE_FIELDS, F1Report, FieldScore, normalize_value
-from ml.finetune.prepare_dataset import Example
+from ml.finetune.prepare_dataset import Example, chat_messages
 from ml.finetune.train_lora import load_examples
 
 logger = logging.getLogger(__name__)
@@ -45,6 +54,8 @@ class Prediction:
     """The parsed JSON object (``None``: no object in the reply)."""
     raw: str = ""
     error: str | None = None
+    json_output: bool = True
+    """``False`` for a model that returns fields directly (rules): JSON validity is n/a."""
 
 
 Predictor = Callable[[Example], Prediction]
@@ -126,10 +137,12 @@ class ModelScore:
     by_source: dict[str, F1Report] = field(default_factory=dict)
     failures: Counter[str] = field(default_factory=Counter)
     """Why replies were invalid, by reason."""
+    json_output: bool = True
 
     def add(self, example: Example, prediction: Prediction) -> None:
         keys = list(example.target)
-        problems = json_problems(prediction.fields, keys)
+        self.json_output = self.json_output and prediction.json_output
+        problems = json_problems(prediction.fields, keys) if prediction.json_output else []
         for problem in problems:
             self.failures[problem.split(":")[0]] += 1
         for report in (self.report, self.by_source.setdefault(example.source, F1Report())):
@@ -171,6 +184,42 @@ def evaluate(
 # --------------------------------------------------------------------------- models
 
 
+def _plain(value: Any) -> Any:
+    """Decimals, dates and models from the rules extractor as JSON values."""
+    return json.loads(json.dumps(value, default=str))
+
+
+def rules_predictor() -> Predictor:
+    """The rules extractor, its fields cut to the keys each example asks for."""
+    from ledgerlens.extraction.rules import RulesExtractor
+
+    extractor = RulesExtractor()
+
+    def predict(example: Example) -> Prediction:
+        result = extractor.extract(example.input, example.doc_type)
+        found = _plain(result.fields)
+        return Prediction({k: found.get(k) for k in example.target}, json_output=False)
+
+    return predict
+
+
+def llm_predictor(model: str, client: Any = None) -> Predictor:
+    """A model behind the router (an alias like ``smart`` or ``provider/model``), prompted
+    with the adapter's chat messages, in JSON mode at temperature 0."""
+    from ledgerlens.llm.router import LLMClient
+    from ledgerlens.llm.types import Message
+    from ml.finetune.infer import parse_json_object
+
+    llm = client or LLMClient()
+
+    def predict(example: Example) -> Prediction:
+        messages = [Message.model_validate(m) for m in chat_messages(example, with_answer=False)]
+        response = llm.complete(messages, model=model, temperature=0.0, json_mode=True)
+        return Prediction(parse_json_object(response.text), raw=response.text)
+
+    return predict
+
+
 def adapter_predictor(extractor: Any) -> Predictor:
     """Predictions from an :class:`~ml.finetune.infer.AdapterExtractor`, prompted exactly
     as in training."""
@@ -184,9 +233,10 @@ def adapter_predictor(extractor: Any) -> Predictor:
 
 def summary_line(score: ModelScore) -> str:
     micro = score.report.micro
+    valid = f"{score.report.json_validity:.1%}" if score.json_output else "n/a"
     return (
         f"{score.model}: F1 {micro.f1:.3f} (P {micro.precision:.3f} R {micro.recall:.3f}), "
-        f"JSON valid {score.report.json_validity:.1%} over {score.report.documents} documents"
+        f"JSON valid {valid} over {score.report.documents} documents"
     )
 
 
@@ -196,7 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Field F1 and JSON validity of an extraction model on the test split.",
     )
     parser.add_argument("--data", type=Path, default=Path("data/processed/finetune/test.jsonl"))
-    parser.add_argument("--adapter", required=True, help="LoRA adapter folder")
+    parser.add_argument(
+        "--models",
+        default="rules",
+        help="comma-separated: rules, base, lora, or a router alias / provider/model",
+    )
+    parser.add_argument("--adapter", default=None, help="LoRA adapter folder (for lora)")
     parser.add_argument("--base-model", default=None)
     parser.add_argument("--no-4bit", action="store_true", help="load unquantized (CPU tests)")
     parser.add_argument("--dtype", default="float16")
@@ -204,19 +259,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    from ml.finetune.infer import AdapterExtractor
+def make_predictor(name: str, args: argparse.Namespace) -> Predictor:
+    """The predictor for one ``--models`` entry."""
+    if name == "rules":
+        return rules_predictor()
+    if name in {"base", "lora"}:
+        from ml.finetune.infer import AdapterExtractor
 
+        if name == "lora" and not args.adapter:
+            raise SystemExit("--models lora needs --adapter")
+        options = {"base_model": args.base_model} if args.base_model else {}
+        extractor = AdapterExtractor(
+            args.adapter if name == "lora" else None,
+            load_in_4bit=not args.no_4bit,
+            compute_dtype=args.dtype,
+            **options,
+        )
+        return adapter_predictor(extractor)
+    return llm_predictor(name)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     examples = load_examples(args.data)[: args.limit]
-    options = {"base_model": args.base_model} if args.base_model else {}
-    extractor = AdapterExtractor(
-        args.adapter, load_in_4bit=not args.no_4bit, compute_dtype=args.dtype, **options
-    )
-    score = evaluate(examples, adapter_predictor(extractor), extractor.name)
-    print(summary_line(score))
-    print(json.dumps({name: round(s.f1, 3) for name, s in score.report.fields.items()}))
+    for name in [m.strip() for m in args.models.split(",") if m.strip()]:
+        score = evaluate(examples, make_predictor(name, args), name)
+        print(summary_line(score))
+        print(json.dumps({field: round(s.f1, 3) for field, s in score.report.fields.items()}))
     return 0
 
 
