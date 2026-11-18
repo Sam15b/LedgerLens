@@ -5,16 +5,33 @@ libraries (torch, transformers, peft, bitsandbytes) come from ``requirements-ml.
 are imported inside the functions, so this module imports anywhere.
 
 The base model is loaded in 4-bit NF4 with double quantization (bitsandbytes): ~5.5 GB of
-weights instead of ~16 GB in fp16, which leaves room for activations on a T4.
+weights instead of ~16 GB in fp16, which leaves room for activations on a T4. LoRA
+adapters (r=16, alpha=32, dropout 0.05) go on every attention and MLP projection; only they
+train. The data is the output of ``prepare_dataset.py``, tokenized with the Llama 3 chat
+template and the loss on the response tokens only::
+
+    python -m ml.finetune.train_lora --data-dir data/processed/finetune --max-steps 10
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from ml.finetune.prepare_dataset import DEFAULT_BASE_MODEL
+from ml.finetune.prepare_dataset import (
+    DEFAULT_BASE_MODEL,
+    DEFAULT_MAX_LENGTH,
+    DEFAULT_SEED,
+    IGNORE_INDEX,
+    ChatTokenizer,
+    Example,
+    encode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +57,30 @@ class TrainConfig:
     double_quant: bool = True
     compute_dtype: str = "float16"
     """``float16`` on a T4 (no bfloat16 support), ``bfloat16`` on A100 / L4."""
+    # LoRA
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
     target_modules: list[str] = field(default_factory=lambda: list(LLAMA3_TARGET_MODULES))
+    # optimisation: effective batch = micro-batch x gradient accumulation = 16
+    learning_rate: float = 2e-4
+    lr_scheduler: str = "cosine"
+    warmup_ratio: float = 0.03
+    per_device_train_batch_size: int = 2
+    gradient_accumulation_steps: int = 8
+    num_train_epochs: float = 3.0
+    max_steps: int = -1
+    """Stop after this many optimizer steps (-1: run ``num_train_epochs``)."""
+    max_length: int = DEFAULT_MAX_LENGTH
+    logging_steps: int = 10
+    seed: int = DEFAULT_SEED
+    # data and outputs
+    data_dir: str = "data/processed/finetune"
+    output_dir: str = "outputs/finetune"
+
+    @property
+    def effective_batch_size(self) -> int:
+        return self.per_device_train_batch_size * self.gradient_accumulation_steps
 
 
 def torch_dtype(name: str) -> Any:
@@ -98,3 +138,169 @@ def load_base_model(config: TrainConfig) -> Any:
     footprint = model.get_memory_footprint() / 2**30
     logger.info("loaded %s: %.1f GiB", config.base_model, footprint)
     return model
+
+
+def lora_config(config: TrainConfig) -> Any:
+    """Adapters on every attention and MLP projection of the decoder."""
+    from peft import LoraConfig
+
+    return LoraConfig(
+        r=config.lora_r,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        target_modules=list(config.target_modules),
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+
+# --------------------------------------------------------------------------- data
+
+
+def load_examples(path: Path) -> list[Example]:
+    """A ``<split>.jsonl`` written by ``prepare_dataset.py``, back into examples."""
+    examples = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        examples.append(
+            Example(
+                source=row["source"],
+                doc_id=row["doc_id"],
+                split=row["split"],
+                doc_type=row["doc_type"],
+                input=row["input"],
+                target=json.loads(row["output"]),
+            )
+        )
+    return examples
+
+
+def tokenize(
+    examples: Sequence[Example], tokenizer: ChatTokenizer, *, max_length: int
+) -> list[dict[str, list[int]]]:
+    """Encoded examples (loss on the response only); over-long ones are skipped."""
+    encoded = [encode(example, tokenizer, max_length=max_length) for example in examples]
+    kept = [item for item in encoded if item is not None]
+    if len(kept) < len(encoded):
+        logger.warning("skipped %d examples over %d tokens", len(encoded) - len(kept), max_length)
+    return kept
+
+
+class SFTCollator:
+    """Pads a batch to its longest example: ids with the pad token, labels with
+    :data:`~ml.finetune.prepare_dataset.IGNORE_INDEX` (no loss on padding)."""
+
+    def __init__(self, pad_token_id: int) -> None:
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch: Sequence[dict[str, list[int]]]) -> dict[str, Any]:
+        import torch
+
+        width = max(len(item["input_ids"]) for item in batch)
+
+        def padded(key: str, value: int) -> Any:
+            rows = [item[key] + [value] * (width - len(item[key])) for item in batch]
+            return torch.tensor(rows, dtype=torch.long)
+
+        return {
+            "input_ids": padded("input_ids", self.pad_token_id),
+            "attention_mask": padded("attention_mask", 0),
+            "labels": padded("labels", IGNORE_INDEX),
+        }
+
+
+# --------------------------------------------------------------------------- training
+
+
+def warmup_arguments(fields: set[str], ratio: float) -> dict[str, float]:
+    """Warmup as a share of the steps: ``warmup_ratio`` up to transformers 4.x, a float
+    ``warmup_steps`` (below 1: a ratio) from 5.0, which dropped ``warmup_ratio``."""
+    return {"warmup_ratio": ratio} if "warmup_ratio" in fields else {"warmup_steps": ratio}
+
+
+def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
+    import dataclasses
+
+    from transformers import TrainingArguments
+
+    names = {f.name for f in dataclasses.fields(TrainingArguments)}
+    kwargs: dict[str, Any] = dict(
+        output_dir=str(output_dir),
+        learning_rate=config.learning_rate,
+        lr_scheduler_type=config.lr_scheduler,
+        per_device_train_batch_size=config.per_device_train_batch_size,
+        per_device_eval_batch_size=config.per_device_train_batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        num_train_epochs=config.num_train_epochs,
+        max_steps=config.max_steps,
+        logging_steps=config.logging_steps,
+        fp16=config.load_in_4bit and config.compute_dtype == "float16",
+        bf16=config.load_in_4bit and config.compute_dtype == "bfloat16",
+        seed=config.seed,
+        report_to=[],
+        save_strategy="no",
+    )
+    kwargs.update(warmup_arguments(names, config.warmup_ratio))
+    return TrainingArguments(**kwargs)
+
+
+def build_trainer(config: TrainConfig, output_dir: Path) -> Any:
+    """Base model + fresh LoRA adapters, the tokenized train / val splits and a Trainer."""
+    from peft import get_peft_model
+    from transformers import Trainer
+
+    tokenizer = load_tokenizer(config)
+    data = Path(config.data_dir)
+    train = tokenize(load_examples(data / "train.jsonl"), tokenizer, max_length=config.max_length)
+    val = tokenize(load_examples(data / "val.jsonl"), tokenizer, max_length=config.max_length)
+    model = get_peft_model(load_base_model(config), lora_config(config))
+    model.print_trainable_parameters()
+    return Trainer(
+        model=model,
+        args=training_arguments(config, output_dir),
+        train_dataset=train,
+        eval_dataset=val,
+        data_collator=SFTCollator(tokenizer.pad_token_id),
+    )
+
+
+def train(config: TrainConfig) -> Path:
+    """Train, then save the adapter (not the base weights) to ``output_dir/adapter``."""
+    output_dir = Path(config.output_dir)
+    trainer = build_trainer(config, output_dir)
+    trainer.train()
+    adapter = output_dir / "adapter"
+    trainer.model.save_pretrained(adapter)
+    logger.info("adapter saved to %s", adapter)
+    return adapter
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m ml.finetune.train_lora",
+        description="QLoRA fine-tuning of the extraction model.",
+    )
+    parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
+    parser.add_argument("--data-dir", default=TrainConfig.data_dir)
+    parser.add_argument("--output-dir", default=TrainConfig.output_dir)
+    parser.add_argument("--max-steps", type=int, default=-1, help="e.g. 10 for a dry run")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    config = TrainConfig(
+        base_model=args.base_model,
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        max_steps=args.max_steps,
+    )
+    train(config)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
