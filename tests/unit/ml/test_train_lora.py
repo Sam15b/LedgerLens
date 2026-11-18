@@ -21,6 +21,7 @@ from ml.finetune.train_lora import (
     load_train_config,
     make_run_id,
     parse_overrides,
+    resolve_dtype,
     warmup_arguments,
 )
 
@@ -39,6 +40,23 @@ def test_repo_run_config_matches_the_documented_setup() -> None:
     )
     assert config.effective_batch_size == 16
     assert config.max_length == 2048
+    assert config.gradient_checkpointing is True
+    assert (config.compute_dtype, config.optim) == ("auto", "paged_adamw_8bit")
+
+
+@pytest.mark.parametrize(
+    ("name", "capability", "expected"),
+    [
+        ("auto", (7, 5), "float16"),  # T4: no native bfloat16
+        ("auto", (6, 0), "float16"),  # P100
+        ("auto", (8, 0), "bfloat16"),  # A100
+        ("auto", (8, 9), "bfloat16"),  # L4
+        ("auto", None, "float32"),  # CPU
+        ("float16", (8, 0), "float16"),  # explicit wins
+    ],
+)
+def test_resolve_dtype(name: str, capability: tuple[int, int] | None, expected: str) -> None:
+    assert resolve_dtype(name, capability) == expected
 
 
 def test_overrides_are_coerced_to_the_field_type(tmp_path: Path) -> None:

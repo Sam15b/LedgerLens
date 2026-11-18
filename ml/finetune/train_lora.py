@@ -5,7 +5,10 @@ libraries (torch, transformers, peft, bitsandbytes) come from ``requirements-ml.
 are imported inside the functions, so this module imports anywhere.
 
 The base model is loaded in 4-bit NF4 with double quantization (bitsandbytes): ~5.5 GB of
-weights instead of ~16 GB in fp16, which leaves room for activations on a T4. LoRA
+weights instead of ~16 GB in fp16, which leaves room for activations on a T4. The rest of
+the T4 budget: fp16 compute (a T4 has no bfloat16), gradient checkpointing (activations
+recomputed in the backward pass instead of stored), the paged 8-bit AdamW optimizer
+(optimizer state paged to CPU under memory pressure) and sequences cut at 2,048 tokens. LoRA
 adapters (r=16, alpha=32, dropout 0.05) go on every attention and MLP projection; only they
 train. The data is the output of ``prepare_dataset.py``, tokenized with the Llama 3 chat
 template and the loss on the response tokens only::
@@ -72,8 +75,12 @@ class TrainConfig:
     load_in_4bit: bool = True
     quant_type: str = "nf4"
     double_quant: bool = True
-    compute_dtype: str = "float16"
-    """``float16`` on a T4 (no bfloat16 support), ``bfloat16`` on A100 / L4."""
+    compute_dtype: str = "auto"
+    """``auto``: ``bfloat16`` on GPUs that have it (A100, L4: compute capability 8+),
+    ``float16`` on a T4 / P100, ``float32`` without a GPU."""
+    gradient_checkpointing: bool = True
+    optim: str = "paged_adamw_8bit"
+    """Paged 8-bit AdamW (bitsandbytes); ``adamw_torch`` is used without a GPU."""
     # LoRA
     lora_r: int = 16
     lora_alpha: int = 32
@@ -173,10 +180,34 @@ def make_run_id(config: TrainConfig, now: datetime | None = None) -> str:
     return f"{stamp}-qlora-r{config.lora_r}"
 
 
+def resolve_dtype(name: str, capability: tuple[int, int] | None = None) -> str:
+    """``auto`` for the GPU at hand (``capability``: CUDA compute capability, ``None``: no
+    GPU). bfloat16 needs Ampere (8.x) or newer; ``torch.cuda.is_bf16_supported()`` is not
+    used because it also says yes on a T4, where bfloat16 is emulated and slow."""
+    if name != "auto":
+        return name
+    if capability is None:
+        return "float32"
+    return "bfloat16" if capability[0] >= 8 else "float16"
+
+
+def cuda_capability() -> tuple[int, int] | None:
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability(0)
+    return int(major), int(minor)
+
+
 def torch_dtype(name: str) -> Any:
-    """``"float16"`` -> ``torch.float16`` (and ``bfloat16``, ``float32``)."""
+    """``"float16"`` -> ``torch.float16`` (and ``bfloat16``, ``float32``; ``auto`` is
+    resolved for this machine's GPU first)."""
     import torch
 
+    name = resolve_dtype(name, cuda_capability())
     dtypes = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
     if name not in dtypes:
         raise ValueError(f"unknown dtype {name!r}; choose from {', '.join(dtypes)}")
@@ -224,7 +255,9 @@ def load_base_model(config: TrainConfig) -> Any:
     )
     model.config.use_cache = False  # incompatible with gradient checkpointing
     if quantization is not None:
-        model = prepare_model_for_kbit_training(model)
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=config.gradient_checkpointing
+        )
     footprint = model.get_memory_footprint() / 2**30
     logger.info("loaded %s: %.1f GiB", config.base_model, footprint)
     return model
@@ -316,6 +349,8 @@ def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
     from transformers import TrainingArguments
 
     names = {f.name for f in dataclasses.fields(TrainingArguments)}
+    capability = cuda_capability()
+    dtype = resolve_dtype(config.compute_dtype, capability)
     kwargs: dict[str, Any] = dict(
         output_dir=str(output_dir),
         learning_rate=config.learning_rate,
@@ -329,8 +364,11 @@ def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
         save_strategy="steps",
         save_steps=config.save_steps,
         save_total_limit=config.save_total_limit,
-        fp16=config.load_in_4bit and config.compute_dtype == "float16",
-        bf16=config.load_in_4bit and config.compute_dtype == "bfloat16",
+        fp16=capability is not None and dtype == "float16",
+        bf16=capability is not None and dtype == "bfloat16",
+        gradient_checkpointing=config.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        optim=config.optim if capability is not None else "adamw_torch",
         seed=config.seed,
         report_to=[],
     )
@@ -479,6 +517,7 @@ def train(config: TrainConfig) -> Path:
     run_log.update(
         run_id=run_id,
         status="running",
+        compute_dtype=resolve_dtype(config.compute_dtype, cuda_capability()),
         started_at=run_log.read().get("started_at") or datetime.now(UTC).isoformat(),
         resumed_from=resume,
         config=config.to_json(),

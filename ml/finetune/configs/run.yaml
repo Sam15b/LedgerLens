@@ -8,7 +8,11 @@ base_model: meta-llama/Meta-Llama-3-8B-Instruct   # gated: accept the license on
 load_in_4bit: true
 quant_type: nf4
 double_quant: true
-compute_dtype: float16          # T4 has no bfloat16; use bfloat16 on A100 / L4
+compute_dtype: auto             # float16 on a T4 (no bfloat16), bfloat16 on A100 / L4
+
+# T4 memory: activations recomputed in backward, optimizer state paged to CPU when short
+gradient_checkpointing: true
+optim: paged_adamw_8bit
 
 # LoRA on every attention and MLP projection
 lora_r: 16
