@@ -5,7 +5,10 @@ libraries (torch, transformers, peft, bitsandbytes) come from ``requirements-ml.
 are imported inside the functions, so this module imports anywhere.
 
 The base model is loaded in 4-bit NF4 with double quantization (bitsandbytes): ~5.5 GB of
-weights instead of ~16 GB in fp16, which leaves room for activations on a T4. LoRA
+weights instead of ~16 GB in fp16, which leaves room for activations on a T4. The rest of
+the T4 budget: fp16 compute (a T4 has no bfloat16), gradient checkpointing (activations
+recomputed in the backward pass instead of stored), the paged 8-bit AdamW optimizer
+(optimizer state paged to CPU under memory pressure) and sequences cut at 2,048 tokens. LoRA
 adapters (r=16, alpha=32, dropout 0.05) go on every attention and MLP projection; only they
 train. The data is the output of ``prepare_dataset.py``, tokenized with the Llama 3 chat
 template and the loss on the response tokens only::
@@ -18,6 +21,10 @@ Hyperparameters come from the YAML config (every key a :class:`TrainConfig` fiel
 Free GPU sessions end without warning, so checkpoints go to persistent storage
 (``--checkpoint-dir``: a mounted Google Drive folder on Colab, ``/kaggle/working`` on
 Kaggle) under the run id, and a rerun with the same ``--run-id`` resumes from the last one.
+The validation split is scored every ``eval_steps``; training stops early when the
+validation loss has not improved for ``early_stopping_patience`` evaluations, and the
+checkpoint with the lowest validation loss is the adapter that gets saved.
+
 Each run is logged to ``ml/finetune/runs/<run_id>/``: ``run.json`` (config, environment,
 dataset files and hashes, final metrics) and ``metrics.jsonl`` (every logged step). Those
 are small JSON files for git; adapter weights stay in the checkpoint folder.
@@ -72,8 +79,12 @@ class TrainConfig:
     load_in_4bit: bool = True
     quant_type: str = "nf4"
     double_quant: bool = True
-    compute_dtype: str = "float16"
-    """``float16`` on a T4 (no bfloat16 support), ``bfloat16`` on A100 / L4."""
+    compute_dtype: str = "auto"
+    """``auto``: ``bfloat16`` on GPUs that have it (A100, L4: compute capability 8+),
+    ``float16`` on a T4 / P100, ``float32`` without a GPU."""
+    gradient_checkpointing: bool = True
+    optim: str = "paged_adamw_8bit"
+    """Paged 8-bit AdamW (bitsandbytes); ``adamw_torch`` is used without a GPU."""
     # LoRA
     lora_r: int = 16
     lora_alpha: int = 32
@@ -101,6 +112,15 @@ class TrainConfig:
     """Empty: a new id from the time and LoRA rank. Reuse an id to resume that run."""
     save_steps: int = 50
     save_total_limit: int = 3
+    # validation and early stopping
+    eval_steps: int = 50
+    """Score the validation split every this many steps (``save_steps`` must be a multiple:
+    the best checkpoint is kept)."""
+    early_stopping_patience: int = 3
+    """Stop after this many evaluations without a lower validation loss (0: never)."""
+    early_stopping_threshold: float = 0.0
+    max_eval_samples: int = 0
+    """Validate on the first N val examples only (0: all of them)."""
 
     @property
     def effective_batch_size(self) -> int:
@@ -173,10 +193,34 @@ def make_run_id(config: TrainConfig, now: datetime | None = None) -> str:
     return f"{stamp}-qlora-r{config.lora_r}"
 
 
+def resolve_dtype(name: str, capability: tuple[int, int] | None = None) -> str:
+    """``auto`` for the GPU at hand (``capability``: CUDA compute capability, ``None``: no
+    GPU). bfloat16 needs Ampere (8.x) or newer; ``torch.cuda.is_bf16_supported()`` is not
+    used because it also says yes on a T4, where bfloat16 is emulated and slow."""
+    if name != "auto":
+        return name
+    if capability is None:
+        return "float32"
+    return "bfloat16" if capability[0] >= 8 else "float16"
+
+
+def cuda_capability() -> tuple[int, int] | None:
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability(0)
+    return int(major), int(minor)
+
+
 def torch_dtype(name: str) -> Any:
-    """``"float16"`` -> ``torch.float16`` (and ``bfloat16``, ``float32``)."""
+    """``"float16"`` -> ``torch.float16`` (and ``bfloat16``, ``float32``; ``auto`` is
+    resolved for this machine's GPU first)."""
     import torch
 
+    name = resolve_dtype(name, cuda_capability())
     dtypes = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
     if name not in dtypes:
         raise ValueError(f"unknown dtype {name!r}; choose from {', '.join(dtypes)}")
@@ -224,7 +268,9 @@ def load_base_model(config: TrainConfig) -> Any:
     )
     model.config.use_cache = False  # incompatible with gradient checkpointing
     if quantization is not None:
-        model = prepare_model_for_kbit_training(model)
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=config.gradient_checkpointing
+        )
     footprint = model.get_memory_footprint() / 2**30
     logger.info("loaded %s: %.1f GiB", config.base_model, footprint)
     return model
@@ -310,12 +356,23 @@ def warmup_arguments(fields: set[str], ratio: float) -> dict[str, float]:
     return {"warmup_ratio": ratio} if "warmup_ratio" in fields else {"warmup_steps": ratio}
 
 
+def check_steps(config: TrainConfig) -> None:
+    """Keeping the best checkpoint needs a checkpoint at every evaluation it might pick."""
+    if config.eval_steps < 1 or config.save_steps % config.eval_steps:
+        raise ValueError(
+            f"save_steps ({config.save_steps}) must be a multiple of eval_steps "
+            f"({config.eval_steps})"
+        )
+
+
 def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
     import dataclasses
 
     from transformers import TrainingArguments
 
     names = {f.name for f in dataclasses.fields(TrainingArguments)}
+    capability = cuda_capability()
+    dtype = resolve_dtype(config.compute_dtype, capability)
     kwargs: dict[str, Any] = dict(
         output_dir=str(output_dir),
         learning_rate=config.learning_rate,
@@ -329,11 +386,22 @@ def training_arguments(config: TrainConfig, output_dir: Path) -> Any:
         save_strategy="steps",
         save_steps=config.save_steps,
         save_total_limit=config.save_total_limit,
-        fp16=config.load_in_4bit and config.compute_dtype == "float16",
-        bf16=config.load_in_4bit and config.compute_dtype == "bfloat16",
+        fp16=capability is not None and dtype == "float16",
+        bf16=capability is not None and dtype == "bfloat16",
+        gradient_checkpointing=config.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        optim=config.optim if capability is not None else "adamw_torch",
         seed=config.seed,
         report_to=[],
+        eval_steps=config.eval_steps,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
+    check_steps(config)
+    # renamed from evaluation_strategy in transformers 4.41
+    strategy = "eval_strategy" if "eval_strategy" in names else "evaluation_strategy"
+    kwargs[strategy] = "steps"
     kwargs.update(warmup_arguments(names, config.warmup_ratio))
     return TrainingArguments(**kwargs)
 
@@ -439,6 +507,48 @@ def log_callback(run_log: RunLog) -> Any:
     return _Log()
 
 
+def val_loss_summary(log_history: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """First, best and last validation loss from a Trainer's ``log_history`` and whether
+    it went down (``None`` before the first evaluation)."""
+    points = [
+        (int(e.get("step", 0)), float(e["eval_loss"])) for e in log_history if "eval_loss" in e
+    ]
+    if not points:
+        return None
+    best_step, best = min(points, key=lambda point: point[1])
+    return {
+        "evaluations": len(points),
+        "first": points[0][1],
+        "best": best,
+        "best_step": best_step,
+        "last": points[-1][1],
+        "went_down": best < points[0][1],
+    }
+
+
+def val_loss_callback(run_log: RunLog) -> Any:
+    """Writes the validation-loss summary to ``run.json`` after every evaluation, so a
+    session that times out still leaves it behind."""
+    from transformers import TrainerCallback
+
+    class _ValLoss(TrainerCallback):
+        def on_evaluate(
+            self, args: Any, state: Any, control: Any, metrics: Any = None, **kw: Any
+        ) -> None:
+            summary = val_loss_summary(state.log_history)
+            if summary is not None:
+                run_log.update(val_loss=summary)
+                logger.info(
+                    "step %d: val loss %.4f (best %.4f at step %d)",
+                    state.global_step,
+                    summary["last"],
+                    summary["best"],
+                    summary["best_step"],
+                )
+
+    return _ValLoss()
+
+
 def last_checkpoint(output_dir: Path) -> str | None:
     """The newest ``checkpoint-<step>`` folder to resume from, if any."""
     if not output_dir.is_dir():
@@ -457,15 +567,29 @@ def build_trainer(config: TrainConfig, output_dir: Path) -> Any:
     tokenizer = load_tokenizer(config)
     data = Path(config.data_dir)
     train = tokenize(load_examples(data / "train.jsonl"), tokenizer, max_length=config.max_length)
-    val = tokenize(load_examples(data / "val.jsonl"), tokenizer, max_length=config.max_length)
+    val_examples = load_examples(data / "val.jsonl")
+    if config.max_eval_samples:
+        val_examples = val_examples[: config.max_eval_samples]
+    val = tokenize(val_examples, tokenizer, max_length=config.max_length)
     model = get_peft_model(load_base_model(config), lora_config(config))
     model.print_trainable_parameters()
+    callbacks: list[Any] = []
+    if config.early_stopping_patience > 0:
+        from transformers import EarlyStoppingCallback
+
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=config.early_stopping_patience,
+                early_stopping_threshold=config.early_stopping_threshold,
+            )
+        )
     return Trainer(
         model=model,
         args=training_arguments(config, output_dir),
         train_dataset=train,
         eval_dataset=val,
         data_collator=SFTCollator(tokenizer.pad_token_id),
+        callbacks=callbacks,
     )
 
 
@@ -479,6 +603,7 @@ def train(config: TrainConfig) -> Path:
     run_log.update(
         run_id=run_id,
         status="running",
+        compute_dtype=resolve_dtype(config.compute_dtype, cuda_capability()),
         started_at=run_log.read().get("started_at") or datetime.now(UTC).isoformat(),
         resumed_from=resume,
         config=config.to_json(),
@@ -488,6 +613,7 @@ def train(config: TrainConfig) -> Path:
     )
     trainer = build_trainer(config, output_dir)
     trainer.add_callback(log_callback(run_log))
+    trainer.add_callback(val_loss_callback(run_log))
     start = time.perf_counter()
     try:
         result = trainer.train(resume_from_checkpoint=resume)
@@ -501,10 +627,13 @@ def train(config: TrainConfig) -> Path:
         finished_at=datetime.now(UTC).isoformat(),
         train_seconds=round(time.perf_counter() - start, 1),
         global_step=result.global_step,
+        stopped_early=trainer.state.global_step < trainer.state.max_steps,
         metrics=result.metrics,
+        val_loss=val_loss_summary(trainer.state.log_history),
+        best_checkpoint=trainer.state.best_model_checkpoint,
         adapter=str(adapter),
     )
-    logger.info("adapter saved to %s; run logged to %s", adapter, run_log.dir)
+    logger.info("adapter (best val loss) saved to %s; run logged to %s", adapter, run_log.dir)
     return adapter
 
 
