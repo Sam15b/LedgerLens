@@ -345,63 +345,30 @@ def build_retrievers(
     llm: LLMClient | None = None,
     exact_hybrid: bool = False,
 ) -> dict[str, Retriever]:
-    """The live retrievers (Pinecone, Postgres, Neo4j, models) for ``R1``..``R5``, sharing
-    one embedder, reranker, analyzer and driver, sized by ``configs/`` (rerank candidates:
-    ``pinecone.query_top_k``; graph: ``retrieval.graph``). R5 needs an LLM
-    (``models.yaml``). ``exact_hybrid`` scores the hybrid query client-side
+    """The live retrievers for ``R1``..``R5`` from
+    :class:`~ledgerlens.retrieval.factory.RetrieverFactory`: sized by ``configs/`` and
+    sharing one embedder, reranker, analyzer and driver. R5 needs an LLM (``models.yaml``).
+    ``exact_hybrid`` scores the hybrid query client-side
     (:class:`eval.tune_retrieval.ExactHybridStore`), for Pinecone Local, which ignores
     sparse vectors."""
-    from ledgerlens.core.config import get_config
-    from ledgerlens.ingestion.embedding import BM25Encoder, DenseEmbedder
-    from ledgerlens.retrieval.analyze import QueryAnalyzer
-    from ledgerlens.retrieval.graph import GraphExpander
-    from ledgerlens.retrieval.graphrag import GraphRAGRetriever, Text2CypherRetriever
-    from ledgerlens.retrieval.rerank import CrossEncoderReranker
-    from ledgerlens.retrieval.text2cypher import CypherGenerator, CypherGuard
-    from ledgerlens.retrieval.vector import (
-        DenseRetriever,
-        HybridRetriever,
-        PostgresChunkTexts,
-        RerankRetriever,
-        VectorIndex,
-    )
-    from ledgerlens.storage.neo4j.driver import get_driver
-    from ledgerlens.storage.pinecone_store import PineconeStore
+    from ledgerlens.retrieval.factory import RetrieverFactory
 
     unknown = [v for v in variants if v not in VARIANTS]
     if unknown:
         raise ValueError(f"unknown variants {unknown}; choose from {', '.join(VARIANTS)}")
-    store: VectorIndex = PineconeStore.from_settings(namespace=namespace)
-    embedder = DenseEmbedder()
-    texts = PostgresChunkTexts()
+    factory = RetrieverFactory(namespace=namespace, llm=llm)
     if exact_hybrid:
         from eval.tune_retrieval import BM25Documents, ExactHybridStore
+        from ledgerlens.storage.pinecone_store import PineconeStore
 
-        pinecone = get_config().pinecone
-        store = ExactHybridStore(
-            store,
-            BM25Documents(BM25Encoder.load(), texts),
+        pinecone = factory.config.pinecone
+        factory.store = ExactHybridStore(
+            PineconeStore.from_settings(namespace=namespace),
+            BM25Documents(factory.sparse, factory.texts),
             alpha=pinecone.hybrid_alpha,
             top_k=pinecone.query_top_k,
         )
-    r1 = DenseRetriever(store, embedder, texts=texts)
-    r2 = HybridRetriever(store, embedder, BM25Encoder.load(), texts=texts)
-    config = get_config()
-    reranker = CrossEncoderReranker(config.retrieval.rerank_model)
-    r3 = RerankRetriever(r2, reranker, candidates=config.pinecone.query_top_k)
-    built: dict[str, Retriever] = {"R1": r1, "R2": r2, "R3": r3}
-    if {"R4", "R5"} & set(variants):
-        analyzer = QueryAnalyzer.from_postgres()
-        graph = config.retrieval.graph
-        expander = GraphExpander(
-            get_driver(), max_hops=graph.max_hops, per_seed=graph.per_seed, limit=graph.limit
-        )
-        r4 = GraphRAGRetriever(r3, expander, analyzer=analyzer)
-        built["R4"] = r4
-        if "R5" in variants:
-            generator = CypherGenerator(llm or LLMClient())
-            built["R5"] = Text2CypherRetriever(r4, generator, CypherGuard(get_driver()))
-    return {variant: built[variant] for variant in variants}
+    return {variant: factory.get(variant) for variant in variants}
 
 
 # --------------------------------------------------------------------------- report

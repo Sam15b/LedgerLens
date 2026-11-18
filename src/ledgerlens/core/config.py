@@ -296,6 +296,8 @@ class GraphExpansionConfig(_Section):
 
 
 class RetrievalConfig(_Section):
+    default: Literal["R1", "R2", "R3", "R4", "R5"] = "R4"
+    """The retriever questions go to (``ledgerlens.retrieval.factory.build_retriever``)."""
     rerank_model: str = "BAAI/bge-reranker-base"
     graph: GraphExpansionConfig = Field(default_factory=GraphExpansionConfig)
 
