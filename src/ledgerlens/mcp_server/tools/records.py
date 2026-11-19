@@ -307,6 +307,153 @@ def get_contract(services: Services, contract: str, vendor: str | None = None) -
         )
 
 
+# --------------------------------------------------------------------------- payments
+
+
+class PaymentApplied(BaseModel):
+    """A payment, and the part of it applied to one invoice."""
+
+    payment_id: str
+    payment_reference: str
+    document_id: str | None
+    citation: str | None
+    paid_at: date
+    method: str | None
+    currency: str
+    amount: Amount
+    """The whole payment (it can settle several invoices)."""
+    applied: Amount
+    """The part applied to this invoice."""
+
+
+class InvoicePayments(BaseModel):
+    invoice_id: str
+    invoice_number: str
+    currency: str
+    total: Amount
+    paid: Amount
+    outstanding: Amount
+    status: str
+    due_date: date | None
+    payments: list[PaymentApplied] = Field(default_factory=list)
+
+
+def get_payments(services: Services, invoice: str, vendor: str | None = None) -> InvoicePayments:
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.models import PaymentAllocationRow, PaymentRow
+
+    with services.sessions() as session:
+        row = find_invoice(session, services, invoice, vendor)
+        applied = session.execute(
+            select(PaymentRow, PaymentAllocationRow.amount)
+            .join(PaymentAllocationRow, PaymentAllocationRow.payment_id == PaymentRow.id)
+            .where(PaymentAllocationRow.invoice_id == row.id)
+            .order_by(PaymentRow.paid_at, PaymentRow.id)
+        ).all()
+        payments = [
+            PaymentApplied(
+                payment_id=payment.id,
+                payment_reference=payment.payment_reference,
+                document_id=payment.document_id,
+                citation=citation(payment.payment_reference, payment.document_id),
+                paid_at=payment.paid_at,
+                method=payment.method,
+                currency=payment.currency,
+                amount=payment.amount,
+                applied=amount,
+            )
+            for payment, amount in applied
+        ]
+        paid = sum((p.applied for p in payments), Decimal(0))
+        return InvoicePayments(
+            invoice_id=row.id,
+            invoice_number=row.invoice_number,
+            currency=row.currency,
+            total=row.total,
+            paid=paid,
+            outstanding=row.total - paid,
+            status=row.status,
+            due_date=row.due_date,
+            payments=payments,
+        )
+
+
+class OverdueItem(BaseModel):
+    invoice_id: str
+    invoice_number: str
+    document_id: str | None
+    citation: str | None
+    vendor_id: str | None
+    vendor_name: str
+    po_number: str | None
+    due_date: date
+    days_overdue: int
+    currency: str
+    total: Amount
+    outstanding: Amount
+
+
+class OverdueList(BaseModel):
+    as_of: date
+    min_days: int
+    count: int
+    """All overdue invoices matching, even past ``limit``."""
+    outstanding_by_currency: dict[str, Amount] = Field(default_factory=dict)
+    invoices: list[OverdueItem] = Field(default_factory=list)
+    """Most overdue first, at most ``limit``."""
+
+
+def list_overdue(
+    services: Services,
+    min_days: int = 1,
+    vendor: str | None = None,
+    *,
+    as_of: date | None = None,
+    limit: int = 50,
+) -> OverdueList:
+    from ledgerlens.storage.postgres.repositories import InvoiceRepository
+
+    if min_days < 1:
+        raise ToolError("min_days must be at least 1")
+    day = as_of or services.today
+    with services.sessions() as session:
+        overdue = [
+            item
+            for item in InvoiceRepository(session).list_overdue(
+                day, vendor_id=_vendor_id(services, vendor)
+            )
+            if item.days_overdue >= min_days
+        ]
+        by_currency: dict[str, Decimal] = {}
+        for item in overdue:
+            currency = item.invoice.currency
+            by_currency[currency] = by_currency.get(currency, Decimal(0)) + item.outstanding
+        return OverdueList(
+            as_of=day,
+            min_days=min_days,
+            count=len(overdue),
+            outstanding_by_currency=dict(sorted(by_currency.items())),
+            invoices=[
+                OverdueItem(
+                    invoice_id=item.invoice.id,
+                    invoice_number=item.invoice.invoice_number,
+                    document_id=item.invoice.document_id,
+                    citation=citation(item.invoice.invoice_number, item.invoice.document_id),
+                    vendor_id=item.invoice.vendor_id,
+                    vendor_name=item.invoice.vendor_name,
+                    po_number=item.invoice.po_number,
+                    due_date=item.invoice.due_date or day,
+                    days_overdue=item.days_overdue,
+                    currency=item.invoice.currency,
+                    total=item.invoice.total,
+                    outstanding=item.outstanding,
+                )
+                for item in overdue[:limit]  # oldest due date first = most overdue
+            ],
+        )
+
+
 # --------------------------------------------------------------------------- tools
 
 Vendor = Annotated[
@@ -338,3 +485,27 @@ def register(server: FastMCP, services: Services) -> None:
     ) -> ContractRecord:
         """One contract: dates, payment terms and the rate card (agreed unit prices)."""
         return await in_thread(get_contract, services, contract, vendor)
+
+    @server.tool(name="get_payments", annotations=READ_ONLY)
+    async def get_payments_tool(
+        invoice: Annotated[str, Field(description="Invoice id, or the number printed on it")],
+        vendor: Vendor = None,
+    ) -> InvoicePayments:
+        """The payments applied to an invoice (reference, date, method, amount applied),
+        with what is paid and still outstanding."""
+        return await in_thread(get_payments, services, invoice, vendor)
+
+    @server.tool(name="list_overdue", annotations=READ_ONLY)
+    async def list_overdue_tool(
+        min_days: Annotated[
+            int, Field(ge=1, description="At least this many days past the due date")
+        ] = 1,
+        vendor: Annotated[str | None, Field(description="Only this vendor (id or name)")] = None,
+        as_of: Annotated[
+            date | None, Field(description="Count days overdue at this date (default today)")
+        ] = None,
+        limit: Annotated[int, Field(ge=1, le=200, description="Most invoices to list")] = 50,
+    ) -> OverdueList:
+        """Invoices past their due date with money still owed, most overdue first, with
+        the outstanding total per currency."""
+        return await in_thread(list_overdue, services, min_days, vendor, as_of=as_of, limit=limit)
