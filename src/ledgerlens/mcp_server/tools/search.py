@@ -88,7 +88,7 @@ def search_documents(
         )
     except ValidationError as exc:
         raise ToolError(f"bad filters: {exc.errors()[0]['msg']}") from exc
-    result = services.retriever.retrieve(query, filters=filters, k=k)
+    result = services.ready_retriever().retrieve(query, filters=filters, k=k)
     return SearchResult(
         query=query,
         filters=jsonable(filters.model_dump(exclude_defaults=True)),

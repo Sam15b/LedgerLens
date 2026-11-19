@@ -57,9 +57,16 @@ def create_server(
 
 
 def run(
-    transport: Transport = "stdio", *, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
+    transport: Transport = "stdio",
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    warm_up: bool = True,
 ) -> None:
-    server = create_server(host=host, port=port)
+    services = Services()
+    server = create_server(services, host=host, port=port)
+    if warm_up:
+        services.warm_up()  # load the search models while the client connects
     if transport == "stdio":
         server.run("stdio")
     else:
@@ -74,13 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transport", choices=("stdio", "http"), default="stdio")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--no-warm-up",
+        dest="warm_up",
+        action="store_false",
+        help="load the search models on the first search instead of at start",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(get_settings().log_level)  # stderr: stdout is the stdio transport
-    run(args.transport, host=args.host, port=args.port)
+    run(args.transport, host=args.host, port=args.port, warm_up=args.warm_up)
     return 0
 
 

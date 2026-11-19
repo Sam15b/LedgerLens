@@ -1,13 +1,18 @@
 """What the MCP tools read from: the live stores, built on first use and shared by every
 tool call of one server.
 
-Nothing connects at import or when the server starts: the retriever loads its models on
-the first search, the Neo4j driver opens on the first graph query. Tests hand
-:class:`Services` stand-ins instead (``Services(retriever=..., graph=...)``).
+Nothing connects at import: the retriever loads its models on the first search, the
+Neo4j driver opens on the first graph query. Loading the embedding and reranking models
+takes tens of seconds on a CPU, longer than some clients wait for a tool call, so the
+server calls :meth:`Services.warm_up` when it starts: one search in a background thread,
+which the first real search waits for instead of loading the models a second time. Tests
+hand :class:`Services` stand-ins instead (``Services(retriever=..., graph=...)``).
 """
 
 from __future__ import annotations
 
+import logging
+import threading
 from datetime import date
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
@@ -20,6 +25,11 @@ if TYPE_CHECKING:
     from ledgerlens.retrieval.analyze import VendorFinder
     from ledgerlens.retrieval.graph import TemplateRunner
     from ledgerlens.retrieval.text2cypher import CypherGenerator, CypherGuard
+
+
+logger = logging.getLogger(__name__)
+
+WARM_UP_TIMEOUT_S = 300.0
 
 
 class Services:
@@ -50,6 +60,33 @@ class Services:
             if value is not None:
                 self.__dict__[name] = value  # pre-fills the cached_property
         self._today = today
+        self._warm = threading.Event()
+        self._warm.set()  # nothing to wait for until warm_up() starts
+
+    def warm_up(self) -> threading.Thread:
+        """Build the retriever and run one search in a background thread, so the
+        models are loaded before the first tool call needs them."""
+        self._warm.clear()
+
+        def run() -> None:
+            try:
+                self.retriever.retrieve("warm-up", k=1)
+                logger.info("retriever warmed up")
+            except Exception:
+                logger.warning(
+                    "retriever warm-up failed; the first search will retry", exc_info=True
+                )
+            finally:
+                self._warm.set()
+
+        thread = threading.Thread(target=run, name="mcp-warm-up", daemon=True)
+        thread.start()
+        return thread
+
+    def ready_retriever(self) -> Retriever:
+        """The retriever, once a warm-up in progress has finished."""
+        self._warm.wait(WARM_UP_TIMEOUT_S)
+        return self.retriever
 
     @property
     def today(self) -> date:
