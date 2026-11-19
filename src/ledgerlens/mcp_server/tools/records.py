@@ -11,16 +11,17 @@ its id and the citation tag answers use (``doc:INV-889``).
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import AfterValidator, BaseModel, Field
 
 from ledgerlens.mcp_server.services import Services
-from ledgerlens.mcp_server.tools import READ_ONLY, in_thread
+from ledgerlens.mcp_server.tools import READ_ONLY, in_thread, jsonable
 from ledgerlens.mcp_server.tools.search import resolve_vendor
 
 if TYPE_CHECKING:
@@ -454,6 +455,98 @@ def list_overdue(
         )
 
 
+# --------------------------------------------------------------------------- analytics
+
+Report = Literal["aging", "spend_by_vendor", "unpaid", "days_to_pay"]
+REPORT_PARAMS: dict[str, tuple[str, ...]] = {
+    "aging": ("as_of",),
+    "spend_by_vendor": ("start", "end", "vendor"),
+    "unpaid": ("as_of", "vendor"),
+    "days_to_pay": ("start", "end", "vendor"),
+}
+"""The parameters each report takes (all optional: ``as_of`` defaults to today,
+``start`` / ``end`` to unbounded, ``vendor`` to every vendor)."""
+REPORT_DESCRIPTIONS = {
+    "aging": "what is owed by days past due (current, 0-30, 31-60, 61-90, 90+), per currency",
+    "spend_by_vendor": "invoiced spend per vendor per month",
+    "unpaid": "per vendor: open invoices and outstanding, of which overdue, oldest due date",
+    "days_to_pay": "per vendor: invoices paid, average and longest days to pay, days late",
+}
+MAX_ROWS = 500
+
+
+class AnalyticsResult(BaseModel):
+    report: Report
+    params: dict[str, str | None] = Field(default_factory=dict)
+    """The parameters used (defaults filled in)."""
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    total_rows: int
+    truncated: bool = False
+
+
+def _date_param(params: dict[str, Any], name: str) -> date | None:
+    value = params.get(name)
+    if value in (None, ""):
+        return None
+    try:
+        return value if isinstance(value, date) else date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ToolError(f"{name} must be a date (YYYY-MM-DD), got {value!r}") from exc
+
+
+def run_analytics(
+    services: Services, report: str, params: dict[str, Any] | None = None, *, limit: int = 200
+) -> AnalyticsResult:
+    from ledgerlens.storage.postgres import analytics
+
+    if report not in REPORT_PARAMS:
+        raise ToolError(f"unknown report {report!r}; choose from {', '.join(REPORT_PARAMS)}")
+    given = dict(params or {})
+    unknown = sorted(set(given) - set(REPORT_PARAMS[report]))
+    if unknown:
+        allowed = ", ".join(REPORT_PARAMS[report])
+        raise ToolError(f"{report} takes no {', '.join(unknown)} (it takes: {allowed})")
+    as_of = _date_param(given, "as_of") or services.today
+    start, end = _date_param(given, "start"), _date_param(given, "end")
+    vendor_id = _vendor_id(services, given.get("vendor"))
+    used: dict[str, str | None]
+    with services.sessions() as session:
+        rows: list[Any]
+        if report == "aging":
+            rows = analytics.ap_aging(session, as_of)
+            used = {"as_of": as_of.isoformat()}
+        elif report == "unpaid":
+            rows = analytics.unpaid_totals(session, as_of)
+            used = {"as_of": as_of.isoformat(), "vendor": vendor_id}
+        elif report == "spend_by_vendor":
+            rows = analytics.spend_by_vendor_month(session, start, end)
+            used = {"start": _iso(start), "end": _iso(end), "vendor": vendor_id}
+        else:
+            rows = analytics.days_to_pay(session, start, end)
+            used = {"start": _iso(start), "end": _iso(end), "vendor": vendor_id}
+    if vendor_id is not None:
+        rows = [row for row in rows if getattr(row, "vendor_id", None) == vendor_id]
+    records = [jsonable(_rounded(asdict(row))) for row in rows]
+    return AnalyticsResult(
+        report=report,  # type: ignore[arg-type]  # checked against REPORT_PARAMS above
+        params=used,
+        columns=list(records[0]) if records else [],
+        rows=records[:limit],
+        total_rows=len(records),
+        truncated=len(records) > limit,
+    )
+
+
+def _rounded(row: dict[str, Any]) -> dict[str, Any]:
+    """Report decimals to the cent: amounts, and averages of days."""
+    return {k: v.quantize(CENTS) if isinstance(v, Decimal) else v for k, v in row.items()}
+
+
+def _iso(day: date | None) -> str | None:
+    return day.isoformat() if day else None
+
+
 # --------------------------------------------------------------------------- tools
 
 Vendor = Annotated[
@@ -509,3 +602,25 @@ def register(server: FastMCP, services: Services) -> None:
         """Invoices past their due date with money still owed, most overdue first, with
         the outstanding total per currency."""
         return await in_thread(list_overdue, services, min_days, vendor, as_of=as_of, limit=limit)
+
+    @server.tool(
+        name="run_analytics",
+        annotations=READ_ONLY,
+        description=(
+            "Accounts-payable reports from the ledger (amounts per currency, never added "
+            "across currencies). Reports and their optional params:\n"
+            + "\n".join(
+                f"- {name}({', '.join(REPORT_PARAMS[name])}): {text}"
+                for name, text in REPORT_DESCRIPTIONS.items()
+            )
+            + "\nDates are YYYY-MM-DD; vendor is an id or a name."
+        ),
+    )
+    async def run_analytics_tool(
+        report: Annotated[Report, Field(description="Which report")],
+        params: Annotated[
+            dict[str, Any] | None, Field(description="The report's parameters")
+        ] = None,
+        limit: Annotated[int, Field(ge=1, le=MAX_ROWS, description="Most rows to return")] = 200,
+    ) -> AnalyticsResult:
+        return await in_thread(run_analytics, services, report, params, limit=limit)
