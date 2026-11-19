@@ -319,12 +319,15 @@ class QANode:
         *,
         model: str = "smart",
         max_calls: int = MAX_CALLS,
+        max_steps: int | None = None,
         today: date | None = None,
     ) -> None:
         self.tools = tools.only(*QA_TOOLS)
         self.llm = llm
         self.model = model
         self.max_calls = max_calls
+        self.max_steps = max_steps
+        """The graph's step limit: tool calls stop where they would cross it."""
         self._today = today
         self.plan_prompt = load_prompt("qa_plan")
         self.answer_prompt = load_prompt("answer_grounded")
@@ -372,6 +375,13 @@ class QANode:
         question = latest_user_text(state.get("messages", []))
         entities = state.get("entities") or {}
         calls = await self.plan(question, entities)
+        errors: list[str] = []
+        if self.max_steps is not None:
+            # this node and respond take a step each; every tool call takes one
+            budget = max(0, self.max_steps - state.get("step_count", 0) - 2)
+            if len(calls) > budget:
+                errors.append(f"step limit: {len(calls) - budget} planned tool call(s) skipped")
+                calls = calls[:budget]
         outcomes: list[ToolOutcome] = []
         tool_messages: list[BaseMessage] = []
         for call in calls:
@@ -395,6 +405,6 @@ class QANode:
                 AIMessage(text, name="qa", additional_kwargs={"citation_check": check}),
             ],
             "citations": evidence.citations,
-            "errors": [f"{o.tool}: {o.text}" for o in outcomes if not o.ok],
+            "errors": [*errors, *(f"{o.tool}: {o.text}" for o in outcomes if not o.ok)],
             "step_count": 1 + len(outcomes),
         }
