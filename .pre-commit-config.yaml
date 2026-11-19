@@ -35,6 +35,8 @@ repos:
           - jinja2>=3.1
           - albumentations>=1.4
           - mcp>=1.20,<2
+          - langgraph>=1.0
+          - langchain-core>=1.0
           - pytest>=8
           - types-PyYAML
 
