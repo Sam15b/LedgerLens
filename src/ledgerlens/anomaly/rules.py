@@ -8,7 +8,8 @@ a one-line reason. See docs/layers/08-anomaly-detection.md, "Rules".
 * **exact duplicate**: the same vendor and invoice number as a stored invoice, or the same
   file (SHA-256).
 * **near duplicate**: the same vendor, a total within 1 %, a date within 7 days and an
-  invoice number at least 85 % similar (a resubmission with the number or date retyped).
+  invoice number more than 85 % similar (:func:`number_similarity`: a resubmission under
+  the next number, with a suffix, or with a typo).
   :func:`link_possible_duplicates` records each pair as a ``POSSIBLE_DUPLICATE`` edge in
   Neo4j, so the graph and the chat agent see it too.
 * **over PO**: the total is more than what is left on the purchase order it cites (PO total
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from rapidfuzz import fuzz
+from rapidfuzz.distance import OSA
 
 from ledgerlens.core.schemas import Contract, Invoice, PurchaseOrder
 from ledgerlens.core.schemas.common import ROUNDING_TOLERANCE
@@ -40,6 +42,7 @@ RuleName = Literal[
 ]
 
 _NOT_ALNUM = re.compile(r"[^0-9A-Z]")
+_DIGIT_TAIL = re.compile(r"^(.*?)(\d+)$")
 
 NEAR_AMOUNT = Decimal("0.01")
 """Near duplicate: totals within 1 % of the larger one."""
@@ -125,8 +128,24 @@ def exact_duplicates(candidate: InvoiceRef, stored: Iterable[InvoiceRef]) -> lis
 
 
 def number_similarity(a: str, b: str) -> float:
-    """0-1 similarity of two invoice numbers (rapidfuzz ratio of their keys)."""
-    return fuzz.ratio(number_key(a), number_key(b)) / 100
+    """0-1 similarity of two invoice numbers, as a re-sent invoice would differ.
+
+    Numbers that differ only in their trailing digits (same prefix) are a vendor's
+    numbering sequence, where most numbers share most digits: they count as alike only when
+    adjacent (``...275`` / ``...276``, ``...359`` / ``...360``: 1.0) or the same digits
+    transposed (a typo). Everything else (a suffix such as ``...275A``, a changed prefix)
+    is the optimal-string-alignment edit similarity of the normalised keys, so one edit in a
+    ten-character number scores 0.9.
+    """
+    key_a, key_b = number_key(a), number_key(b)
+    tail_a, tail_b = _DIGIT_TAIL.match(key_a), _DIGIT_TAIL.match(key_b)
+    if tail_a and tail_b and tail_a[1] == tail_b[1]:
+        digits_a, digits_b = tail_a[2], tail_b[2]
+        if abs(int(digits_a) - int(digits_b)) <= 1:
+            return 1.0
+        if len(digits_a) != len(digits_b) or sorted(digits_a) != sorted(digits_b):
+            return 0.0  # other numbers in the same sequence
+    return float(OSA.normalized_similarity(key_a, key_b))
 
 
 def amount_gap(a: Decimal, b: Decimal) -> Decimal:
