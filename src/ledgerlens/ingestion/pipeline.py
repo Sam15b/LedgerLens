@@ -21,7 +21,9 @@ fit on all of them, then each document's chunks are embedded.
 
 Where results go is a :class:`StorageSink`: :meth:`IngestionPipeline.ingest` runs a batch
 and hands each result to one. :class:`~ledgerlens.ingestion.sinks.StoresSink` writes
-Postgres, Pinecone and Neo4j; :class:`JsonlSink` writes JSONL files for offline runs.
+Postgres, Pinecone and Neo4j, then scores every invoice for anomalies (rules +
+autoencoder) into ``anomaly_scores``; :class:`JsonlSink` writes JSONL files for offline
+runs.
 
 Command line (also ``make ingest DATASET=sroie``)::
 

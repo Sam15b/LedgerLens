@@ -8,6 +8,55 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+### Anomaly detection milestone (Phase 6c: rules + Keras autoencoder)
+
+Every invoice the stores sink writes is scored for anomalies, with reasons a reviewer can
+read. On the held-out test split (the latest 750 synthetic invoices, 66 injected anomalies)
+the combination of rules and autoencoder reaches **PR-AUC 0.830**. Rules alone reach
+0.661, the autoencoder 0.394 and Isolation Forest 0.200
+(`eval/reports/2026-11-20/anomaly.md`). The roadmap's other 6c exit item, the
+`score_anomaly` MCP tool, lands with the Phase 5 tools.
+
+#### Added
+
+- `ledgerlens.anomaly.features` and `ml/anomaly/build_features.py`: 19 features per
+  invoice (amount, timing, structure, vendor history before it), with optional PCA text
+  features. Train / val / test are split by time, and the scaler is fit on training
+  normals only.
+- `ledgerlens.anomaly.rules`: exact and near duplicates (with a `POSSIBLE_DUPLICATE`
+  edge in Neo4j), over-PO, contract-rate breach and unknown vendor, each with a one-line
+  reason.
+- `ml/anomaly/train_autoencoder.py`: a 64-32-8-32-64 Keras 3 autoencoder trained on
+  normal invoices with early stopping. The threshold is chosen on the labelled val split
+  (precision ≥ 0.8). Model, scaler, threshold and metadata are versioned in
+  `models/anomaly/<version>/`, and the reloaded model reproduces the scores.
+- `ml/anomaly/evaluate.py`: PR-AUC, ROC-AUC, precision@k and recall per anomaly type for
+  the rules, Isolation Forest, the autoencoder and rules + AE. The rules run over the
+  ledger in arrival order. The rules + AE threshold is chosen on val (`--save-combined`).
+- `ledgerlens.anomaly.scorer`: rule hits are hard hits that rank first, and the
+  autoencoder orders invoices within each band. The model is loaded once per worker from
+  `configs/anomaly.yaml` (newest version by default, rules only without a model or
+  Keras). Reasons: rule sentences, the autoencoder's top-3 features in plain language
+  ("total higher than this vendor's usual (z = +3.7)"), or "nothing unusual".
+- Ingestion: `StoresSink` scores every invoice it writes into `anomaly_scores` (score and
+  reasons per model version). The context is read from Postgres: the vendor's invoices
+  stored before it, the PO balance, the contract and the vendor master. Scoring failures
+  are logged, not fatal. `python -m ledgerlens.anomaly.scorer --missing` scores whatever
+  is still unscored.
+
+#### Changed
+
+- `scikit-learn` joins the `anomaly` extra (Isolation Forest baseline).
+- Rule reasons print amounts at two decimals (Postgres returns four).
+
+#### Known issues
+
+- No PCA text features yet: they need the header-chunk embeddings exported from
+  Pinecone.
+- Labels are synthetic. Most rule misses and false alarms on them are near-duplicate
+  copies dated before the invoice they copy, so the rules flag the pair on the original.
+  The pair is still caught.
+
 ### Fine-tuning milestone (Phase 6a: Llama 3 8B + LoRA), tooling only
 
 Everything needed to train, evaluate, export and serve a fine-tuned extraction model, run

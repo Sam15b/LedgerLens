@@ -71,6 +71,10 @@ def normalize_tax_id(tax_id: str | None) -> str | None:
     return cleaned or None
 
 
+NEW_VENDOR_PREFIX = "v_"
+"""Ids of vendors first seen on a document (not from the vendor master) start with this."""
+
+
 def new_vendor_id(name: str) -> str:
     """A stable id for a vendor first seen on a document: ``v_`` + its canonical name.
 
@@ -80,7 +84,7 @@ def new_vendor_id(name: str) -> str:
     key = canonical_vendor(name) or name.strip().lower()
     slug = _SLUG.sub("_", key).strip("_")[:40]
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
-    return f"v_{slug}_{digest}" if slug else f"v_{digest}"
+    return f"{NEW_VENDOR_PREFIX}{slug}_{digest}" if slug else f"{NEW_VENDOR_PREFIX}{digest}"
 
 
 @dataclass(frozen=True)

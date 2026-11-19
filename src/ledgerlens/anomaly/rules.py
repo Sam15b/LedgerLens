@@ -96,6 +96,16 @@ class InvoiceRef:
         return number_key(self.invoice.invoice_number)
 
 
+CENTS = Decimal("0.01")
+
+
+def money(value: Decimal) -> str:
+    """An amount for a reason: ``100.0000`` (as Postgres returns it) reads ``100.00``;
+    more decimals are kept only when they mean something (``0.1235``)."""
+    cents = value.quantize(CENTS)
+    return str(cents) if cents == value else str(value.normalize())
+
+
 def number_key(number: str) -> str:
     """An invoice number for comparison: ``"inv-005275 "`` and ``"INV 005275"`` match."""
     return _NOT_ALNUM.sub("", number.upper())
@@ -179,7 +189,7 @@ def near_duplicates(candidate: InvoiceRef, stored: Iterable[InvoiceRef]) -> list
             continue
         reason = (
             f"looks like {other.invoice.invoice_number} ({other.id}) re-sent: total "
-            f"{invoice.total} vs {other.invoice.total}, {days} day(s) apart, numbers "
+            f"{money(invoice.total)} vs {money(other.invoice.total)}, {days} day(s) apart, numbers "
             f"{similarity:.0%} alike"
         )
         hits.append(
@@ -253,9 +263,9 @@ def over_po(
         return []
     over = invoice.total - remaining
     reason = (
-        f"total {invoice.total} {invoice.currency} is {over} over what is left on "
-        f"{po.po_number} ({remaining} of {po.total}"
-        + (f"; {already_billed} already billed" if already_billed else "")
+        f"total {money(invoice.total)} {invoice.currency} is {money(over)} over what is left "
+        f"on {po.po_number} ({money(remaining)} of {money(po.total)}"
+        + (f"; {money(already_billed)} already billed" if already_billed else "")
         + ")"
     )
     return [
@@ -327,7 +337,8 @@ def contract_rate_breaches(
     worst = max(breaches, key=lambda b: b["excess"])
     reason = (
         f"{len(breaches)} line(s) over the {contract.contract_number or 'contract'} rate: "
-        f"{worst['description']} at {worst['unit_price']} vs {worst['rate']} "
+        f"{worst['description']} at {money(Decimal(worst['unit_price']))} vs "
+        f"{money(Decimal(worst['rate']))} "
         f"(+{worst['excess']:.0%})"
     )
     return [
