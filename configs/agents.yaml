@@ -5,6 +5,13 @@ agents:
   qa: { model: smart }
   extractor: { model: extractor }
   # 3-way match tolerances (mcp_server/tools/reconcile.py): unit price vs contract rate in %,
-  # line / total arithmetic in currency units, units invoiced beyond the PO quantity
-  reconciler: { model: smart, price_tolerance_pct: 2.0, total_tolerance: 0.01, qty_tolerance: 0 }
+  # line / total arithmetic and paid vs total in currency units, units invoiced beyond the PO
+  # quantity, due date vs contract terms in days
+  reconciler:
+    model: smart
+    price_tolerance_pct: 2.0
+    total_tolerance: 0.01
+    qty_tolerance: 0
+    payment_tolerance: 0.01
+    terms_tolerance_days: 0
   reminder_writer: { model: smart }

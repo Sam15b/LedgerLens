@@ -14,7 +14,11 @@ and returns a :class:`Check` with a status and a one-line message:
 * ``unit_price``: every unit price is within ``price_tolerance_pct`` of the contract rate
   for its item;
 * ``total``: the lines add up to the subtotal, and subtotal + tax to the total, within
-  ``total_tolerance``.
+  ``total_tolerance``;
+* ``payment``: what the matched payments add up to: paid in full passes, overpaid fails,
+  unpaid or partly paid fails once overdue (before that: unpaid passes, partly paid warns);
+* ``terms``: the due date is the contract's ``payment_terms_days`` after the invoice date,
+  within ``terms_tolerance_days``.
 
 Tolerances come from ``configs/agents.yaml`` (``agents.reconciler``): see
 :class:`Tolerances`.
@@ -25,6 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -37,7 +42,10 @@ from ledgerlens.core.schemas import Contract, Invoice, LineItem, PurchaseOrder
 from ledgerlens.core.schemas.invoice import totals_issues
 from ledgerlens.extraction.normalize import canonical_vendor
 
-CheckName = Literal["po_exists", "vendor_match", "line_qty", "unit_price", "total"]
+CheckName = Literal[
+    "po_exists", "vendor_match", "line_qty", "unit_price", "total", "payment", "terms"
+]
+PaymentStatus = Literal["paid", "partial", "unpaid", "overpaid"]
 CheckStatus = Literal["pass", "fail", "warn", "skipped"]
 
 ITEM_MATCH = 90.0
@@ -53,6 +61,10 @@ class Tolerances(BaseModel):
     """Per line and for the totals, in the invoice's currency."""
     qty: Decimal = Decimal(0)
     """Units invoiced beyond the PO quantity."""
+    payment: Decimal = Decimal("0.01")
+    """Paid vs total, in the invoice's currency."""
+    terms_days: int = 0
+    """Due date vs invoice date + contract terms, in days."""
 
     @classmethod
     def from_config(cls, config: AgentsConfig | None = None) -> Tolerances:
@@ -65,6 +77,8 @@ class Tolerances(BaseModel):
             "price_tolerance_pct": "price_pct",
             "total_tolerance": "total",
             "qty_tolerance": "qty",
+            "payment_tolerance": "payment",
+            "terms_tolerance_days": "terms_days",
         }
         return cls(**{field: extra[key] for key, field in names.items() if key in extra})
 
@@ -90,6 +104,10 @@ class MatchInputs:
     contract: Contract | None = None
     other_invoices_on_po: Sequence[Invoice] = field(default_factory=list)
     """The PO's other invoices (void ones left out): their quantities count against it."""
+    paid: Decimal = Decimal(0)
+    """What the payments matched to this invoice add up to."""
+    payments: int = 0
+    today: date = field(default_factory=date.today)
 
 
 def _check(name: CheckName, status: CheckStatus, message: str, **details: Any) -> Check:
@@ -238,6 +256,65 @@ def check_total(m: MatchInputs, tol: Tolerances) -> Check:
     return _check("total", "pass", f"lines, tax and total add up to {money(invoice.total)}")
 
 
+def payment_status(paid: Decimal, total: Decimal, tol: Tolerances) -> PaymentStatus:
+    if paid > total + tol.payment:
+        return "overpaid"
+    if paid >= total - tol.payment:
+        return "paid"
+    return "partial" if paid > 0 else "unpaid"
+
+
+def check_payment(m: MatchInputs, tol: Tolerances) -> Check:
+    invoice = m.invoice
+    status = payment_status(m.paid, invoice.total, tol)
+    outstanding = invoice.total - m.paid
+    due = invoice.due_date
+    overdue = (m.today - due).days if due is not None and due < m.today else 0
+    details: dict[str, Any] = {
+        "payment_status": status,
+        "paid": money(m.paid),
+        "outstanding": money(outstanding),
+        "payments": m.payments,
+        "days_overdue": overdue,
+    }
+    currency = invoice.currency
+    if status == "paid":
+        return _check("payment", "pass", f"paid in full ({money(m.paid)} {currency})", **details)
+    if status == "overpaid":
+        return _check("payment", "fail", f"overpaid by {money(-outstanding)} {currency}", **details)
+    owed = f"{money(outstanding)} {currency} outstanding"
+    state = "unpaid" if status == "unpaid" else f"partly paid ({money(m.paid)} {currency})"
+    if overdue:
+        return _check(
+            "payment", "fail", f"{state}, {owed}, {overdue} day(s) past due {due}", **details
+        )
+    when = f"due {due}" if due is not None else "no due date"
+    return _check(
+        "payment", "pass" if status == "unpaid" else "warn", f"{state}, {owed}, {when}", **details
+    )
+
+
+def check_terms(m: MatchInputs, tol: Tolerances) -> Check:
+    contract = m.contract
+    agreed = contract.payment_terms_days if contract is not None else None
+    if contract is None or agreed is None:
+        return _check("terms", "skipped", "no contract payment terms to compare with")
+    invoice = m.invoice
+    number = contract.contract_number or "the contract"
+    if invoice.due_date is None:
+        return _check("terms", "warn", f"no due date; {number} says Net {agreed}")
+    actual = (invoice.due_date - invoice.invoice_date).days
+    details = {"agreed_days": agreed, "invoice_days": actual}
+    if abs(actual - agreed) <= tol.terms_days:
+        return _check("terms", "pass", f"Net {agreed} as agreed in {number}", **details)
+    return _check(
+        "terms",
+        "fail",
+        f"due {actual} day(s) after the invoice date, but {number} says Net {agreed}",
+        **details,
+    )
+
+
 def run_checks(m: MatchInputs, tol: Tolerances | None = None) -> list[Check]:
     """Every check, in table order."""
     tol = tol or Tolerances.from_config()
@@ -247,4 +324,6 @@ def run_checks(m: MatchInputs, tol: Tolerances | None = None) -> list[Check]:
         check_line_qty(m, tol),
         check_unit_price(m, tol),
         check_total(m, tol),
+        check_payment(m, tol),
+        check_terms(m, tol),
     ]
