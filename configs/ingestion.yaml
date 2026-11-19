@@ -33,6 +33,9 @@ embedding:
   sparse_params_path: data/processed/bm25.json
 
 extraction:
-  default: llm             # rules | llm | finetuned
-  model_alias: extractor
+  # rules | llm | finetuned. Switch to finetuned once ledgerlens-llama3-lora is created in
+  # Ollama and beats the rules baseline on the test split (Phase 6a exit, finetune.md).
+  default: llm
+  model_alias: extractor   # finetuned: training prompt, models.yaml `extractor`
+  llm_alias: extractor_api # llm (and finetuned's PO / payment / contract route)
   day_first: true          # 03/04/2026 = 3 April; set false for US-style month-first dates

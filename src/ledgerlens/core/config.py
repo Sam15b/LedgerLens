@@ -246,7 +246,7 @@ class ExtractionConfig(_Section):
     default: Literal["rules", "llm", "finetuned"] = "llm"
     model_alias: str = "extractor"
     """Alias the fine-tuned extractor calls with its training prompt (models.yaml)."""
-    llm_alias: str = "extractor"
+    llm_alias: str = "extractor_api"
     """Alias the generic LLM extractor calls with its prompt and the record's JSON schema;
     the fine-tuned extractor uses it too, for document types it was not trained on."""
     day_first: bool = True  # read 03/04/2026 as 3 April (most of the world), not March 4

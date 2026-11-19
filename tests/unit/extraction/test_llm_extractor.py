@@ -43,7 +43,7 @@ class ScriptedProvider:
 
 def extractor(provider: ScriptedProvider, **kwargs: object) -> LLMExtractor:
     models = ModelsConfig.model_validate(
-        {"aliases": {"extractor": ["openai/gpt-test"]}, "retry": {"max_attempts": 1}}
+        {"aliases": {"extractor_api": ["openai/gpt-test"]}, "retry": {"max_attempts": 1}}
     )
     client = LLMClient(models, providers={"openai": provider}, sleep=lambda s: None)
     return LLMExtractor(client, today=date(2026, 11, 12), **kwargs)  # type: ignore[arg-type]
