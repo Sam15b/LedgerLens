@@ -38,9 +38,10 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -52,9 +53,19 @@ from ledgerlens.anomaly.features import (
     VendorHistory,
     feature_vector,
     invoice_features,
+    load_vendor_history,
 )
-from ledgerlens.anomaly.rules import InvoiceRef, RuleContext, RuleHit, check_invoice
+from ledgerlens.anomaly.rules import (
+    InvoiceRef,
+    RuleContext,
+    RuleHit,
+    VendorMaster,
+    check_invoice,
+)
 from ledgerlens.core.config import AnomalyConfig, get_config, repo_path
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 Matrix = npt.NDArray[np.float64]
 Flags = npt.NDArray[np.bool_]
@@ -420,3 +431,177 @@ class AnomalyScorer:
 def get_scorer() -> AnomalyScorer:
     """The process's scorer: the model is loaded on first use, then kept."""
     return AnomalyScorer.from_config()
+
+
+# --------------------------------------------------------------------------- Postgres
+
+
+@dataclass(frozen=True)
+class StoredContext:
+    """What the scorer needs about one stored invoice, read from Postgres."""
+
+    ref: InvoiceRef
+    rules: RuleContext
+    history: VendorHistory
+
+
+def load_context(session: Session, invoice_id: str) -> StoredContext | None:
+    """The invoice and what was known when it arrived: the same vendor's invoices stored
+    before it (``created_at``, then id), the PO it cites less what those invoices already
+    billed against it, the PO's contract (else the vendor's contract in force on the
+    invoice date), the vendor master (vendors not first seen on a document) and the
+    vendor's history for the features. ``None`` if there is no such invoice."""
+    from sqlalchemy import and_, func, or_, select, tuple_
+    from sqlalchemy.orm import selectinload
+
+    from ledgerlens.storage.neo4j.linker import NEW_VENDOR_PREFIX
+    from ledgerlens.storage.postgres.models import ContractRow, InvoiceRow, VendorRow
+    from ledgerlens.storage.postgres.repositories import (
+        PurchaseOrderRepository,
+        to_contract,
+        to_invoice,
+        to_purchase_order,
+    )
+
+    row = session.get(InvoiceRow, invoice_id)
+    if row is None:
+        return None
+    invoice = to_invoice(row)
+    ref = InvoiceRef(row.id, invoice, row.vendor_id)
+    earlier = tuple_(InvoiceRow.created_at, InvoiceRow.id) < tuple_(row.created_at, row.id)
+    same_vendor = (
+        InvoiceRow.vendor_id == row.vendor_id
+        if row.vendor_id is not None
+        else and_(InvoiceRow.vendor_id.is_(None), InvoiceRow.vendor_name == row.vendor_name)
+    )
+    stored = [
+        InvoiceRef(other.id, to_invoice(other), other.vendor_id)
+        for other in session.scalars(
+            select(InvoiceRow)
+            .where(same_vendor, earlier)
+            .options(selectinload(InvoiceRow.line_items))
+        )
+    ]
+
+    po = po_row = None
+    billed = Decimal(0)
+    if invoice.po_number:
+        repo = PurchaseOrderRepository(session)
+        rows = repo.find_by_number(invoice.po_number, vendor_id=row.vendor_id)
+        rows = rows or repo.find_by_number(invoice.po_number)
+        if rows:
+            po_row = rows[0]
+            po = to_purchase_order(po_row)
+            billed = Decimal(
+                session.scalar(
+                    select(func.coalesce(func.sum(InvoiceRow.total), 0)).where(
+                        InvoiceRow.po_number == invoice.po_number,
+                        InvoiceRow.currency == po.currency,
+                        earlier,
+                    )
+                )
+                or 0
+            )
+    contract_row = po_row.contract if po_row is not None else None
+    if contract_row is None and row.vendor_id is not None:
+        contract_row = session.scalars(
+            select(ContractRow)
+            .where(
+                ContractRow.vendor_id == row.vendor_id,
+                ContractRow.start_date <= invoice.invoice_date,
+                or_(ContractRow.end_date.is_(None), ContractRow.end_date >= invoice.invoice_date),
+            )
+            .order_by(ContractRow.start_date.desc(), ContractRow.id)
+            .limit(1)
+        ).first()
+
+    vendors = session.scalars(
+        select(VendorRow).where(VendorRow.id.not_like(f"{NEW_VENDOR_PREFIX}%"))
+    )
+    master = VendorMaster.from_vendors(
+        {"vendor_id": v.id, "name": v.canonical_name, "tax_id": v.tax_id, "aliases": v.aliases}
+        for v in vendors
+    )
+    if row.vendor_id is not None:
+        history = load_vendor_history(
+            session, row.vendor_id, invoice.invoice_date, exclude_id=row.id
+        )
+    else:
+        history = VendorHistory.from_invoices(
+            (s.invoice.invoice_date, s.invoice.total)
+            for s in stored
+            if s.invoice.invoice_date <= invoice.invoice_date
+        )
+    rules = RuleContext(
+        stored=stored,
+        purchase_order=po,
+        already_billed=billed,
+        contract=to_contract(contract_row) if contract_row is not None else None,
+        master=master,
+    )
+    return StoredContext(ref, rules, history)
+
+
+def score_stored(session: Session, invoice_id: str, scorer: AnomalyScorer) -> AnomalyScore | None:
+    """Score a stored invoice and write its ``anomaly_scores`` row (score and reasons,
+    under the scorer's model version). ``None`` if the invoice is not stored."""
+    from ledgerlens.storage.postgres.repositories import AnomalyScoreRepository
+
+    context = load_context(session, invoice_id)
+    if context is None:
+        return None
+    verdict = scorer.score(context.ref, context.rules, context.history)
+    AnomalyScoreRepository(session).upsert(
+        invoice_id,
+        scorer.model_version,
+        verdict.score,
+        [reason.model_dump(mode="json") for reason in verdict.reasons],
+    )
+    return verdict
+
+
+# --------------------------------------------------------------------------- CLI
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Score stored invoices: the ones given, and with --missing every invoice the current
+    model version has not scored yet."""
+    import argparse
+
+    from ledgerlens.storage.postgres.db import get_session_factory, session_scope
+    from ledgerlens.storage.postgres.repositories import AnomalyScoreRepository
+
+    parser = argparse.ArgumentParser(
+        prog="python -m ledgerlens.anomaly.scorer", description=main.__doc__
+    )
+    parser.add_argument("invoice_ids", nargs="*")
+    parser.add_argument("--missing", action="store_true", help="every invoice not yet scored")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    scorer = get_scorer()
+    sessions = get_session_factory()
+    ids = list(args.invoice_ids)
+    if args.missing:
+        with sessions() as session:
+            ids += AnomalyScoreRepository(session).unscored(scorer.model_version)
+    flagged = 0
+    for n, invoice_id in enumerate(ids, 1):
+        with session_scope(sessions) as session:
+            verdict = score_stored(session, invoice_id, scorer)
+        if verdict is None:
+            print(f"{invoice_id}: no such invoice")
+            continue
+        flagged += verdict.flagged
+        if args.invoice_ids:
+            texts = "; ".join(reason.text for reason in verdict.reasons)
+            print(
+                f"{invoice_id}: {verdict.score:.3f} {'FLAG' if verdict.flagged else 'ok'} {texts}"
+            )
+        if n % 500 == 0:
+            logger.info("scored %d of %d", n, len(ids))
+    print(f"scored {len(ids)} invoices with {scorer.model_version}: {flagged} flagged")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

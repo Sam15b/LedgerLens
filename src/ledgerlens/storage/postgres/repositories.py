@@ -42,6 +42,7 @@ from ledgerlens.core.schemas import (
     Receipt,
 )
 from ledgerlens.storage.postgres.models import (
+    AnomalyScoreRow,
     Base,
     ChunkRow,
     ContractRow,
@@ -716,6 +717,53 @@ class PaymentRepository:
         )
 
 
+class AnomalyScoreRepository:
+    """One score per invoice and model version (re-scoring replaces it)."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        invoice_id: str,
+        model_version: str,
+        score: float,
+        reasons: Sequence[Mapping[str, Any]],
+    ) -> None:
+        upsert(
+            self.session,
+            AnomalyScoreRow,
+            {
+                "invoice_id": invoice_id,
+                "model_version": model_version,
+                "score": score,
+                "reasons": list(reasons),
+            },
+            conflict=("invoice_id", "model_version"),
+        )
+
+    def for_invoice(self, invoice_id: str) -> list[AnomalyScoreRow]:
+        """Every version's score, newest first."""
+        stmt = (
+            select(AnomalyScoreRow)
+            .where(AnomalyScoreRow.invoice_id == invoice_id)
+            .order_by(AnomalyScoreRow.created_at.desc(), AnomalyScoreRow.id.desc())
+        )
+        return list(self.session.scalars(stmt))
+
+    def unscored(self, model_version: str) -> list[str]:
+        """Invoices with no score from ``model_version``, oldest first."""
+        scored = select(AnomalyScoreRow.invoice_id).where(
+            AnomalyScoreRow.model_version == model_version
+        )
+        stmt = (
+            select(InvoiceRow.id)
+            .where(InvoiceRow.id.not_in(scored))
+            .order_by(InvoiceRow.created_at, InvoiceRow.id)
+        )
+        return list(self.session.scalars(stmt))
+
+
 def _pick(rows: Sequence[InvoiceRow] | Sequence[ContractRow], vendor_id: str | None) -> str | None:
     """The id of the one candidate, preferring ``vendor_id``'s; ``None`` if ambiguous."""
     if vendor_id is not None:
@@ -848,6 +896,7 @@ class Repositories:
         self.purchase_orders = PurchaseOrderRepository(session)
         self.payments = PaymentRepository(session)
         self.contracts = ContractRepository(session)
+        self.anomaly_scores = AnomalyScoreRepository(session)
 
     def delete_records(self, document_id: str, *, keep: type[Base] | None = None) -> int:
         """Delete the business records a document produced, except in table ``keep`` --

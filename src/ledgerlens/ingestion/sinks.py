@@ -9,7 +9,11 @@ For one document it runs, in order (docs/layers/02-storage.md, "Write path"):
    vendor row if new, and the extracted record with its line items;
 2. **pinecone** -- delete every vector of the document, then upsert its chunks;
 3. **neo4j** -- remember the vendor (new node / alias), MERGE the record and its edges;
-4. mark the document ``ready``.
+4. **anomaly** -- for an invoice, score it (rules + autoencoder,
+   :mod:`ledgerlens.anomaly.scorer`) against what was stored before it, and upsert its
+   ``anomaly_scores`` row with the reasons. A scoring failure is logged and does not fail
+   the document: ``python -m ledgerlens.anomaly.scorer --missing`` scores it later;
+5. mark the document ``ready``.
 
 Every step is idempotent (upserts, delete-then-upsert, MERGE), so running the write again
 -- after a crash, a failure, or for a document that was already stored -- converges on the
@@ -26,6 +30,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, TypeVar
 
+from ledgerlens.core.config import get_config
 from ledgerlens.core.schemas import (
     Document,
     DocumentStatus,
@@ -45,6 +50,7 @@ from ledgerlens.storage.postgres.repositories import (
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
+    from ledgerlens.anomaly.scorer import AnomalyScorer
     from ledgerlens.ingestion.pipeline import IngestResult
 
 logger = logging.getLogger(__name__)
@@ -66,7 +72,8 @@ def _tax_id(record: ExtractedRecord) -> str | None:
 
 class StoresSink:
     """Postgres + Pinecone + Neo4j. ``pinecone`` / ``linker`` may be ``None`` to skip a
-    store (tests, or a deployment without the graph)."""
+    store (tests, or a deployment without the graph); ``scorer`` ``None`` skips anomaly
+    scoring."""
 
     def __init__(
         self,
@@ -74,17 +81,26 @@ class StoresSink:
         sessions: sessionmaker[Session] | None = None,
         pinecone: PineconeStore | None = None,
         linker: GraphLinker | None = None,
+        scorer: AnomalyScorer | None = None,
     ) -> None:
         self.sessions = sessions or get_session_factory()
         self.pinecone = pinecone
         self.linker = linker
+        self.scorer = scorer
 
     @classmethod
     def from_settings(cls) -> StoresSink:
-        """All three stores from ``DATABASE_URL``, ``PINECONE_*`` and ``NEO4J_*``."""
+        """All three stores from ``DATABASE_URL``, ``PINECONE_*`` and ``NEO4J_*``, and
+        the process's anomaly scorer (``configs/anomaly.yaml``: ``score_on_ingest``)."""
+        from ledgerlens.anomaly.scorer import get_scorer
         from ledgerlens.storage.neo4j.driver import get_driver
 
-        return cls(pinecone=PineconeStore.from_settings(), linker=GraphLinker(get_driver()))
+        scorer = get_scorer() if get_config().anomaly.score_on_ingest else None
+        return cls(
+            pinecone=PineconeStore.from_settings(),
+            linker=GraphLinker(get_driver()),
+            scorer=scorer,
+        )
 
     # ------------------------------------------------------------------ StorageSink
 
@@ -142,6 +158,30 @@ class StoresSink:
         if self.linker is not None:
             linker = self.linker
             self._step("neo4j", lambda: self._graph(linker, document, record, record_id, vendor))
+        if self.scorer is not None and isinstance(record, Invoice):
+            self.score(record_id)
+
+    def score(self, invoice_id: str) -> bool:
+        """Score a stored invoice into ``anomaly_scores``. Failures are logged, not
+        raised: the document is stored either way, and can be scored again later."""
+        from ledgerlens.anomaly.scorer import score_stored
+
+        if self.scorer is None:
+            return False
+        try:
+            with session_scope(self.sessions) as session:
+                verdict = score_stored(session, invoice_id, self.scorer)
+        except Exception:
+            logger.exception("anomaly scoring of invoice %s failed", invoice_id)
+            return False
+        if verdict is not None and verdict.flagged:
+            logger.info(
+                "invoice %s flagged (score %.3f): %s",
+                invoice_id,
+                verdict.score,
+                "; ".join(reason.text for reason in verdict.reasons),
+            )
+        return verdict is not None
 
     @staticmethod
     def _step(name: str, run: Callable[[], T]) -> T:
