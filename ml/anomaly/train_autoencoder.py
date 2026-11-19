@@ -32,10 +32,8 @@ backend.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import logging
-import os
 import shutil
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -47,6 +45,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ledgerlens.anomaly.features import Matrix, Standardizer
+from ledgerlens.anomaly.scorer import import_keras as import_keras  # same backend choice
 
 Strings = npt.NDArray[np.str_]
 Flags = npt.NDArray[np.bool_]
@@ -60,20 +59,6 @@ LEARNING_RATE = 1e-3
 NORMAL = "normal"
 TARGET_PRECISION = 0.8
 FALLBACK_PERCENTILE = 99.0
-
-
-def import_keras() -> Any:
-    """``keras``, on TensorFlow if it is installed, else PyTorch (unless ``KERAS_BACKEND``
-    says otherwise). Must run before anything else imports keras."""
-    if (
-        "KERAS_BACKEND" not in os.environ
-        and importlib.util.find_spec("tensorflow") is None
-        and importlib.util.find_spec("torch") is not None
-    ):
-        os.environ["KERAS_BACKEND"] = "torch"
-    import keras
-
-    return keras
 
 
 def build_autoencoder(

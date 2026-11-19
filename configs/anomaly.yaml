@@ -1,0 +1,8 @@
+# See docs/layers/08-anomaly-detection.md
+# Models are trained by ml/anomaly/train_autoencoder.py into models/anomaly/<version>/
+# (git-ignored). Without a model, or without Keras installed, invoices are scored by the
+# rules alone (model_version "rules-only").
+models_dir: models/anomaly
+version: latest # or a folder name, e.g. ae-20261119-160552
+use_combined_threshold: true # rules + AE cut from ml/anomaly/evaluate.py --save-combined
+score_on_ingest: true

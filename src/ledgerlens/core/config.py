@@ -277,6 +277,20 @@ class AgentsConfig(_Section):
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 
 
+# anomaly.yaml -----------------------------------------------------------------------
+
+
+class AnomalyConfig(_Section):
+    models_dir: str = "models/anomaly"
+    """Where ``ml/anomaly/train_autoencoder.py`` saves model versions (repo-relative)."""
+    version: str = "latest"
+    """A folder in ``models_dir``, or ``latest`` (the newest one)."""
+    use_combined_threshold: bool = True
+    """Flag at the rules + AE threshold (``combined`` in metadata.json) when it is saved."""
+    score_on_ingest: bool = True
+    """The stores sink scores every invoice it writes."""
+
+
 # eval.yaml --------------------------------------------------------------------------
 
 
@@ -316,9 +330,10 @@ class AppConfig(_Section):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
 
 
-_CONFIG_FILES = ("models", "pinecone", "ingestion", "agents", "eval", "retrieval")
+_CONFIG_FILES = ("models", "pinecone", "ingestion", "agents", "eval", "retrieval", "anomaly")
 
 
 def resolve_configs_dir(override: Path | None = None) -> Path:
