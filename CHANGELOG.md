@@ -8,6 +8,59 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+### Fine-tuning milestone (Phase 6a: Llama 3 8B + LoRA), tooling only
+
+Everything needed to train, evaluate, export and serve a fine-tuned extraction model, run
+end to end on CPU with a tiny random Llama. **The model itself has not been trained**:
+the dev machine has no GPU and no access to the gated Llama 3 weights. So there is no
+fine-tuned F1 yet. The Phase 6a gate (F1 above the rules baseline, 0.601) is still open,
+and this milestone gets no version.
+
+#### Added
+
+- `ml/finetune/prepare_dataset.py`: instruction data from CORD, SROIE (when downloaded)
+  and the synthetic invoices. Splits are leak-free by source document, the encoding uses
+  the Llama 3 chat template, and the loss covers response tokens only. 1,016 / 130 / 130
+  examples without SROIE.
+- `ml/finetune/train_lora.py`: QLoRA on a 16 GB GPU (4-bit NF4, paged 8-bit AdamW,
+  gradient checkpointing). It reads a YAML config with `--set` overrides, resumes from
+  checkpoints on Drive, keeps the best checkpoint by validation loss with early stopping,
+  and logs each run to `runs/<id>/`. Comes with a Colab notebook.
+- Runs 1 and 2, pinned but untrained: `runs/run-1` (r 16, lr 2e-4, 3 epochs) and
+  `runs/run-2` (r 32, lr 1e-4, 2 epochs). Each has its config, dataset hashes and notes.
+- `ml/finetune/infer.py` and `eval_extraction.py`: adapter inference, then field F1,
+  JSON validity, latency and tokens for rules, API, base and LoRA models with one
+  harness (`eval/reports/2026-11-18/finetune.md`).
+- `ml/finetune/merge_and_export.py`: merges the adapter into the float16 base, then
+  produces a GGUF through llama.cpp, quantized to Q4_K_M, with an `export.json`
+  manifest.
+- `ml/finetune/Modelfile` for `ollama create ledgerlens-llama3-lora`: Llama 3 template,
+  the training system prompt, greedy decoding.
+- `ledgerlens.extraction.finetuned.FineTunedExtractor` (`extraction.default: finetuned`,
+  `pipeline --extractor finetuned`). It sends the training prompt through the `extractor`
+  alias in JSON mode, maps the reply onto the record schema, and passes purchase orders,
+  payments and contracts to the LLM extractor.
+
+#### Changed
+
+- `configs/models.yaml`: `extractor` is now `[ollama/ledgerlens-llama3-lora,
+  openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]`. The new
+  `extractor_api` alias (the old list) is what `LLMExtractor` uses
+  (`extraction.llm_alias`), so its schema prompt never reaches the fine-tuned model.
+- The fine-tuned prompt contract (system prompt, key lists, instruction) lives in
+  `ledgerlens.extraction.finetuned`, and the training data builder imports it from
+  there. The rebuilt dataset is byte-identical.
+
+#### Known issues
+
+- No training run, so no adapter, no GGUF and no fine-tuned or base-model F1. The steps
+  are in `ml/finetune/runs/run-1/NOTES.md` and `run-2/NOTES.md`.
+- GPT-4o row of the comparison not measured: it needs a working OpenAI key and about
+  130 paid calls.
+- llama.cpp's converter and `llama-quantize` have only been exercised through unit tests
+  with a fake runner.
+- `extraction.default` stays `llm` until the fine-tuned model passes the gate.
+
 ## [0.4.0] - 2026-11-18
 
 Phase 4 — Retrieval: five retrievers behind one `Retriever` protocol, from plain vector
