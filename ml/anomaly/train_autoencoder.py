@@ -16,6 +16,13 @@ split** (:func:`select_threshold`): the lowest error that still gives precision 
 i.e. the most anomalies caught at that precision. If no threshold reaches it, or val has no
 labels, the threshold is the 99th percentile of the normal validation invoices' errors.
 
+Everything needed to score is saved under ``models/anomaly/<version>/`` (:func:`save_model`):
+``model.keras``, ``scaler.json`` (and ``pca.json`` if the features used embeddings) from
+the feature build, and ``metadata.json`` with the version, feature names, threshold,
+training history summary, data hashes and the Keras version and backend. Before it
+finishes, the run loads the folder back (:func:`load_model`) and checks that the reloaded
+model gives the same validation scores.
+
 Keras 3 runs on TensorFlow, JAX or PyTorch. TensorFlow has no wheel for every Python
 version (none for 3.14 yet), so when ``KERAS_BACKEND`` is not set and TensorFlow is not
 installed, PyTorch is used (:func:`import_keras`); the saved ``.keras`` file loads on any
@@ -26,17 +33,20 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import logging
 import os
+import shutil
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
 
-from ledgerlens.anomaly.features import Matrix
+from ledgerlens.anomaly.features import Matrix, Standardizer
 
 Strings = npt.NDArray[np.str_]
 Flags = npt.NDArray[np.bool_]
@@ -94,6 +104,7 @@ class Split:
 
     x: Matrix
     """Scaled features."""
+    x_raw: Matrix
     ids: Strings
     labels: Strings
 
@@ -110,7 +121,12 @@ class Split:
 
 def load_split(features_dir: Path, split: str) -> Split:
     with np.load(features_dir / f"{split}.npz", allow_pickle=False) as data:
-        return Split(np.asarray(data["x"], dtype=np.float64), data["ids"], data["labels"])
+        return Split(
+            np.asarray(data["x"], dtype=np.float64),
+            np.asarray(data["x_raw"], dtype=np.float64),
+            data["ids"],
+            data["labels"],
+        )
 
 
 # --------------------------------------------------------------------------- training
@@ -245,6 +261,97 @@ def percentile_threshold(
     return float(np.percentile(errors[~split.is_anomaly], percentile))
 
 
+# --------------------------------------------------------------------------- save / load
+
+MODEL_FILE = "model.keras"
+REPRODUCE_ATOL = 1e-9
+
+
+def make_version(now: datetime | None = None) -> str:
+    return (now or datetime.now(UTC)).strftime("ae-%Y%m%d-%H%M%S")
+
+
+def save_model(
+    out: Path,
+    *,
+    result: TrainResult,
+    threshold: Threshold,
+    features_dir: Path,
+    config: TrainConfig,
+) -> Path:
+    """Write ``model.keras``, the feature build's scaler (and PCA) and ``metadata.json``
+    to ``out`` (a new ``models/anomaly/<version>`` folder). Returns ``out``."""
+    keras = import_keras()
+    if out.exists() and any(out.iterdir()):
+        raise FileExistsError(f"{out} is not empty: pick a new --version")
+    out.mkdir(parents=True, exist_ok=True)
+    result.model.save(out / MODEL_FILE)
+    for name in ("scaler.json", "pca.json"):
+        if (features_dir / name).exists():
+            shutil.copy(features_dir / name, out / name)
+    manifest = json.loads((features_dir / "manifest.json").read_text(encoding="utf-8"))
+    losses = result.history
+    metadata = {
+        "version": out.name,
+        "created_at": datetime.now(UTC).isoformat(),
+        "features": manifest["features"],
+        "threshold": asdict(threshold),
+        "training": {
+            "config": asdict(config),
+            "epochs_run": len(losses["loss"]),
+            "best_epoch": result.best_epoch,
+            "stopped_early": result.stopped_early,
+            "best_val_loss": losses["val_loss"][result.best_epoch - 1],
+            "train_loss_at_best": losses["loss"][result.best_epoch - 1],
+        },
+        "data": {
+            "features_dir": str(features_dir),
+            "source_sha256": manifest.get("source_sha256"),
+            "splits": manifest.get("splits"),
+        },
+        "keras": {"version": keras.__version__, "backend": keras.backend.backend()},
+    }
+    (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
+@dataclass
+class SavedModel:
+    """A trained autoencoder as saved: scores raw feature vectors."""
+
+    model: Any
+    scaler: Standardizer
+    threshold: float
+    metadata: dict[str, Any]
+
+    def errors(self, x_raw: Matrix) -> Matrix:
+        """Reconstruction error of unscaled feature rows."""
+        return reconstruction_error(self.model, self.scaler.transform(x_raw))
+
+    def flags(self, x_raw: Matrix) -> Flags:
+        flagged: Flags = self.errors(x_raw) >= self.threshold
+        return flagged
+
+
+def load_model(path: Path) -> SavedModel:
+    keras = import_keras()
+    metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+    scaler = Standardizer.from_json(json.loads((path / "scaler.json").read_text(encoding="utf-8")))
+    if list(scaler.names) != metadata["features"]:
+        raise ValueError(f"{path}: scaler.json and metadata.json list different features")
+    model = keras.saving.load_model(path / MODEL_FILE)
+    return SavedModel(model, scaler, float(metadata["threshold"]["value"]), metadata)
+
+
+def check_reproduces(path: Path, x_raw: Matrix, expected: Matrix) -> float:
+    """Load ``path`` and score ``x_raw``; raise unless the errors match ``expected``.
+    Returns the largest difference."""
+    diff = float(np.max(np.abs(load_model(path).errors(x_raw) - expected), initial=0.0))
+    if diff > REPRODUCE_ATOL:
+        raise AssertionError(f"reloaded model scores differ by up to {diff:g}")
+    return diff
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -254,6 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Train the invoice anomaly autoencoder.",
     )
     parser.add_argument("--features", type=Path, default=Path("data/processed/anomaly"))
+    parser.add_argument("--models-dir", type=Path, default=Path("models/anomaly"))
+    parser.add_argument("--version", default=None, help="folder name (default: ae-<UTC time>)")
     defaults = TrainConfig()
     for name, value in asdict(defaults).items():
         parser.add_argument(f"--{name.replace('_', '-')}", type=type(value), default=value)
@@ -285,6 +394,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if (rows := val_split.labels == label).any()
         )
         print(f"  {name} {value:.4f}: {per_type}")
+    out = save_model(
+        args.models_dir / (args.version or make_version()),
+        result=result,
+        threshold=threshold,
+        features_dir=args.features,
+        config=config,
+    )
+    diff = check_reproduces(out, val_split.x_raw, errors)
+    print(f"saved {out}; reloaded scores match (max diff {diff:.1e})")
     return 0
 
 
