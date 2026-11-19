@@ -15,9 +15,11 @@ from ledgerlens.anomaly.scorer import (
     RULES_ONLY,
     AnomalyScorer,
     Autoencoder,
+    FeatureError,
     ae_score,
     combine,
     combine_arrays,
+    describe_feature,
     find_model,
     import_keras,
 )
@@ -154,3 +156,72 @@ def test_autoencoder_load_prefers_the_combined_threshold(tmp_path: Path) -> None
     assert x.shape == reconstructed.shape == (2, len(FEATURE_NAMES))
     scorer = AnomalyScorer.from_config(AnomalyConfig(models_dir=str(tmp_path)))
     assert scorer.model_version == "ae-x"
+
+
+# --------------------------------------------------------------------------- reasons
+
+
+def _feature(name: str, error: float, *, above: bool = True, value: float = 0.0) -> FeatureError:
+    return FeatureError(name, value, error, above)
+
+
+def test_every_feature_has_a_phrase_both_ways() -> None:
+    for name in FEATURE_NAMES:
+        up = describe_feature(_feature(name, 1.0, value=1.0))
+        down = describe_feature(_feature(name, 1.0, above=False, value=-1.0))
+        assert up and down and up != down
+    assert describe_feature(_feature("emb_pca_03", 1.0)) == "wording unlike similar invoices"
+
+
+def test_feature_details() -> None:
+    assert (
+        describe_feature(_feature("total_zscore", 1.0, value=3.24))
+        == "total higher than this vendor's usual (z = +3.2)"
+    )
+    # worded by the z-score's sign, even when the model expected a larger one
+    assert (
+        describe_feature(_feature("total_zscore", 1.0, above=False, value=0.2))
+        == "total higher than this vendor's usual (z = +0.2)"
+    )
+    assert (
+        describe_feature(_feature("days_to_due", 1.0, above=False, value=1.0))
+        == "payment terms unusually short (1 day)"
+    )
+
+
+def test_autoencoder_flag_explains_top_three_features() -> None:
+    features = [
+        _feature("total_zscore", 6.0, value=4.0),
+        _feature("round_total", 3.0, value=1.0),
+        _feature("line_count", 0.6, above=False, value=1.0),
+        _feature("weekday", 0.4),
+    ]
+    verdict = combine([], error=0.5, threshold=0.2, feature_errors=features)
+    reasons = verdict.reasons
+    assert [r.code for r in reasons] == ["total_zscore", "round_total", "line_count"]
+    assert reasons[0].text == "total higher than this vendor's usual (z = +4.0)"
+    assert reasons[2].text == "fewer line items than usual (1 lines)"
+    assert reasons[0].share == pytest.approx(0.6)
+    assert {r.source for r in reasons} == {"autoencoder"}
+
+
+def test_rule_hit_reasons_come_first_and_alone_below_threshold() -> None:
+    features = [_feature("total_zscore", 6.0)]
+    below = combine([HIT], error=0.1, threshold=0.2, feature_errors=features)
+    assert [(r.source, r.code, r.text) for r in below.reasons] == [
+        ("rule", "exact_duplicate", "already received as S1")
+    ]
+    above = combine([HIT], error=0.9, threshold=0.2, feature_errors=features)
+    assert [r.source for r in above.reasons] == ["rule", "autoencoder"]
+
+
+def test_unflagged_invoice_gets_one_summary_reason() -> None:
+    (reason,) = combine([], error=0.05, threshold=0.2).reasons
+    assert reason.code == "nothing_unusual"
+    assert reason.text == (
+        "nothing unusual: no rule fired, and the reconstruction error 0.050 is under the "
+        "0.200 threshold"
+    )
+    (rules_only,) = combine([], error=None, threshold=0.0).reasons
+    assert "no anomaly model" in rules_only.text
+    assert rules_only.model_dump()["source"] == "summary"

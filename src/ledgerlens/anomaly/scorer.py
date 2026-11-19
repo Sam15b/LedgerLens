@@ -18,6 +18,10 @@ So every rule hit ranks above every invoice flagged by the autoencoder alone, an
 autoencoder orders invoices within each band. ``flagged`` is a hard hit or ``error >=
 threshold`` (``score >= 0.25`` without a hit).
 
+Reasons (:func:`explain`): each rule hit's own sentence; when the autoencoder flags the
+invoice, its three worst-reconstructed features in plain language ("total unusually high
+for this vendor (z = +3.4)"); and for an invoice nothing flagged, one line saying so.
+
 Serving: :class:`AnomalyScorer` holds the loaded model (:class:`Autoencoder`) and scores
 one invoice at a time. :func:`get_scorer` loads it once per process (a worker scores many
 invoices with one model), from ``configs/anomaly.yaml``. Without a saved model, or without
@@ -30,15 +34,17 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
+from pydantic import BaseModel, Field
 
 from ledgerlens.anomaly.features import (
     FEATURE_NAMES,
@@ -105,6 +111,11 @@ class AnomalyScore:
     @property
     def ae_flagged(self) -> bool:
         return self.ae_error is not None and self.ae_error >= self.ae_threshold
+
+    @property
+    def reasons(self) -> list[Reason]:
+        """:func:`explain`: plain-language reasons for this verdict."""
+        return explain(self)
 
 
 def combine(
@@ -217,6 +228,129 @@ def find_model(models_dir: Path, version: str = "latest") -> Path | None:
         return None
     found = sorted(p for p in models_dir.iterdir() if (p / "metadata.json").exists())
     return found[-1] if found else None
+
+
+# --------------------------------------------------------------------------- reasons
+
+TOP_FEATURES = 3
+
+FEATURE_PHRASES: dict[str, tuple[str, str]] = {
+    # feature: (the invoice's value is higher than expected, lower than expected)
+    "log_total": ("total unusually high", "total unusually low"),
+    "tax_ratio": ("tax rate higher than usual", "tax rate lower than usual"),
+    "round_total": (
+        "total is a round number, typed in rather than added up",
+        "total less round than usual",
+    ),
+    # total_zscore is worded by the z-score's own sign (see describe_feature)
+    "total_zscore": (
+        "total higher than this vendor's usual",
+        "total lower than this vendor's usual",
+    ),
+    "days_to_due": ("payment terms longer than usual", "payment terms unusually short"),
+    "has_due_date": ("has a due date where similar invoices have none", "no due date"),
+    "weekday": ("dated later in the week than usual", "dated earlier in the week than usual"),
+    "is_weekend": ("dated on a weekend", "dated on a weekday where weekends are usual"),
+    "day_of_month": (
+        "dated later in the month than usual",
+        "dated earlier in the month than usual",
+    ),
+    "log_days_since_last": (
+        "long gap since this vendor's previous invoice",
+        "arrived unusually soon after this vendor's previous invoice",
+    ),
+    "first_invoice": ("first invoice from this vendor", "vendor has invoiced before"),
+    "line_count": ("more line items than usual", "fewer line items than usual"),
+    "log_mean_unit_price": ("unit prices unusually high", "unit prices unusually low"),
+    "log_max_unit_price": ("highest unit price unusually high", "highest unit price unusually low"),
+    "has_po": ("cites a purchase order where similar invoices do not", "no purchase order cited"),
+    "has_tax_id": ("carries a tax id where similar invoices do not", "no vendor tax id"),
+    "log_vendor_invoice_count": (
+        "vendor sends more invoices than usual",
+        "vendor has few invoices on record",
+    ),
+    "vendor_mean_log_total": (
+        "total small for what this vendor usually bills",
+        "total large for what this vendor usually bills",
+    ),
+    "vendor_std_log_total": ("vendor's totals vary a lot", "vendor's totals hardly vary"),
+}
+
+
+def _detail(feature: FeatureError) -> str:
+    """The number behind a phrase, where one helps (``" (z = +3.2)"``)."""
+    value = feature.value
+    if feature.name == "total_zscore":
+        return f" (z = {value:+.1f})"
+    if feature.name == "days_to_due" and value:
+        return f" ({_days(value)})"
+    if feature.name == "tax_ratio":
+        return f" ({value:.0%} of the subtotal)"
+    if feature.name == "line_count":
+        return f" ({value:.0f} lines)"
+    if feature.name == "log_days_since_last" and value:
+        return f" ({_days(math.expm1(value))} since the previous one)"
+    return ""
+
+
+def _days(value: float) -> str:
+    n = round(value)
+    return f"{n} day" if n == 1 else f"{n} days"
+
+
+def describe_feature(feature: FeatureError) -> str:
+    """One feature's deviation in plain language: ``"total unusually high for this vendor
+    (z = +3.2)"``."""
+    phrases = FEATURE_PHRASES.get(feature.name)
+    if phrases is None:  # a PCA text component
+        return "wording unlike similar invoices"
+    # how far off the model's expectation, but for the z-score which way from the vendor's
+    # history: "lower than usual (z = +0.2)" would read as a contradiction
+    up = feature.value >= 0 if feature.name == "total_zscore" else feature.above
+    return phrases[0 if up else 1] + _detail(feature)
+
+
+class Reason(BaseModel):
+    """One line of why an invoice scored as it did (stored in ``anomaly_scores.reasons``)."""
+
+    source: Literal["rule", "autoencoder", "summary"]
+    code: str
+    """The rule, the feature, or ``nothing_unusual``."""
+    text: str
+    share: float | None = None
+    """The feature's share of the reconstruction error (autoencoder reasons)."""
+    related_ids: list[str] = Field(default_factory=list)
+
+
+def explain(verdict: AnomalyScore, top: int = TOP_FEATURES) -> list[Reason]:
+    """Why ``verdict`` is what it is: every rule hit's own reason; if the autoencoder
+    flagged it, its ``top`` worst-reconstructed features in plain language; if nothing
+    flagged it, one summary line. Never empty."""
+    reasons = [
+        Reason(source="rule", code=hit.rule, text=hit.reason, related_ids=hit.related_ids)
+        for hit in verdict.rule_hits
+    ]
+    if verdict.ae_flagged:
+        total = sum(f.error for f in verdict.feature_errors) or 1.0
+        reasons += [
+            Reason(
+                source="autoencoder",
+                code=f.name,
+                text=describe_feature(f),
+                share=round(f.error / total, 3),
+            )
+            for f in verdict.feature_errors[:top]
+        ]
+    if not reasons:
+        if verdict.ae_error is None:
+            text = "nothing unusual: no rule fired (no anomaly model loaded)"
+        else:
+            text = (
+                f"nothing unusual: no rule fired, and the reconstruction error "
+                f"{verdict.ae_error:.3f} is under the {verdict.ae_threshold:.3f} threshold"
+            )
+        reasons.append(Reason(source="summary", code="nothing_unusual", text=text))
+    return reasons
 
 
 # --------------------------------------------------------------------------- scorer
