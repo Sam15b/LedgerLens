@@ -1,0 +1,40 @@
+{"text": "how far behind are we on paying Summit Office Partners", "intent": "question"}
+{"text": "Pull up everything we've been invoiced by Acme since June", "intent": "question"}
+{"text": "Which supplier has the most late invoices?", "intent": "question"}
+{"text": "remaining value on PO-2026-00337", "intent": "question"}
+{"text": "Did Brightline send anything in October?", "intent": "question"}
+{"text": "I need the due dates for all open Greenleaf bills", "intent": "question"}
+{"text": "break down our payables by month", "intent": "question"}
+{"text": "Is there a contract with Bitforge Systems?", "intent": "question"}
+{"text": "what currency is INV-005594 in", "intent": "question"}
+{"text": "Top five vendors by outstanding amount", "intent": "question"}
+{"text": "When did we last pay Kopi Sentosa?", "intent": "question"}
+{"text": "Any invoices without a PO number?", "intent": "question"}
+{"text": "Sanity-check INV-005401 for me against what we ordered", "intent": "reconcile"}
+{"text": "Were we charged more than the agreed price on INV-012893?", "intent": "reconcile"}
+{"text": "Does what Acme billed line up with PO-2025-01169?", "intent": "reconcile"}
+{"text": "Make sure INV-017281 follows the contract", "intent": "reconcile"}
+{"text": "run reconciliation on the last Bitforge invoice", "intent": "reconcile"}
+{"text": "are the quantities on INV-008473 within the PO?", "intent": "reconcile"}
+{"text": "INV-005704 vs its purchase order — anything off?", "intent": "reconcile"}
+{"text": "Cross-check INV-015404 with the contract rates", "intent": "reconcile"}
+{"text": "Can you get after Acme about the money they're waiting on from us", "intent": "remind"}
+{"text": "Let Brightline know INV-005594 will be settled, send them a note", "intent": "remind"}
+{"text": "Compose a payment chaser for INV-012893", "intent": "remind"}
+{"text": "Ping Greenleaf about their late invoice", "intent": "remind"}
+{"text": "draft something polite for Kopi Sentosa about INV-005275", "intent": "remind"}
+{"text": "Escalate INV-005401 with a final demand", "intent": "remind"}
+{"text": "Get me a reminder ready for the Summit invoice", "intent": "remind"}
+{"text": "Write to Bitforge about the overdue balance", "intent": "remind"}
+{"text": "Here's the PDF Acme emailed us", "intent": "extract"}
+{"text": "Can you read in this receipt photo?", "intent": "extract"}
+{"text": "add the invoice in this file to the system", "intent": "extract"}
+{"text": "Digitise the scanned contract from Greenleaf", "intent": "extract"}
+{"text": "I've dropped a remittance advice in, please log it", "intent": "extract"}
+{"text": "load this purchase order", "intent": "extract"}
+{"text": "Howdy!", "intent": "other"}
+{"text": "Can you book me a flight to Singapore?", "intent": "other"}
+{"text": "What's 15% of 80?", "intent": "other"}
+{"text": "appreciate it", "intent": "other"}
+{"text": "Explain quantum computing simply", "intent": "other"}
+{"text": "see you tomorrow", "intent": "other"}
