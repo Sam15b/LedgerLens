@@ -21,6 +21,13 @@ Guardrails:
 * **errors are messages**: :func:`guarded` wraps every node, so an exception inside one
   becomes an error reply and an ``errors`` entry instead of failing the request. Tool
   errors already come back as ``ToolMessage`` s (:class:`~ledgerlens.agents.tools.ToolBox`).
+
+Human in the loop: after the reminder writer drafts reminders, :func:`human_approval`
+pauses the run with LangGraph's ``interrupt()`` (the drafts are ``pending_approval``). A
+person approves or rejects them -- the API records the decision and resumes the run with
+``Command(resume={reminder_id: "approved" | "rejected"})`` -- and the run ends by saying
+what was decided. Nothing is sent either way. Pausing needs a checkpointer
+(``build_graph(..., checkpointer=...)``).
 """
 
 from __future__ import annotations
@@ -31,7 +38,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from ledgerlens.agents.state import Intent, LedgerState
 from ledgerlens.core.config import get_config
@@ -111,6 +120,80 @@ def make_route(max_steps: int) -> Any:
     return route
 
 
+Decision = str
+DECISIONS = ("approved", "rejected")
+
+
+def pending_drafts(state: LedgerState) -> list[dict[str, Any]]:
+    """Drafts nobody has decided on yet."""
+    decided = state.get("reminder_decisions") or {}
+    return [d for d in state.get("reminder_drafts") or [] if d["reminder_id"] not in decided]
+
+
+def read_decisions(answer: Any, pending: list[dict[str, Any]]) -> dict[str, Decision]:
+    """The resume value as ``{reminder_id: decision}``: a mapping of ids to decisions, or
+    one decision (a string, or ``{"decision": ...}``) for every pending draft. Drafts left
+    out stay pending; anything that is not a decision is ignored."""
+    ids = [d["reminder_id"] for d in pending]
+    if isinstance(answer, str):
+        answer = {"decision": answer}
+    if not isinstance(answer, dict):
+        return {}
+    if "decision" in answer and answer["decision"] in DECISIONS:
+        return {reminder_id: str(answer["decision"]) for reminder_id in ids}
+    return {k: v for k, v in answer.items() if k in ids and v in DECISIONS}
+
+
+def human_approval(state: LedgerState) -> dict[str, Any]:
+    """Pause until a person approves or rejects the pending drafts, then report it."""
+    pending = pending_drafts(state)
+    if not pending:
+        return {"step_count": 1}
+    answer = interrupt(
+        {
+            "type": "reminder_approval",
+            "reminders": [
+                {
+                    "reminder_id": d["reminder_id"],
+                    "invoice_number": d["invoice_number"],
+                    "tone": d["tone"],
+                    "vendor_email": d.get("vendor_email"),
+                    "body": d["body"],
+                }
+                for d in pending
+            ],
+        }
+    )
+    decisions = read_decisions(answer, pending)
+    numbers = {d["reminder_id"]: d["invoice_number"] for d in pending}
+    approved = [numbers[i] for i, v in decisions.items() if v == "approved"]
+    rejected = [numbers[i] for i, v in decisions.items() if v == "rejected"]
+    waiting = [numbers[i] for i in numbers if i not in decisions]
+    lines = []
+    if approved:
+        lines.append(
+            f"Approved: {', '.join(approved)}. Nothing has been sent: LedgerLens drafts "
+            "reminders but does not send them, so send the approved text yourself."
+        )
+    if rejected:
+        lines.append(f"Rejected: {', '.join(rejected)}. Those drafts will not be used.")
+    if waiting:
+        lines.append(f"Still waiting for a decision: {', '.join(waiting)}.")
+    return {
+        "reminder_decisions": decisions,
+        "messages": [AIMessage(" ".join(lines), name="human_approval")],
+        "step_count": 1,
+    }
+
+
+def make_after_reminders(max_steps: int) -> Any:
+    def after_reminders(state: LedgerState) -> str:
+        """Drafts wait for a person; with none, the run ends."""
+        return "human_approval" if pending_drafts(state) else "respond"
+
+    return after_reminders
+
+
 def make_after_extract(max_steps: int) -> Any:
     def after_extract(state: LedgerState) -> str:
         """A newly saved invoice is reconciled straight away (if the step budget allows:
@@ -142,6 +225,8 @@ def guarded(name: str, node: Any) -> Any:
         async def run_async(state: LedgerState) -> dict[str, Any]:
             try:
                 result: dict[str, Any] = await node(state)
+            except GraphBubbleUp:  # interrupt() and other control flow: not an error
+                raise
             except Exception as exc:
                 return _failure(name, exc)
             return result
@@ -151,6 +236,8 @@ def guarded(name: str, node: Any) -> Any:
     def run(state: LedgerState) -> dict[str, Any]:
         try:
             result: dict[str, Any] = node(state)
+        except GraphBubbleUp:
+            raise
         except Exception as exc:
             return _failure(name, exc)
         return result
@@ -185,9 +272,16 @@ def build_graph(
         make_route(max_steps),
         {name: name for name in [*SPECIALISTS.values(), "respond"]},
     )
+    graph.add_node("human_approval", human_approval)
     for name in SPECIALISTS.values():
-        if name != "extractor":
+        if name not in ("extractor", "reminder_writer"):
             graph.add_edge(name, "respond")
+    graph.add_conditional_edges(
+        "reminder_writer",
+        make_after_reminders(max_steps),
+        {"human_approval": "human_approval", "respond": "respond"},
+    )
+    graph.add_edge("human_approval", "respond")
     graph.add_conditional_edges(
         "extractor",
         make_after_extract(max_steps),

@@ -35,6 +35,8 @@ class LedgerState(TypedDict, total=False):
     reconciliation: dict[str, Any] | None
     """The reconcile tool's match report."""
     reminder_drafts: Annotated[list[dict[str, Any]], operator.add]
+    reminder_decisions: Annotated[dict[str, str], merge_citations]
+    """Reminder id -> ``approved`` / ``rejected``, as a person decided."""
     citations: Annotated[dict[str, str], merge_citations]
     step_count: Annotated[int, operator.add]
     errors: Annotated[list[str], operator.add]
