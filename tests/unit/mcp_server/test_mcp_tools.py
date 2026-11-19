@@ -151,14 +151,14 @@ async def client(services: Services) -> AsyncIterator[ClientSession]:
 @pytest.mark.anyio
 async def test_lists_search_and_graph_tools(client: ClientSession) -> None:
     tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    assert set(tools) == {"search_documents", "graph_query"}
+    assert set(tools) >= {"search_documents", "graph_query"}
     search = tools["search_documents"].inputSchema
     assert search["required"] == ["query"]
     assert set(search["properties"]) == {"query", "doc_type", "vendor", "date_from", "date_to", "k"}
     assert search["properties"]["k"]["maximum"] == 20
     graph = tools["graph_query"]
     assert graph.description is not None and "unpaid_with_po(" in graph.description
-    for tool in tools.values():
+    for tool in (tools["search_documents"], tools["graph_query"]):
         assert tool.annotations is not None and tool.annotations.readOnlyHint
         assert tool.outputSchema is not None  # structured output
 

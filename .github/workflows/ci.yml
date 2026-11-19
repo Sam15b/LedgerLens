@@ -62,7 +62,7 @@ jobs:
       - name: Install Tesseract (pipeline test OCRs the scanned receipt)
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tesseract-ocr
       - name: Install
-        run: pip install -e ".[dev,storage]"
+        run: pip install -e ".[dev,storage,agents]"  # MCP record tools are tested against Postgres
       - name: Start services (same docker-compose.yml as local development)
         run: docker compose up -d --wait --wait-timeout 240 postgres neo4j redis pinecone-local
       - name: Wait for Pinecone Local

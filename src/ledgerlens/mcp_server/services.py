@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
+    from ledgerlens.ingestion.sinks import StoresSink
     from ledgerlens.llm.router import LLMClient
     from ledgerlens.retrieval import Retriever
     from ledgerlens.retrieval.analyze import QueryAnalysis, VendorFinder
@@ -65,6 +66,7 @@ class Services:
         sessions: sessionmaker[Session] | None = None,
         llm: LLMClient | None = None,
         vendors: VendorFinder | None = None,
+        record_sink: StoresSink | None = None,
         today: date | None = None,
     ) -> None:
         given: dict[str, Any] = {
@@ -75,6 +77,7 @@ class Services:
             "sessions": sessions,
             "llm": llm,
             "vendors": vendors,
+            "record_sink": record_sink,
         }
         for name, value in given.items():
             if value is not None:
@@ -154,6 +157,18 @@ class Services:
         from ledgerlens.storage.postgres.db import get_session_factory
 
         return get_session_factory()
+
+    @cached_property
+    def record_sink(self) -> StoresSink:
+        """Writes saved extractions like ingestion does: Postgres, the graph and (for
+        invoices, if ``anomaly.score_on_ingest``) an anomaly score."""
+        from ledgerlens.anomaly.scorer import get_scorer
+        from ledgerlens.core.config import get_config
+        from ledgerlens.ingestion.sinks import StoresSink
+        from ledgerlens.storage.neo4j.linker import GraphLinker
+
+        scorer = get_scorer() if get_config().anomaly.score_on_ingest else None
+        return StoresSink(sessions=self.sessions, linker=GraphLinker(self.driver), scorer=scorer)
 
     @cached_property
     def vendors(self) -> VendorFinder:

@@ -38,7 +38,7 @@ INSTRUCTIONS = (
     "payments, as documents (searchable text) and as a knowledge graph. Use the tools to "
     "look things up; cite documents by the citation tags the tools return (doc:INV-889)."
 )
-TOOL_MODULES: tuple[str, ...] = ("search", "graph")
+TOOL_MODULES: tuple[str, ...] = ("search", "graph", "records")
 """Modules under ``ledgerlens.mcp_server.tools`` whose tools the server offers."""
 
 Transport = Literal["stdio", "http"]
