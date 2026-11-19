@@ -48,43 +48,24 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
+# The prompt the model is trained on is the one it is served with: one copy, in src/.
+from ledgerlens.extraction.finetuned import (
+    INVOICE_KEYS,
+    SYSTEM_PROMPT,
+    instruction,
+    user_message,
+)
+
 logger = logging.getLogger(__name__)
 
 CORD_SPLITS = {"train": "train", "validation": "val", "valid": "val", "dev": "val", "test": "test"}
 SROIE_SPLITS = {"train": "train", "test": "test"}
 
-RECEIPT_KEYS = ("vendor_name", "vendor_address", "receipt_date", "total")
-CORD_KEYS = ("line_items", "subtotal", "tax", "total")
-INVOICE_KEYS = (
-    "invoice_number",
-    "vendor_name",
-    "vendor_tax_id",
-    "customer_name",
-    "invoice_date",
-    "due_date",
-    "po_number",
-    "currency",
-    "subtotal",
-    "tax",
-    "total",
-    "line_items",
-)
 DEFAULT_SYNTHETIC_SHARE = 0.25
 DEFAULT_SEED = 13
 
 
 # --------------------------------------------------------------------------- examples
-
-
-def instruction(doc_type: str, keys: Sequence[str]) -> str:
-    """The task for one example: which document, which keys, and the value formats."""
-    return (
-        f"Extract the {doc_type.replace('_', ' ')} fields from the document text as one JSON "
-        f"object with exactly these keys: {', '.join(keys)}. Use null for a field the text "
-        "does not show. Write dates as YYYY-MM-DD and amounts as plain numbers with two "
-        "decimals and no thousands separators. Line items have description, quantity, "
-        "unit_price and amount."
-    )
 
 
 @dataclass(frozen=True)
@@ -508,10 +489,6 @@ DEFAULT_BASE_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 DEFAULT_MAX_LENGTH = 2048
 IGNORE_INDEX = -100
 """Label for tokens the loss skips (PyTorch cross-entropy's ``ignore_index``)."""
-SYSTEM_PROMPT = (
-    "You extract structured fields from business documents. Reply with one JSON object and "
-    "nothing else."
-)
 
 
 def chat_messages(example: Example, *, with_answer: bool = True) -> list[dict[str, str]]:
@@ -519,7 +496,10 @@ def chat_messages(example: Example, *, with_answer: bool = True) -> list[dict[st
     JSON as the assistant turn (left out for generation)."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{example.instruction}\n\nDocument text:\n{example.input}"},
+        {
+            "role": "user",
+            "content": user_message(example.input, example.doc_type, list(example.target)),
+        },
     ]
     if with_answer:
         messages.append({"role": "assistant", "content": example.output})

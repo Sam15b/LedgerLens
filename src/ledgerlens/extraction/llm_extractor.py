@@ -1,8 +1,8 @@
 """Structured extraction with an LLM through the model router.
 
 The document text and the versioned prompt (``agents/prompts/extract_invoice.md``) go to
-the ``extraction.model_alias`` alias (``extractor`` in ``models.yaml``) with the record's
-JSON schema as native structured output; the router validates the reply against the
+the ``extraction.llm_alias`` alias (``models.yaml``) with the record's JSON schema as native
+structured output; the router validates the reply against the
 Pydantic model and gives the model one chance to repair it. The record is then tidied by
 :func:`tidy_record` (whitespace in text fields), the same pass every extractor's output
 goes through, so evaluation compares like with like.
@@ -61,7 +61,7 @@ class LLMExtractor:
 
     @property
     def model(self) -> str:
-        return self.config.model_alias
+        return self.config.llm_alias
 
     def messages(self, text: str, doc_type: DocType) -> list[Message]:
         today = (self.today or date.today()).isoformat()

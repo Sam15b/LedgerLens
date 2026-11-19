@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from ledgerlens.extraction.finetuned import SYSTEM_PROMPT
 from ml.finetune.infer import DEFAULT_MAX_NEW_TOKENS
 from ml.finetune.merge_and_export import MODELFILE, gguf_paths, write_modelfile
-from ml.finetune.prepare_dataset import SYSTEM_PROMPT
 
 
 def directives(text: str) -> dict[str, list[str]]:

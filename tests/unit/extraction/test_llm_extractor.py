@@ -136,7 +136,7 @@ def test_alias_comes_from_extraction_config() -> None:
     provider = ScriptedProvider(INVOICE_JSON)
     client = LLMClient(models, providers={"openai": provider})
 
-    LLMExtractor(client, config=ExtractionConfig(model_alias="cheap")).extract("x", "invoice")
+    LLMExtractor(client, config=ExtractionConfig(llm_alias="cheap")).extract("x", "invoice")
 
     assert provider.requests[0].model == "mini"
 

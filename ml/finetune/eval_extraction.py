@@ -262,9 +262,9 @@ def rules_predictor() -> Predictor:
 def llm_predictor(model: str, client: Any = None) -> Predictor:
     """A model behind the router (an alias like ``smart`` or ``provider/model``), prompted
     with the adapter's chat messages, in JSON mode at temperature 0."""
+    from ledgerlens.extraction.finetuned import parse_json_object
     from ledgerlens.llm.router import LLMClient
     from ledgerlens.llm.types import Message
-    from ml.finetune.infer import parse_json_object
 
     llm = client or LLMClient()
 
