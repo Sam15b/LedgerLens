@@ -30,9 +30,9 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Overwrite
@@ -170,10 +170,10 @@ async def events(runtime: AgentRuntime, request: ChatRequest, thread_id: str) ->
 
 
 @router.post("/chat", response_class=StreamingResponse)
-async def chat(
-    body: ChatRequest, runtime: Annotated[AgentRuntime, Depends(get_agent)]
-) -> StreamingResponse:
-    """Run the agents on a message; stream ``token`` ... ``done`` events (SSE)."""
+async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
+    """Run the agents on a message; stream ``tool_call`` / ``tool_result`` / ``token`` /
+    ``citation`` / ``interrupt`` events and a final ``done`` (SSE)."""
+    runtime = await get_agent(request)  # after the body is validated: a bad request is 422
     thread_id = body.thread_id or f"chat-{uuid.uuid4().hex[:16]}"
     current = await runtime.graph.aget_state({"configurable": {"thread_id": thread_id}})
     if current.next:
