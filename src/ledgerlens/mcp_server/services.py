@@ -15,19 +15,39 @@ import logging
 import threading
 from datetime import date
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from ledgerlens.llm.router import LLMClient
     from ledgerlens.retrieval import Retriever
-    from ledgerlens.retrieval.analyze import VendorFinder
+    from ledgerlens.retrieval.analyze import QueryAnalysis, VendorFinder
     from ledgerlens.retrieval.graph import TemplateRunner
-    from ledgerlens.retrieval.text2cypher import CypherGenerator, CypherGuard
+    from ledgerlens.retrieval.text2cypher import CypherRun
 
 
 logger = logging.getLogger(__name__)
+
+
+class CypherWriter(Protocol):
+    """Writes Cypher for a question (:class:`~ledgerlens.retrieval.text2cypher.CypherGenerator`)."""
+
+    def generate(
+        self,
+        question: str,
+        analysis: QueryAnalysis | None = None,
+        *,
+        previous: str | None = None,
+        error: str | None = None,
+    ) -> str: ...
+
+
+class CypherRunner(Protocol):
+    """Runs untrusted Cypher safely (:class:`~ledgerlens.retrieval.text2cypher.CypherGuard`)."""
+
+    def run(self, cypher: str) -> CypherRun: ...
+
 
 WARM_UP_TIMEOUT_S = 300.0
 
@@ -40,8 +60,8 @@ class Services:
         *,
         retriever: Retriever | None = None,
         graph: TemplateRunner | None = None,
-        cypher_generator: CypherGenerator | None = None,
-        cypher_guard: CypherGuard | None = None,
+        cypher_generator: CypherWriter | None = None,
+        cypher_guard: CypherRunner | None = None,
         sessions: sessionmaker[Session] | None = None,
         llm: LLMClient | None = None,
         vendors: VendorFinder | None = None,
@@ -112,7 +132,7 @@ class Services:
         return Neo4jRunner(self.driver)
 
     @cached_property
-    def cypher_guard(self) -> CypherGuard:
+    def cypher_guard(self) -> CypherRunner:
         from ledgerlens.retrieval.text2cypher import CypherGuard
 
         return CypherGuard(self.driver)
@@ -124,7 +144,7 @@ class Services:
         return LLMClient()
 
     @cached_property
-    def cypher_generator(self) -> CypherGenerator:
+    def cypher_generator(self) -> CypherWriter:
         from ledgerlens.retrieval.text2cypher import CypherGenerator
 
         return CypherGenerator(self.llm, today=self._today)
