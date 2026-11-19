@@ -27,13 +27,17 @@ pauses the run with LangGraph's ``interrupt()`` (the drafts are ``pending_approv
 person approves or rejects them -- the API records the decision and resumes the run with
 ``Command(resume={reminder_id: "approved" | "rejected"})`` -- and the run ends by saying
 what was decided. Nothing is sent either way. Pausing needs a checkpointer
-(``build_graph(..., checkpointer=...)``).
+(``build_graph(..., checkpointer=...)``): :func:`postgres_checkpointer` keeps every run's
+state in Postgres, so a run waiting for approval survives a restart of the API.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -43,7 +47,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from ledgerlens.agents.state import Intent, LedgerState
-from ledgerlens.core.config import get_config
+from ledgerlens.core.config import get_config, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -289,3 +293,31 @@ def build_graph(
     )
     graph.add_edge("respond", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+# --------------------------------------------------------------------------- checkpointer
+
+
+def checkpointer_url(database_url: str | None = None) -> str:
+    """``DATABASE_URL`` as psycopg wants it (no SQLAlchemy driver suffix)."""
+    url = database_url or get_settings().database_url
+    return re.sub(r"^postgresql\+psycopg2?://", "postgresql://", url)
+
+
+@asynccontextmanager
+async def postgres_checkpointer(database_url: str | None = None) -> AsyncIterator[Any]:
+    """A LangGraph ``AsyncPostgresSaver`` on ``DATABASE_URL``, its tables created (setup
+    is idempotent), for the life of the block::
+
+        async with postgres_checkpointer() as saver:
+            graph = build_graph(nodes, checkpointer=saver)
+
+    Every step of every run (``thread_id``) is saved, so an interrupted run -- reminders
+    waiting for approval -- resumes after a restart. psycopg's async mode needs a selector
+    event loop: on Windows, run with ``asyncio.SelectorEventLoop`` (the default Proactor
+    loop is not supported)."""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    async with AsyncPostgresSaver.from_conn_string(checkpointer_url(database_url)) as saver:
+        await saver.setup()
+        yield saver
