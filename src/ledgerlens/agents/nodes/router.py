@@ -193,9 +193,7 @@ def find_entities(text: str, vendors: VendorFinder | None = None) -> dict[str, A
 def latest_user_text(messages: Sequence[AnyMessage]) -> str:
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
-            return (
-                message.text() if callable(getattr(message, "text", None)) else str(message.content)
-            )
+            return message.text
     return ""
 
 
