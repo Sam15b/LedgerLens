@@ -31,8 +31,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
@@ -41,6 +42,12 @@ from ledgerlens.core.config import AgentsConfig, get_config
 from ledgerlens.core.schemas import Contract, Invoice, LineItem, PurchaseOrder
 from ledgerlens.core.schemas.invoice import totals_issues
 from ledgerlens.extraction.normalize import canonical_vendor
+from ledgerlens.mcp_server.services import Services
+from ledgerlens.mcp_server.tools import READ_ONLY, in_thread
+from ledgerlens.mcp_server.tools.records import tidy_quantity
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 CheckName = Literal[
     "po_exists", "vendor_match", "line_qty", "unit_price", "total", "payment", "terms"
@@ -181,8 +188,8 @@ def check_line_qty(m: MatchInputs, tol: Tolerances) -> Check:
     over = [
         {
             "item": po_line.description,
-            "ordered": str(po_line.quantity),
-            "invoiced": str(invoiced[i]),
+            "ordered": str(tidy_quantity(po_line.quantity)),
+            "invoiced": str(tidy_quantity(invoiced[i])),
         }
         for i, po_line in enumerate(po_lines)
         if po_line.quantity is not None and invoiced[i] > po_line.quantity + tol.qty
@@ -327,3 +334,164 @@ def run_checks(m: MatchInputs, tol: Tolerances | None = None) -> list[Check]:
         check_payment(m, tol),
         check_terms(m, tol),
     ]
+
+
+# --------------------------------------------------------------------------- the tool
+
+
+class MatchReport(BaseModel):
+    """The 3-way match of one invoice: every check, and the mismatches among them."""
+
+    invoice_id: str
+    invoice_number: str
+    citation: str | None
+    vendor_id: str | None
+    vendor_name: str
+    po_number: str | None
+    contract_number: str | None
+    currency: str
+    total: str
+    as_of: date
+    status: Literal["match", "mismatch"]
+    """``mismatch`` if any check failed."""
+    mismatches: list[CheckName] = Field(default_factory=list)
+    warnings: list[CheckName] = Field(default_factory=list)
+    payment_status: PaymentStatus
+    checks: list[Check] = Field(default_factory=list)
+    citations: dict[str, str] = Field(default_factory=dict)
+    """Citation tag -> document id for the invoice, PO and contract documents."""
+
+
+def load_inputs(
+    session: Session, services: Services, invoice: str, vendor: str | None, today: date
+) -> tuple[MatchInputs, dict[str, str]]:
+    """The invoice and what it is matched against, from Postgres; and the citations of
+    their documents."""
+    from sqlalchemy import func, or_, select
+    from sqlalchemy.orm import selectinload
+
+    from ledgerlens.mcp_server.tools.records import citation, find_invoice
+    from ledgerlens.storage.postgres.models import ContractRow, InvoiceRow, PaymentAllocationRow
+    from ledgerlens.storage.postgres.repositories import (
+        InvoiceRepository,
+        PurchaseOrderRepository,
+        to_contract,
+        to_invoice,
+        to_purchase_order,
+    )
+
+    row = find_invoice(session, services, invoice, vendor)
+    record = to_invoice(row)
+    cites: dict[str, str] = {}
+
+    def cite(number: str | None, document_id: str | None) -> None:
+        tag = citation(number, document_id)
+        if tag and document_id:
+            cites[tag] = document_id
+
+    cite(row.invoice_number, row.document_id)
+    po_row = None
+    if record.po_number:
+        repo = PurchaseOrderRepository(session)
+        # the vendor's PO first; any vendor's next, so a PO issued to someone else shows up
+        rows = repo.find_by_number(record.po_number, vendor_id=row.vendor_id)
+        rows = rows or repo.find_by_number(record.po_number)
+        po_row = rows[0] if rows else None
+    contract_row = po_row.contract if po_row is not None else None
+    if contract_row is None and row.vendor_id is not None:
+        contract_row = session.scalars(
+            select(ContractRow)
+            .where(
+                ContractRow.vendor_id == row.vendor_id,
+                ContractRow.start_date <= record.invoice_date,
+                or_(ContractRow.end_date.is_(None), ContractRow.end_date >= record.invoice_date),
+            )
+            .order_by(ContractRow.start_date.desc(), ContractRow.id)
+            .limit(1)
+        ).first()
+    others: list[Invoice] = []
+    if po_row is not None:
+        cite(po_row.po_number, po_row.document_id)
+        others = [
+            to_invoice(other)
+            for other in session.scalars(
+                select(InvoiceRow)
+                .where(
+                    InvoiceRow.po_number == po_row.po_number,
+                    InvoiceRow.id != row.id,
+                    InvoiceRow.status != "void",
+                )
+                .options(selectinload(InvoiceRow.line_items))
+            )
+        ]
+    if contract_row is not None:
+        cite(contract_row.contract_number, contract_row.document_id)
+    paid = InvoiceRepository(session).paid_amounts([row.id])[row.id]
+    payments = session.scalar(select(func.count()).where(PaymentAllocationRow.invoice_id == row.id))
+    inputs = MatchInputs(
+        invoice=record,
+        invoice_id=row.id,
+        vendor_id=row.vendor_id,
+        po=to_purchase_order(po_row) if po_row is not None else None,
+        po_vendor_id=po_row.vendor_id if po_row is not None else None,
+        contract=to_contract(contract_row) if contract_row is not None else None,
+        other_invoices_on_po=others,
+        paid=paid,
+        payments=int(payments or 0),
+        today=today,
+    )
+    return inputs, cites
+
+
+def build_report(
+    inputs: MatchInputs, checks: list[Check], citations: dict[str, str]
+) -> MatchReport:
+    invoice = inputs.invoice
+    payment = next(c for c in checks if c.check == "payment")
+    return MatchReport(
+        invoice_id=inputs.invoice_id,
+        invoice_number=invoice.invoice_number,
+        citation=tag if (tag := f"doc:{invoice.invoice_number}") in citations else None,
+        vendor_id=inputs.vendor_id,
+        vendor_name=invoice.vendor_name,
+        po_number=invoice.po_number,
+        contract_number=inputs.contract.contract_number if inputs.contract else None,
+        currency=invoice.currency,
+        total=money(invoice.total),
+        as_of=inputs.today,
+        status="mismatch" if any(c.status == "fail" for c in checks) else "match",
+        mismatches=[c.check for c in checks if c.status == "fail"],
+        warnings=[c.check for c in checks if c.status == "warn"],
+        payment_status=payment.details["payment_status"],
+        checks=checks,
+        citations=citations,
+    )
+
+
+def reconcile(
+    services: Services, invoice: str, vendor: str | None = None, *, as_of: date | None = None
+) -> MatchReport:
+    """Match a stored invoice against its PO and contract (and its payments)."""
+    today = as_of or services.today
+    with services.sessions() as session:
+        inputs, citations = load_inputs(session, services, invoice, vendor, today)
+    return build_report(inputs, run_checks(inputs, Tolerances.from_config()), citations)
+
+
+def register(server: FastMCP, services: Services) -> None:
+    @server.tool(name="reconcile", annotations=READ_ONLY)
+    async def reconcile_tool(
+        invoice: Annotated[str, Field(description="Invoice id, or the number printed on it")],
+        vendor: Annotated[
+            str | None, Field(description="Narrow a number down to this vendor (id or name)")
+        ] = None,
+        as_of: Annotated[
+            date | None, Field(description="Judge payment against this date (default today)")
+        ] = None,
+    ) -> MatchReport:
+        """The 3-way match of an invoice with its purchase order and contract, as
+        deterministic checks: po_exists, vendor_match, line_qty, unit_price, total,
+        payment and terms. Each check has a status (pass / fail / warn / skipped) and a
+        message; status is "mismatch" if any check failed. Explain the report; do not
+        re-judge it."""
+        return await in_thread(reconcile, services, invoice, vendor, as_of=as_of)
