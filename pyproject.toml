@@ -113,6 +113,8 @@ markers = [
 filterwarnings = [
     # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.
     "ignore::DeprecationWarning:langsmith.*",
+    # Keras 3 on the PyTorch backend calls np.array() on tensors the pre-NumPy-2 way.
+    "ignore::DeprecationWarning:keras.*",
 ]
 
 [tool.coverage.run]

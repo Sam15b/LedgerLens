@@ -28,9 +28,9 @@ jobs:
           key: hf-models-v1
       - name: Install
         run: |
-          # CPU-only PyTorch for sentence-transformers (the default wheel bundles CUDA, ~2 GB)
+          # CPU-only PyTorch for sentence-transformers and Keras (the default wheel bundles CUDA, ~2 GB)
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,storage,ingestion,synthetic,finetune]"
+          pip install -e ".[dev,storage,ingestion,synthetic,finetune,anomaly]"
       - name: Lint
         run: ruff check .
       - name: Format check
