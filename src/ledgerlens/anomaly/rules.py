@@ -16,12 +16,17 @@ a one-line reason. See docs/layers/08-anomaly-detection.md, "Rules".
   minus what earlier invoices already billed against it), beyond 0.5 %.
 * **contract-rate breach**: a line's unit price is more than 2 % over the rate for that item
   in the vendor's contract rate card.
+* **unknown vendor**: the vendor is not in the vendor master: no master id, no tax-id match
+  and no name match (:class:`~ledgerlens.extraction.normalize.VendorMatcher`).
+
+:func:`check_invoice` runs every rule on one invoice with what a :class:`RuleContext`
+holds.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -32,7 +37,7 @@ from rapidfuzz.distance import OSA
 
 from ledgerlens.core.schemas import Contract, Invoice, PurchaseOrder
 from ledgerlens.core.schemas.common import ROUNDING_TOLERANCE
-from ledgerlens.extraction.normalize import canonical_vendor
+from ledgerlens.extraction.normalize import VendorMatcher, canonical_vendor
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -333,4 +338,84 @@ def contract_rate_breaches(
             related_ids=[contract.contract_number] if contract.contract_number else [],
             details={"lines": breaches},
         )
+    ]
+
+
+def _tax_key(tax_id: str) -> str:
+    return number_key(tax_id)
+
+
+@dataclass(frozen=True)
+class VendorMaster:
+    """The vendors accounts payable has on file: ids, tax ids and names (with aliases)."""
+
+    ids: frozenset[str]
+    tax_ids: frozenset[str]
+    names: VendorMatcher
+
+    @classmethod
+    def from_vendors(cls, vendors: Iterable[Mapping[str, Any]]) -> VendorMaster:
+        """From vendor master rows with ``vendor_id``, ``name`` and optional ``tax_id``
+        and ``aliases`` (the synthetic ``vendor_master.csv`` / ``vendors`` table)."""
+        rows = list(vendors)
+        return cls(
+            ids=frozenset(str(v["vendor_id"]) for v in rows),
+            tax_ids=frozenset(_tax_key(v["tax_id"]) for v in rows if v.get("tax_id")),
+            names=VendorMatcher({str(v["name"]): list(v.get("aliases") or []) for v in rows}),
+        )
+
+    def knows(self, ref: InvoiceRef) -> bool:
+        invoice = ref.invoice
+        if ref.vendor_id is not None and ref.vendor_id in self.ids:
+            return True
+        if invoice.vendor_tax_id and _tax_key(invoice.vendor_tax_id) in self.tax_ids:
+            return True
+        return self.names.match(invoice.vendor_name) is not None
+
+
+def unknown_vendor(candidate: InvoiceRef, master: VendorMaster | None) -> list[RuleHit]:
+    """The vendor matches nothing in the vendor master (id, tax id or name)."""
+    if master is None or master.knows(candidate):
+        return []
+    invoice = candidate.invoice
+    tax = f"tax id {invoice.vendor_tax_id}" if invoice.vendor_tax_id else "no tax id"
+    return [
+        RuleHit(
+            rule="unknown_vendor",
+            invoice_id=candidate.id,
+            reason=f"vendor {invoice.vendor_name!r} ({tax}) is not in the vendor master",
+            details={"vendor_name": invoice.vendor_name, "vendor_tax_id": invoice.vendor_tax_id},
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- all rules
+
+
+@dataclass
+class RuleContext:
+    """What the rules compare an invoice with; leave out what is not known (a rule with
+    nothing to compare does not fire)."""
+
+    stored: Sequence[InvoiceRef] = ()
+    """Invoices received before this one (any vendor: rules pick the same vendor's)."""
+    purchase_order: PurchaseOrder | None = None
+    already_billed: Decimal = Decimal(0)
+    """What earlier invoices billed against ``purchase_order``."""
+    contract: Contract | None = None
+    master: VendorMaster | None = None
+
+
+def check_invoice(candidate: InvoiceRef, context: RuleContext) -> list[RuleHit]:
+    """Every rule that fires on ``candidate``, in rule order."""
+    same_vendor = [s for s in context.stored if s.vendor_key == candidate.vendor_key]
+    others_with_files = [s for s in context.stored if s.sha256] if candidate.sha256 else []
+    return [
+        *exact_duplicates(
+            candidate, {s.id: s for s in [*same_vendor, *others_with_files]}.values()
+        ),
+        *near_duplicates(candidate, same_vendor),
+        *over_po(candidate, context.purchase_order, already_billed=context.already_billed),
+        *contract_rate_breaches(candidate, context.contract),
+        *unknown_vendor(candidate, context.master),
     ]
