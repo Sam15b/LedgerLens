@@ -117,10 +117,14 @@ def significant_digits(value: Decimal) -> int:
     return len(digits)
 
 
+ROUND_MIN = Decimal(1000)
+"""Below this, two significant digits is ordinary (``240.00``, ``15.00``)."""
+
+
 def is_round(total: Decimal) -> bool:
-    """A total with at most two significant digits (``1000``, ``2500``, ``15,000,000``):
-    typed in, not added up from line items and tax."""
-    return total != 0 and significant_digits(total) <= 2
+    """A total of at least 1,000 with at most two significant digits (``1000``, ``2500``,
+    ``15,000,000``): typed in, not added up from line items and tax."""
+    return abs(total) >= ROUND_MIN and significant_digits(total) <= 2
 
 
 def tax_ratio(invoice: Invoice) -> float:
@@ -314,6 +318,9 @@ class EmbeddingPCA:
 # --------------------------------------------------------------------------- scaling
 
 
+CONSTANT_TOL = 1e-9
+
+
 @dataclass(frozen=True)
 class Standardizer:
     """Per-column ``(x - mean) / std``, fit on training rows only and saved with the model.
@@ -333,8 +340,10 @@ class Standardizer:
             raise ValueError(f"expected a non-empty (n, {len(names)}) matrix, got {data.shape}")
         if not np.isfinite(data).all():
             raise ValueError("cannot fit a scaler on NaN or inf values")
-        std = data.std(axis=0)
-        return cls(names, data.mean(axis=0), np.where(std > 0, std, 1.0))
+        mean, std = data.mean(axis=0), data.std(axis=0)
+        # float noise makes a constant column's std ~1e-16, not 0: treat that as constant
+        constant = std <= CONSTANT_TOL * np.maximum(1.0, np.abs(mean))
+        return cls(names, mean, np.where(constant, 1.0, std))
 
     def transform(self, x: npt.ArrayLike) -> Matrix:
         data = np.atleast_2d(np.asarray(x, dtype=np.float64))
