@@ -16,8 +16,8 @@ is not built yet answers that it is not available.
 Guardrails:
 
 * **step limit**: every node adds to ``step_count`` (a tool call is a step too); once it
-  reaches ``max_steps`` (``configs/agents.yaml``, 8) the graph goes straight to
-  ``respond``, which says the run was stopped;
+  reaches ``max_steps`` (``configs/agents.yaml``, 8) the next hand-off goes to
+  ``stopped``, which says the run was stopped, instead of another agent;
 * **errors are messages**: :func:`guarded` wraps every node, so an exception inside one
   becomes an error reply and an ``errors`` entry instead of failing the request. Tool
   errors already come back as ``ToolMessage`` s (:class:`~ledgerlens.agents.tools.ToolBox`).
@@ -90,34 +90,35 @@ def unavailable(name: str) -> Node:
     return node
 
 
-def make_respond(max_steps: int) -> Node:
-    def respond(state: LedgerState) -> dict[str, Any]:
-        """The last step: say so if the step limit stopped the run; answer out-of-scope
-        requests; anything else is already answered."""
-        steps = state.get("step_count", 0)
-        if steps >= max_steps:
-            text = (
-                f"I stopped after {steps} steps (the limit is {max_steps}) before finishing. "
-                "Try a narrower request."
-            )
-            return {
-                "messages": [AIMessage(text, name="respond")],
-                "errors": [f"step limit: {steps} >= {max_steps}"],
-                "step_count": 1,
-            }
-        if state.get("intent") in (None, "other"):
-            return {"messages": [AIMessage(OUT_OF_SCOPE, name="respond")], "step_count": 1}
-        return {"step_count": 1}
+def respond(state: LedgerState) -> dict[str, Any]:
+    """The last step: answer out-of-scope requests; anything else is already answered."""
+    if state.get("intent") in (None, "other"):
+        return {"messages": [AIMessage(OUT_OF_SCOPE, name="respond")], "step_count": 1}
+    return {"step_count": 1}
 
-    return respond
+
+def make_stopped(max_steps: int) -> Node:
+    def stopped(state: LedgerState) -> dict[str, Any]:
+        """Where a run goes when the step limit stops it before the next node."""
+        steps = state.get("step_count", 0)
+        text = (
+            f"I stopped after {steps} steps (the limit is {max_steps}) before finishing. "
+            "Try a narrower request."
+        )
+        return {
+            "messages": [AIMessage(text, name="stopped")],
+            "errors": [f"step limit: {steps} >= {max_steps}"],
+        }
+
+    return stopped
 
 
 def make_route(max_steps: int) -> Any:
     def route(state: LedgerState) -> str:
-        """The node for the router's intent (``respond`` for ``other``, or once the step
-        limit is reached)."""
+        """The node for the router's intent (``respond`` for ``other``; ``stopped`` once
+        the step limit is reached)."""
         if state.get("step_count", 0) >= max_steps:
-            return "respond"
+            return "stopped"
         intent = state.get("intent")
         return SPECIALISTS.get(intent, "respond") if intent else "respond"
 
@@ -269,12 +270,13 @@ def build_graph(
     graph.add_node("router", guarded("router", nodes.router))
     for name in SPECIALISTS.values():
         graph.add_node(name, guarded(name, getattr(nodes, name)))
-    graph.add_node("respond", make_respond(max_steps))
+    graph.add_node("respond", respond)
+    graph.add_node("stopped", make_stopped(max_steps))
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
         "router",
         make_route(max_steps),
-        {name: name for name in [*SPECIALISTS.values(), "respond"]},
+        {name: name for name in [*SPECIALISTS.values(), "respond", "stopped"]},
     )
     graph.add_node("human_approval", human_approval)
     for name in SPECIALISTS.values():
@@ -292,6 +294,7 @@ def build_graph(
         {"reconciler": "reconciler", "respond": "respond"},
     )
     graph.add_edge("respond", END)
+    graph.add_edge("stopped", END)
     return graph.compile(checkpointer=checkpointer)
 
 
