@@ -80,7 +80,13 @@ def test_agent_specific_extras_are_kept() -> None:
     reconciler = load_config().agents.agents["reconciler"]
 
     assert reconciler.model == "smart"
-    assert reconciler.model_extra == {"price_tolerance_pct": 2.0}
+    assert reconciler.model_extra == {
+        "price_tolerance_pct": 2.0,
+        "total_tolerance": 0.01,
+        "qty_tolerance": 0,
+        "payment_tolerance": 0.01,
+        "terms_tolerance_days": 0,
+    }
 
 
 def test_settings_work_without_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
