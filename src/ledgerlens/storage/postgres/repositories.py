@@ -42,6 +42,7 @@ from ledgerlens.core.schemas import (
     Receipt,
 )
 from ledgerlens.storage.postgres.models import (
+    REMINDER_STATUSES,
     AnomalyScoreRow,
     Base,
     ChunkRow,
@@ -53,6 +54,7 @@ from ledgerlens.storage.postgres.models import (
     PaymentRow,
     POLineItemRow,
     PurchaseOrderRow,
+    ReminderRow,
     VendorRow,
 )
 
@@ -715,6 +717,38 @@ class PaymentRepository:
                 .order_by(PaymentRow.paid_at, PaymentRow.id)
             )
         )
+
+
+class ReminderRepository:
+    """Drafted payment reminders. A draft starts ``pending_approval``; only a person
+    approves or rejects it, and nothing here sends anything."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create(self, invoice_id: str, draft: str, tone: str) -> ReminderRow:
+        row = ReminderRow(invoice_id=invoice_id, draft=draft, tone=tone, status="pending_approval")
+        self.session.add(row)
+        self.session.flush()
+        self.session.refresh(row)
+        return row
+
+    def get(self, reminder_id: str) -> ReminderRow | None:
+        return self.session.get(ReminderRow, reminder_id, populate_existing=True)
+
+    def find(
+        self, *, status: str | None = None, invoice_id: str | None = None, limit: int = 100
+    ) -> list[ReminderRow]:
+        """Newest first."""
+        if status is not None and status not in REMINDER_STATUSES:
+            raise ValueError(f"unknown reminder status {status!r}")
+        stmt = select(ReminderRow)
+        if status is not None:
+            stmt = stmt.where(ReminderRow.status == status)
+        if invoice_id is not None:
+            stmt = stmt.where(ReminderRow.invoice_id == invoice_id)
+        stmt = stmt.order_by(ReminderRow.created_at.desc(), ReminderRow.id).limit(limit)
+        return list(self.session.scalars(stmt))
 
 
 class AnomalyScoreRepository:

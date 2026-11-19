@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
+    from ledgerlens.anomaly.scorer import AnomalyScorer
     from ledgerlens.ingestion.sinks import StoresSink
     from ledgerlens.llm.router import LLMClient
     from ledgerlens.retrieval import Retriever
@@ -67,6 +68,7 @@ class Services:
         llm: LLMClient | None = None,
         vendors: VendorFinder | None = None,
         record_sink: StoresSink | None = None,
+        scorer: AnomalyScorer | None = None,
         today: date | None = None,
     ) -> None:
         given: dict[str, Any] = {
@@ -78,6 +80,7 @@ class Services:
             "llm": llm,
             "vendors": vendors,
             "record_sink": record_sink,
+            "scorer": scorer,
         }
         for name, value in given.items():
             if value is not None:
@@ -157,6 +160,13 @@ class Services:
         from ledgerlens.storage.postgres.db import get_session_factory
 
         return get_session_factory()
+
+    @cached_property
+    def scorer(self) -> AnomalyScorer:
+        """The process's anomaly scorer (``configs/anomaly.yaml``), loaded on first use."""
+        from ledgerlens.anomaly.scorer import get_scorer
+
+        return get_scorer()
 
     @cached_property
     def record_sink(self) -> StoresSink:
