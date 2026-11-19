@@ -19,6 +19,7 @@ from ledgerlens.anomaly.rules import (
     check_invoice,
     contract_rate_breaches,
     exact_duplicates,
+    money,
     near_duplicates,
     number_key,
     number_similarity,
@@ -315,3 +316,10 @@ def test_each_injected_anomaly_is_caught_by_its_rule() -> None:
         assert labelled[label] > 0 and caught[label] == labelled[label], label
     clean = len(ledger.invoices) - sum(labelled.values())
     assert sum(false_alarms.values()) <= 0.01 * clean, false_alarms
+
+
+def test_money_in_reasons_reads_like_the_document() -> None:
+    assert money(Decimal("100.0000")) == "100.00"
+    assert money(Decimal("17.71")) == "17.71"
+    assert money(Decimal("0.1235")) == "0.1235"
+    assert money(Decimal("1000")) == "1000.00"
