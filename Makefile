@@ -10,12 +10,13 @@ endif
 PY ?= $(if $(wildcard $(VENV_PY)),$(VENV_PY),python)
 
 DATASET ?= sroie
+MCP_PORT ?= 8765
 
 # Placeholder for targets whose implementation lands in a later roadmap phase.
 todo = @echo make $@: not implemented yet - $(1)
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install-ml up down init migrate data ingest worker enqueue api mcp web \
+.PHONY: help setup install-ml up down init migrate data ingest worker enqueue api mcp mcp-inspect web \
         test test-int cov lint format eval eval-ci clean
 
 help:             ## Show this help
@@ -61,8 +62,11 @@ enqueue:          ## Queue data/raw/$(DATASET) for the ingestion worker
 api:              ## Run FastAPI with reload on :8000
 	$(PY) -m uvicorn ledgerlens.api.main:app --reload --port 8000
 
-mcp:              ## Run the MCP server
-	$(call todo,Phase 5: ledgerlens.mcp_server)
+mcp:              ## Run the MCP server over streamable HTTP on :$(MCP_PORT)/mcp (MCP_PORT=8765)
+	$(PY) -m ledgerlens.mcp_server.server --transport http --port $(MCP_PORT)
+
+mcp-inspect:      ## Open the MCP Inspector on the server over stdio (needs Node.js / npx)
+	npx @modelcontextprotocol/inspector $(PY) -m ledgerlens.mcp_server.server
 
 web:              ## Run the Next.js dashboard
 	$(call todo,Phase 8: web/)
