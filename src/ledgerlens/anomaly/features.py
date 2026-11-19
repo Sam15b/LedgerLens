@@ -11,18 +11,28 @@ Groups:
 * **amount**: log total, tax ratio, round-number flag, z-score of the log total against
   the vendor's earlier invoices;
 * **timing**: days from invoice to due date, weekday, weekend flag, day of month, days
-  since the vendor's previous invoice.
+  since the vendor's previous invoice;
+* **structure**: line count, mean and max unit price, whether it cites a PO and carries
+  the vendor's tax id;
+* **vendor history**: how many invoices the vendor sent before, and the mean and spread
+  of their log totals. At ingestion they come from Postgres
+  (:func:`load_vendor_history`); for a batch, :class:`HistoryTracker` keeps them as it
+  walks the invoices in date order.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from ledgerlens.core.schemas import Invoice
+from ledgerlens.core.schemas import Invoice, LineItem
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 AMOUNT_FEATURES = ("log_total", "tax_ratio", "round_total", "total_zscore")
 TIMING_FEATURES = (
@@ -34,7 +44,20 @@ TIMING_FEATURES = (
     "log_days_since_last",
     "first_invoice",
 )
-FEATURE_NAMES: tuple[str, ...] = (*AMOUNT_FEATURES, *TIMING_FEATURES)
+STRUCTURE_FEATURES = (
+    "line_count",
+    "log_mean_unit_price",
+    "log_max_unit_price",
+    "has_po",
+    "has_tax_id",
+)
+VENDOR_FEATURES = ("log_vendor_invoice_count", "vendor_mean_log_total", "vendor_std_log_total")
+FEATURE_NAMES: tuple[str, ...] = (
+    *AMOUNT_FEATURES,
+    *TIMING_FEATURES,
+    *STRUCTURE_FEATURES,
+    *VENDOR_FEATURES,
+)
 
 MIN_HISTORY = 2
 """Earlier invoices a vendor needs before its z-score means anything (else 0)."""
@@ -125,13 +148,81 @@ def timing_features(invoice: Invoice, history: VendorHistory) -> dict[str, float
     }
 
 
+def unit_price(line: LineItem) -> Decimal | None:
+    """The line's unit price, or its amount over its quantity when only those are given."""
+    if line.unit_price is not None:
+        return line.unit_price
+    if line.quantity:
+        return line.amount / line.quantity
+    return None
+
+
+def structure_features(invoice: Invoice) -> dict[str, float]:
+    prices = [signed_log(p) for p in map(unit_price, invoice.line_items) if p is not None]
+    return {
+        "line_count": float(len(invoice.line_items)),
+        "log_mean_unit_price": sum(prices) / len(prices) if prices else 0.0,
+        "log_max_unit_price": max(prices) if prices else 0.0,
+        "has_po": float(bool(invoice.po_number)),
+        "has_tax_id": float(bool(invoice.vendor_tax_id)),
+    }
+
+
+def vendor_features(history: VendorHistory) -> dict[str, float]:
+    return {
+        "log_vendor_invoice_count": math.log1p(history.count),
+        "vendor_mean_log_total": history.mean_log_total,
+        "vendor_std_log_total": history.std_log_total,
+    }
+
+
 def invoice_features(invoice: Invoice, history: VendorHistory | None = None) -> dict[str, float]:
     """Every feature of ``invoice``, by name (:data:`FEATURE_NAMES` order)."""
     history = history or VendorHistory()
-    values = {**amount_features(invoice, history), **timing_features(invoice, history)}
+    values = {
+        **amount_features(invoice, history),
+        **timing_features(invoice, history),
+        **structure_features(invoice),
+        **vendor_features(history),
+    }
     return {name: values[name] for name in FEATURE_NAMES}
 
 
 def feature_vector(values: Mapping[str, float]) -> list[float]:
     """``values`` in :data:`FEATURE_NAMES` order."""
     return [float(values[name]) for name in FEATURE_NAMES]
+
+
+# --------------------------------------------------------------------------- vendor history
+
+
+@dataclass
+class HistoryTracker:
+    """Vendor histories for a batch: call :meth:`history` for an invoice, then :meth:`add`
+    it, going through the invoices in arrival (date) order. Invoices that arrived earlier
+    on the same day count as before."""
+
+    _seen: dict[str, list[tuple[date, Decimal]]] = field(default_factory=dict)
+
+    def history(self, vendor: str) -> VendorHistory:
+        return VendorHistory.from_invoices(self._seen.get(vendor, ()))
+
+    def add(self, vendor: str, invoice_date: date, total: Decimal) -> None:
+        self._seen.setdefault(vendor, []).append((invoice_date, total))
+
+
+def load_vendor_history(
+    session: Session, vendor_id: str, before: date, *, exclude_id: str | None = None
+) -> VendorHistory:
+    """The vendor's invoices in Postgres dated on or before ``before`` (but not
+    ``exclude_id``, the invoice being scored if it is stored already)."""
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.models import InvoiceRow
+
+    query = select(InvoiceRow.invoice_date, InvoiceRow.total).where(
+        InvoiceRow.vendor_id == vendor_id, InvoiceRow.invoice_date <= before
+    )
+    if exclude_id is not None:
+        query = query.where(InvoiceRow.id != exclude_id)
+    return VendorHistory.from_invoices((day, total) for day, total in session.execute(query))
