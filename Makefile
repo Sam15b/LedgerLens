@@ -60,7 +60,7 @@ enqueue:          ## Queue data/raw/$(DATASET) for the ingestion worker
 
 # --- Run -----------------------------------------------------------------------------
 api:              ## Run FastAPI with reload on :8000
-	$(PY) -m uvicorn ledgerlens.api.main:app --reload --port 8000
+	$(PY) -m uvicorn ledgerlens.api.main:app --reload --port 8000 --loop asyncio:SelectorEventLoop
 
 mcp:              ## Run the MCP server over streamable HTTP on :$(MCP_PORT)/mcp (MCP_PORT=8765)
 	$(PY) -m ledgerlens.mcp_server.server --transport http --port $(MCP_PORT)

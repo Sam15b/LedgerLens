@@ -12,6 +12,13 @@ Errors have one shape (:func:`error_body`)::
 for HTTP errors (``code`` from the status), request validation (``invalid_request``, with
 the field ``details``) and anything unexpected (``internal_error``, 500, logged with its
 traceback; the message does not leak internals).
+
+Run it on a selector event loop (``make api`` does)::
+
+    uvicorn ledgerlens.api.main:app --port 8000 --loop asyncio:SelectorEventLoop
+
+The chat agents keep their state in Postgres through psycopg's async mode, which does
+not run on the Proactor loop uvicorn picks on Windows.
 """
 
 from __future__ import annotations
