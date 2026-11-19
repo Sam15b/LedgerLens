@@ -6,7 +6,8 @@
 The router classifies the latest user message into an :data:`~ledgerlens.agents.state
 .Intent`; :func:`route` sends ``question`` to QA, ``extract`` to the extractor,
 ``reconcile`` to the reconciler, ``remind`` to the reminder writer and ``other`` straight
-to ``respond``. Every specialist ends in ``respond`` (docs/layers/04-agents-mcp.md).
+to ``respond``. Every specialist ends in ``respond``, except that a newly extracted
+invoice goes on to the reconciler first (docs/layers/04-agents-mcp.md).
 
 Nodes are plain functions of the state, built with their dependencies (LLM, tools) and
 passed in as :class:`AgentNodes`, so tests can run the graph with stand-ins. A node that
@@ -110,6 +111,18 @@ def make_route(max_steps: int) -> Any:
     return route
 
 
+def make_after_extract(max_steps: int) -> Any:
+    def after_extract(state: LedgerState) -> str:
+        """A newly saved invoice is reconciled straight away (if the step budget allows:
+        the reconciler needs two steps and respond one)."""
+        extracted = state.get("extracted") or {}
+        if extracted.get("doc_type") == "invoice" and state.get("step_count", 0) + 3 <= max_steps:
+            return "reconciler"
+        return "respond"
+
+    return after_extract
+
+
 def _failure(name: str, exc: Exception) -> dict[str, Any]:
     logger.exception("the %s node failed", name)
     text = f"Sorry, the {name.replace('_', ' ')} step failed ({type(exc).__name__}: {exc})."
@@ -173,6 +186,12 @@ def build_graph(
         {name: name for name in [*SPECIALISTS.values(), "respond"]},
     )
     for name in SPECIALISTS.values():
-        graph.add_edge(name, "respond")
+        if name != "extractor":
+            graph.add_edge(name, "respond")
+    graph.add_conditional_edges(
+        "extractor",
+        make_after_extract(max_steps),
+        {"reconciler": "reconciler", "respond": "respond"},
+    )
     graph.add_edge("respond", END)
     return graph.compile(checkpointer=checkpointer)
