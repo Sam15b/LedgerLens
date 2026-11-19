@@ -92,7 +92,7 @@ def pipeline(extractor: Any) -> IngestionPipeline:
 
 def llm_extractor() -> tuple[LLMExtractor, OracleProvider]:
     oracle = OracleProvider()
-    models = ModelsConfig.model_validate({"aliases": {"extractor": ["openai/oracle"]}})
+    models = ModelsConfig.model_validate({"aliases": {"extractor_api": ["openai/oracle"]}})
     return LLMExtractor(LLMClient(models, providers={"openai": oracle})), oracle
 
 

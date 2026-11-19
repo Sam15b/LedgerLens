@@ -97,9 +97,11 @@ def make_extractor(name: str, *, llm: LLMClient | None = None) -> Extractor:
         from ledgerlens.extraction.llm_extractor import LLMExtractor
 
         return LLMExtractor(llm)
-    raise ValueError(
-        f"extractor {name!r} is not available yet (rules, llm; finetuned arrives in Phase 6a)"
-    )
+    if name == "finetuned":
+        from ledgerlens.extraction.finetuned import FineTunedExtractor
+
+        return FineTunedExtractor(llm)
+    raise ValueError(f"unknown extractor {name!r} (rules, llm, finetuned)")
 
 
 class _StepError(Exception):
@@ -445,7 +447,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--extractor",
-        choices=["rules", "llm"],
+        choices=["rules", "llm", "finetuned"],
         help="override extraction.default from configs/ingestion.yaml",
     )
     parser.add_argument("--no-embed", action="store_true", help="skip dense + sparse vectors")

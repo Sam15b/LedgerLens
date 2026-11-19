@@ -21,24 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ml.finetune.prepare_dataset import (
-    CORD_KEYS,
-    DEFAULT_BASE_MODEL,
-    INVOICE_KEYS,
-    RECEIPT_KEYS,
-    Example,
-    _ids,
-    chat_messages,
-)
+from ledgerlens.extraction.finetuned import KEYS_BY_DOC_TYPE, MAX_NEW_TOKENS, parse_json_object
+from ml.finetune.prepare_dataset import DEFAULT_BASE_MODEL, Example, _ids, chat_messages
 from ml.finetune.train_lora import TrainConfig, load_tokenizer, quantization_config, torch_dtype
 
 logger = logging.getLogger(__name__)
 
-KEYS_BY_DOC_TYPE: dict[str, tuple[str, ...]] = {
-    "receipt": (*RECEIPT_KEYS[:-1], *CORD_KEYS),  # vendor, address, date, lines, totals
-    "invoice": INVOICE_KEYS,
-}
-DEFAULT_MAX_NEW_TOKENS = 768
+DEFAULT_MAX_NEW_TOKENS = MAX_NEW_TOKENS
 
 
 def prompt_example(text: str, doc_type: str, keys: Sequence[str] | None = None) -> Example:
@@ -46,21 +35,6 @@ def prompt_example(text: str, doc_type: str, keys: Sequence[str] | None = None) 
     key the training data uses for ``doc_type``)."""
     wanted = list(keys or KEYS_BY_DOC_TYPE[doc_type])
     return Example("input", "input", "", doc_type, text, dict.fromkeys(wanted))
-
-
-def parse_json_object(text: str) -> dict[str, Any] | None:
-    """The first JSON object in a model's reply (code fences and chatter around it are
-    ignored), or ``None`` if there is none."""
-    decoder = json.JSONDecoder()
-    start = text.find("{")
-    while start != -1:
-        try:
-            value, _ = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            start = text.find("{", start + 1)
-            continue
-        return value if isinstance(value, dict) else None
-    return None
 
 
 @dataclass(frozen=True)

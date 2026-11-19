@@ -5,8 +5,13 @@ aliases:
   fast: [gemini/gemini-3.1-flash-lite, openai/gpt-4o-mini, mistral/mistral-small-2603, ollama/llama3:8b]
   smart: [openai/gpt-4o, bedrock/global.anthropic.claude-sonnet-5-5, gemini/gemini-4-carbon]
   local: [ollama/llama3:8b]
-  # The fine-tuned ollama/ledgerlens-llama3-lora goes first here once Phase 6a ships it.
-  extractor: [openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]
+  # Fine-tuned extractor (extraction/finetuned.py, training prompt): the Phase 6a Llama 3 +
+  # LoRA on Ollama first ($0, ml/finetune/Modelfile); API models follow the same prompt if
+  # it is not served. Ollama down = 3 quick retries, model not created = straight to next.
+  extractor: [ollama/ledgerlens-llama3-lora, openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]
+  # Generic LLM extractor (llm_extractor.py: its own prompt + the record's JSON schema), and
+  # the fine-tuned extractor's route for purchase orders, payments and contracts.
+  extractor_api: [openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]
   judge: [openai/gpt-4o]  # eval only: one fixed model so scores stay comparable
 
 # USD per 1M tokens (standard / on-demand tier, text), keyed like the aliases. A model with
@@ -25,6 +30,7 @@ pricing_usd_per_1m_tokens:
   mistral/mistral-small-2603: { in: 0.15, out: 0.60 }
   bedrock/global.anthropic.claude-sonnet-5-5: { in: 2.00, out: 10.00 }
   ollama/llama3:8b: { in: 0.0, out: 0.0 }
+  ollama/ledgerlens-llama3-lora: { in: 0.0, out: 0.0 }  # local Q4_K_M GGUF
 
 retry: { max_attempts: 3, backoff_s: [1, 2, 4] }
 timeout_s: 60

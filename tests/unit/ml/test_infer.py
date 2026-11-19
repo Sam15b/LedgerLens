@@ -4,15 +4,14 @@ from typing import Any
 
 import pytest
 
-from ml.finetune.infer import (
+from ledgerlens.extraction.finetuned import (
+    CORD_KEYS,
+    INVOICE_KEYS,
     KEYS_BY_DOC_TYPE,
-    AdapterExtractor,
-    Generation,
-    build_parser,
     parse_json_object,
-    prompt_example,
 )
-from ml.finetune.prepare_dataset import CORD_KEYS, INVOICE_KEYS, chat_messages
+from ml.finetune.infer import AdapterExtractor, Generation, build_parser, prompt_example
+from ml.finetune.prepare_dataset import chat_messages
 
 
 @pytest.mark.parametrize(

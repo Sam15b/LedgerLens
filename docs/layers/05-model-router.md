@@ -50,7 +50,8 @@ aliases:
   fast:      [gemini/gemini-flash, openai/gpt-4o-mini, ollama/llama3:8b]   # fallback order
   smart:     [openai/gpt-4o, bedrock/<model-id>, gemini/gemini-pro]
   local:     [ollama/llama3:8b]
-  extractor: [ollama/ledgerlens-llama3-lora, openai/gpt-4o-mini]
+  extractor: [ollama/ledgerlens-llama3-lora, openai/gpt-4o-mini]  # fine-tuned prompt
+  extractor_api: [openai/gpt-4o-mini]                              # generic schema prompt
   judge:     [openai/gpt-4o]                                              # eval only
 
 pricing_usd_per_1m_tokens:      # fill from provider pricing pages; review regularly
