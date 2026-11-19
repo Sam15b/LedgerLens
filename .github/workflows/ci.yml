@@ -30,7 +30,7 @@ jobs:
         run: |
           # CPU-only PyTorch for sentence-transformers and Keras (the default wheel bundles CUDA, ~2 GB)
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,storage,ingestion,synthetic,finetune,anomaly]"
+          pip install -e ".[dev,storage,ingestion,synthetic,finetune,anomaly,agents]"
       - name: Lint
         run: ruff check .
       - name: Format check
