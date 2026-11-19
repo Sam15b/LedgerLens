@@ -68,12 +68,18 @@ model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
 - PR-AUC, ROC-AUC, precision@k, recall per anomaly type (from synthetic labels).
 - Compare against baselines: rules only, Isolation Forest, rules + autoencoder.
 
+Test split (latest 750 invoices, 66 anomalies); full table and findings in
+[`eval/reports/2026-11-20/anomaly.md`](../../eval/reports/2026-11-20/anomaly.md).
+
 | Method | PR-AUC | Recall (dupes) | Recall (price) | Precision@50 |
 |--------|--------|----------------|----------------|--------------|
-| Rules only | | | | |
-| Isolation Forest | | | | |
-| Autoencoder | | | | |
-| **Rules + AE** | | | | |
+| Rules only | 0.661 | 22/30 | 15/15 | 0.84 |
+| Isolation Forest | 0.200 | 0/30 | 0/15 | 0.30 |
+| Autoencoder | 0.394 | 1/30 | 0/15 | 0.46 |
+| **Rules + AE** | **0.830** | 22/30 | 15/15 | 0.84 |
+
+The 8 duplicates the rules miss are copies dated before the invoice they copy; the rules
+flag the pair on the original instead (see the report).
 
 ## Serving
 - `scorer.py` loads the model once per worker; exposed via MCP tool `score_anomaly` and
