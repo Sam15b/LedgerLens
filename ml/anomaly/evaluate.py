@@ -14,6 +14,13 @@ injected (``normal`` otherwise). Per method:
   reviewer working down the list sees first).
 * precision and recall of the **flags**, and recall **per anomaly type**.
 
+Methods: the deterministic **rules** (run over the whole ledger in arrival order, so each
+invoice is checked against the invoices, POs and contracts before it: :func:`ledger_rule_hits`),
+an **Isolation Forest** baseline, the saved **autoencoder**, and **rules + AE**
+(:func:`ledgerlens.anomaly.scorer.combine_arrays`). The combined method gets its own AE
+threshold (:func:`select_combined_threshold`): once the rules have taken their hits, the
+autoencoder can flag more at the same 0.8 target precision.
+
 The default split is ``test``: the latest 15 % of invoices, which no model or threshold saw
 (the autoencoder picked its threshold on ``val``).
 """
@@ -21,15 +28,35 @@ The default split is ``test``: the latest 15 % of invoices, which no model or th
 from __future__ import annotations
 
 import argparse
+import json
+from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 
 from ledgerlens.anomaly.features import Matrix
-from ml.anomaly.train_autoencoder import NORMAL, Split, load_model, load_split, select_threshold
+from ledgerlens.anomaly.rules import (
+    InvoiceRef,
+    RuleContext,
+    RuleHit,
+    VendorMaster,
+    check_invoice,
+)
+from ledgerlens.anomaly.scorer import combine_arrays
+from ledgerlens.core.schemas import Contract, Invoice, PurchaseOrder
+from ml.anomaly.train_autoencoder import (
+    NORMAL,
+    TARGET_PRECISION,
+    Split,
+    Threshold,
+    load_model,
+    load_split,
+    select_threshold,
+)
 
 Flags = npt.NDArray[np.bool_]
 Strings = npt.NDArray[np.str_]
@@ -172,6 +199,112 @@ def isolation_forest_scores(
     return [-np.asarray(forest.score_samples(s.x), dtype=np.float64) for s in splits]
 
 
+def ledger_rule_hits(records: Path) -> dict[str, list[RuleHit]]:
+    """Every rule hit on every invoice of a synthetic ``records.jsonl``, keyed by invoice
+    id. Invoices are checked in arrival order (date, then id), each against the invoices
+    before it, its PO (less what earlier invoices billed against it), its contract and the
+    vendor master, as ingestion would see them."""
+    vendors: list[dict[str, object]] = []
+    contracts: dict[str, Contract] = {}
+    pos: dict[str, PurchaseOrder] = {}
+    invoices: list[tuple[InvoiceRef, str | None]] = []
+    with records.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            kind, data = record["record_type"], record["data"]
+            if kind == "vendor":
+                vendors.append(data)
+            elif kind == "contract":
+                contract = Contract.model_validate(data)
+                contracts[contract.contract_number or record["id"]] = contract
+            elif kind == "purchase_order":
+                po = PurchaseOrder.model_validate(data)
+                pos[po.po_number] = po
+            elif kind == "invoice":
+                ref = InvoiceRef(
+                    record["id"], Invoice.model_validate(data), record.get("vendor_id")
+                )
+                invoices.append((ref, record.get("contract_number")))
+    invoices.sort(key=lambda item: (item[0].invoice.invoice_date, item[0].id))
+    master = VendorMaster.from_vendors(vendors)
+    by_vendor: dict[str, list[InvoiceRef]] = defaultdict(list)
+    billed: dict[str, Decimal] = defaultdict(Decimal)
+    hits: dict[str, list[RuleHit]] = {}
+    for ref, contract_number in invoices:
+        po_number = ref.invoice.po_number
+        context = RuleContext(
+            stored=by_vendor[ref.vendor_key],
+            purchase_order=pos.get(po_number) if po_number else None,
+            already_billed=billed[po_number] if po_number else Decimal(0),
+            contract=contracts.get(contract_number) if contract_number else None,
+            master=master,
+        )
+        hits[ref.id] = check_invoice(ref, context)
+        by_vendor[ref.vendor_key].append(ref)
+        if po_number:
+            billed[po_number] += ref.invoice.total
+    return hits
+
+
+def swapped_duplicates(records: Path) -> dict[str, str]:
+    """``{copy id: original id}`` for the labelled duplicates that arrive *before* the
+    invoice they copy (the ledger shifts a near duplicate's date by up to 7 days either
+    way). Checked in arrival order, the rules then find the pair on the original instead:
+    the copy is missed and the clean original is flagged (as a near duplicate, and over
+    its PO, which the copy already billed)."""
+    arrival: dict[str, tuple[str, str]] = {}
+    copies: dict[str, str] = {}
+    with records.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record["record_type"] != "invoice":
+                continue
+            arrival[record["id"]] = (record["data"]["invoice_date"], record["id"])
+            if record.get("duplicate_of"):
+                copies[record["id"]] = record["duplicate_of"]
+    return {
+        copy: original
+        for copy, original in copies.items()
+        if original in arrival and arrival[copy] < arrival[original]
+    }
+
+
+def rule_scores(split: Split, hits: dict[str, list[RuleHit]]) -> Matrix:
+    """How many different rules fired on each invoice of ``split``."""
+    return np.array(
+        [len({hit.rule for hit in hits.get(str(i), [])}) for i in split.ids], dtype=np.float64
+    )
+
+
+def select_combined_threshold(
+    errors: Matrix,
+    hard_hits: Flags,
+    is_anomaly: Flags,
+    *,
+    target_precision: float = TARGET_PRECISION,
+) -> Threshold:
+    """The autoencoder threshold for rules + AE: the lowest error at which the combined
+    flags (every hard hit, plus AE errors at or above it) keep ``target_precision``.
+    Ranks hard hits first and reuses :func:`select_threshold` on that ranking."""
+    ranked = np.where(hard_hits, np.inf, errors)
+    threshold = select_threshold(ranked, is_anomaly, target_precision=target_precision)
+    if np.isinf(threshold.value):
+        # the rules alone are at the target: the AE flags nothing more
+        return Threshold(
+            float(np.max(errors)) + 1.0,
+            threshold.method,
+            target_precision,
+            threshold.precision,
+            threshold.recall,
+            threshold.flagged,
+        )
+    return threshold
+
+
 # --------------------------------------------------------------------------- report
 
 
@@ -206,41 +339,103 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--features", type=Path, default=Path("data/processed/anomaly"))
     parser.add_argument("--model", type=Path, required=True, help="models/anomaly/<version>")
+    parser.add_argument("--records", type=Path, default=Path("data/synthetic/records.jsonl"))
     parser.add_argument("--split", default="test", choices=("train", "val", "test"))
     parser.add_argument("--k", type=int, default=DEFAULT_K, help="for precision@k")
+    parser.add_argument(
+        "--save-combined",
+        action="store_true",
+        help="write the rules + AE threshold into the model's metadata.json",
+    )
     return parser
 
 
-def run(args: argparse.Namespace) -> list[MethodResult]:
-    train, val = load_split(args.features, "train"), load_split(args.features, "val")
-    split = load_split(args.features, args.split)
-    errors, threshold = autoencoder_scores(args.model, split)
+@dataclass
+class Comparison:
+    """Every method on one split, and the rules + AE threshold chosen on val."""
+
+    split: str
+    results: list[MethodResult]
+    combined_threshold: Threshold
+    swaps: str
+    """How many rule misses and false alarms are swapped duplicate pairs."""
+
+
+def compare(
+    features: Path, model: Path, records: Path, *, split_name: str = "test", k: int = DEFAULT_K
+) -> Comparison:
+    train, val = load_split(features, "train"), load_split(features, "val")
+    split = load_split(features, split_name)
+    errors, threshold = autoencoder_scores(model, split)
+    hits = ledger_rule_hits(records)
+    rules = rule_scores(split, hits)
+    # rules + AE: the AE threshold re-chosen on val with the hard hits already flagged
+    val_errors, _ = autoencoder_scores(model, val)
+    combined_cut = select_combined_threshold(val_errors, rule_scores(val, hits) > 0, val.is_anomaly)
     # the forest's cut is chosen like the autoencoder's: precision >= 0.8 on val, else p99
     if_val, if_split = isolation_forest_scores(train, [val, split])
     if_cut = select_threshold(if_val, val.is_anomaly)
-    return [
+    results = [
+        evaluate("Rules", rules, rules > 0, split.labels, k=k, note="any rule hit"),
         evaluate(
             "Isolation Forest",
             if_split,
             if_split >= if_cut.value,
             split.labels,
-            k=args.k,
-            note=f"{IF_TREES} trees on train normals; cut {if_cut.value:.3f} ({if_cut.method})",
+            k=k,
+            note=f"{IF_TREES} trees, train normals; cut {if_cut.value:.3f} ({if_cut.method})",
         ),
         evaluate(
             "Autoencoder",
             errors,
             errors >= threshold,
             split.labels,
-            k=args.k,
-            note=f"reconstruction error >= {threshold:.3f}",
+            k=k,
+            note=f"reconstruction error >= {threshold:.3f} (saved threshold)",
         ),
     ]
+    for name, cut in (("Rules + AE", threshold), ("Rules + AE (combined cut)", combined_cut.value)):
+        scores, flags = combine_arrays(rules > 0, errors, cut)
+        results.append(
+            evaluate(name, scores, flags, split.labels, k=k, note=f"any rule, or AE >= {cut:.3f}")
+        )
+    return Comparison(split_name, results, combined_cut, _swap_summary(split, hits, records))
+
+
+def _swap_summary(split: Split, hits: dict[str, list[RuleHit]], records: Path) -> str:
+    swapped = swapped_duplicates(records)
+    originals = set(swapped.values())
+    flagged = rule_scores(split, hits) > 0
+    rows = list(zip([str(i) for i in split.ids], flagged, split.labels, strict=True))
+    false_alarms = [i for i, f, label in rows if f and label == NORMAL]
+    missed = [i for i, f, label in rows if not f and label in ("exact_duplicate", "near_duplicate")]
+    return (
+        f"{sum(i in originals for i in false_alarms)} of {len(false_alarms)} rule false alarms "
+        "are originals that arrived after their own copy; "
+        f"{sum(i in swapped for i in missed)} of {len(missed)} missed duplicates arrived "
+        "before the invoice they copy"
+    )
+
+
+def save_combined_threshold(model: Path, threshold: Threshold) -> None:
+    """Record the rules + AE threshold in the model's ``metadata.json`` (``combined``):
+    the scorer uses it in place of the autoencoder's own threshold."""
+    path = model / "metadata.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    metadata["combined"] = {**asdict(threshold), "chosen_on": "val, rules hard hits flagged"}
+    path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    print(format_table(run(args)))
+    result = compare(args.features, args.model, args.records, split_name=args.split, k=args.k)
+    print(format_table(result.results))
+    for r in result.results:
+        print(f"- {r.method}: {r.note}")
+    print(f"- {args.split}: {result.swaps}")
+    if args.save_combined:
+        save_combined_threshold(args.model, result.combined_threshold)
+        print(f"saved combined threshold {result.combined_threshold.value:.4f} to {args.model}")
     return 0
 
 
