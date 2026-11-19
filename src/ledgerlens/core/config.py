@@ -272,8 +272,19 @@ class AgentConfig(BaseModel):
     model: str
 
 
+class MCPConnectionConfig(_Section):
+    """How the agents reach the LedgerLens MCP server (``agents.tools``)."""
+
+    transport: Literal["streamable_http", "stdio"] = "streamable_http"
+    url: str = "http://localhost:8765/mcp"
+    """For ``streamable_http``: the server ``make mcp`` runs."""
+    command: str | None = None
+    """For ``stdio``: the Python to start the server with (default: this one)."""
+
+
 class AgentsConfig(_Section):
     max_steps: int = Field(default=8, gt=0)
+    mcp: MCPConnectionConfig = Field(default_factory=MCPConnectionConfig)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 
 
