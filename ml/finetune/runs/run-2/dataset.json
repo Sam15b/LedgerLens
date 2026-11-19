@@ -1,0 +1,30 @@
+{
+  "dir": "data/processed/finetune",
+  "splits": {
+    "test": {
+      "examples": 130,
+      "by_source": {
+        "cord": 100,
+        "synthetic": 30
+      },
+      "sha256": "e910f6997b0a2c0c6e2fd8041b27f937988f17109cc25ea5303f9d3aadea5cef"
+    },
+    "train": {
+      "examples": 1016,
+      "by_source": {
+        "cord": 778,
+        "synthetic": 238
+      },
+      "sha256": "e9dde0b3ba48ac38d7c4490b81eefb585c5e65edf2286d7e69cf4f001f8fb995"
+    },
+    "val": {
+      "examples": 130,
+      "by_source": {
+        "cord": 98,
+        "synthetic": 32
+      },
+      "sha256": "13e948e50344cd7bb874e4ed5f94d7cfb784cb2f78b3dd2b3bee06395c2c8dd0"
+    }
+  },
+  "built_with": "python -m ml.finetune.prepare_dataset --out data/processed/finetune (SROIE not downloaded: CORD + synthetic)"
+}

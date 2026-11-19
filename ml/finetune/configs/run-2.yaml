@@ -1,0 +1,49 @@
+# Run 2 (docs/daily-plan/day-forty-six.md): run.yaml with more adapter capacity and a gentler,
+# shorter schedule. Lines marked "run 2" differ from run.yaml; see runs/run-2/NOTES.md for why
+# and for what to change if run 1's curves point elsewhere.
+#   python -m ml.finetune.train_lora --config ml/finetune/configs/run-2.yaml \
+#       --set checkpoint_dir=/content/drive/MyDrive/ledgerlens/finetune
+
+base_model: meta-llama/Meta-Llama-3-8B-Instruct   # gated: accept the license on Hugging Face
+
+# 4-bit NF4 base (QLoRA): fits a 16 GB T4 / P100
+load_in_4bit: true
+quant_type: nf4
+double_quant: true
+compute_dtype: auto             # float16 on a T4 (no bfloat16), bfloat16 on A100 / L4
+
+# T4 memory: activations recomputed in backward, optimizer state paged to CPU when short
+gradient_checkpointing: true
+optim: paged_adamw_8bit
+
+# LoRA on every attention and MLP projection
+lora_r: 32                      # run 2: 16 -> 32
+lora_alpha: 64                  # run 2: 32 -> 64 (alpha / r stays 2)
+lora_dropout: 0.05
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+# optimisation: effective batch 16 = micro-batch 2 x gradient accumulation 8
+learning_rate: 1.0e-4           # run 2: 2e-4 -> 1e-4
+lr_scheduler: cosine
+warmup_ratio: 0.03
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+num_train_epochs: 2             # run 2: 3 -> 2
+max_steps: -1                   # set 10 for a dry run
+max_length: 2048
+logging_steps: 10
+seed: 13
+
+# data and outputs
+data_dir: data/processed/finetune
+checkpoint_dir: outputs/finetune  # Colab: /content/drive/MyDrive/ledgerlens/finetune
+runs_dir: ml/finetune/runs
+run_id: run-2                   # run 2: fixed id, so a rerun resumes it
+save_steps: 50                  # a multiple of eval_steps: the best checkpoint is kept
+save_total_limit: 3
+
+# validation loss every eval_steps; stop after `patience` evaluations without improvement
+eval_steps: 50
+early_stopping_patience: 3
+early_stopping_threshold: 0.0
+max_eval_samples: 0             # 0: the whole val split (130 examples)
