@@ -309,3 +309,47 @@ class EmbeddingPCA:
             np.asarray(data["components"], dtype=np.float64),
             np.asarray(data["explained_variance_ratio"], dtype=np.float64),
         )
+
+
+# --------------------------------------------------------------------------- scaling
+
+
+@dataclass(frozen=True)
+class Standardizer:
+    """Per-column ``(x - mean) / std``, fit on training rows only and saved with the model.
+
+    A column that is constant in training (std 0) is only centred, so a value the model
+    never saw there shows up as a large reconstruction error, not as inf or NaN."""
+
+    names: tuple[str, ...]
+    mean: Matrix
+    scale: Matrix
+
+    @classmethod
+    def fit(cls, x: npt.ArrayLike, names: Iterable[str]) -> Standardizer:
+        data = np.asarray(x, dtype=np.float64)
+        names = tuple(names)
+        if data.ndim != 2 or data.shape[1] != len(names) or len(data) == 0:
+            raise ValueError(f"expected a non-empty (n, {len(names)}) matrix, got {data.shape}")
+        if not np.isfinite(data).all():
+            raise ValueError("cannot fit a scaler on NaN or inf values")
+        std = data.std(axis=0)
+        return cls(names, data.mean(axis=0), np.where(std > 0, std, 1.0))
+
+    def transform(self, x: npt.ArrayLike) -> Matrix:
+        data = np.atleast_2d(np.asarray(x, dtype=np.float64))
+        if data.shape[1] != len(self.names):
+            raise ValueError(f"expected {len(self.names)} columns, got {data.shape[1]}")
+        result: Matrix = (data - self.mean) / self.scale
+        return result
+
+    def to_json(self) -> dict[str, Any]:
+        return {"names": list(self.names), "mean": self.mean.tolist(), "scale": self.scale.tolist()}
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Standardizer:
+        return cls(
+            tuple(data["names"]),
+            np.asarray(data["mean"], dtype=np.float64),
+            np.asarray(data["scale"], dtype=np.float64),
+        )
