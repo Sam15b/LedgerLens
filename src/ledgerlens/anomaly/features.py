@@ -17,7 +17,10 @@ Groups:
 * **vendor history**: how many invoices the vendor sent before, and the mean and spread
   of their log totals. At ingestion they come from Postgres
   (:func:`load_vendor_history`); for a batch, :class:`HistoryTracker` keeps them as it
-  walks the invoices in date order.
+  walks the invoices in date order;
+* **text** (optional): the invoice's header-chunk embedding reduced to 16 dimensions by
+  :class:`EmbeddingPCA` (fit on training invoices). The vector is then
+  :func:`feature_names` with ``embedding=True``.
 """
 
 from __future__ import annotations
@@ -27,7 +30,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import numpy.typing as npt
 
 from ledgerlens.core.schemas import Invoice, LineItem
 
@@ -58,6 +64,11 @@ FEATURE_NAMES: tuple[str, ...] = (
     *STRUCTURE_FEATURES,
     *VENDOR_FEATURES,
 )
+
+EMBEDDING_DIM = 16
+EMBEDDING_FEATURES = tuple(f"emb_pca_{i:02d}" for i in range(EMBEDDING_DIM))
+
+Matrix = npt.NDArray[np.float64]
 
 MIN_HISTORY = 2
 """Earlier invoices a vendor needs before its z-score means anything (else 0)."""
@@ -188,9 +199,16 @@ def invoice_features(invoice: Invoice, history: VendorHistory | None = None) -> 
     return {name: values[name] for name in FEATURE_NAMES}
 
 
-def feature_vector(values: Mapping[str, float]) -> list[float]:
-    """``values`` in :data:`FEATURE_NAMES` order."""
-    return [float(values[name]) for name in FEATURE_NAMES]
+def feature_names(*, embedding: bool = False) -> tuple[str, ...]:
+    """The vector's columns: :data:`FEATURE_NAMES`, then the PCA components if used."""
+    return (*FEATURE_NAMES, *EMBEDDING_FEATURES) if embedding else FEATURE_NAMES
+
+
+def feature_vector(
+    values: Mapping[str, float], names: Iterable[str] = FEATURE_NAMES
+) -> list[float]:
+    """``values`` in ``names`` order."""
+    return [float(values[name]) for name in names]
 
 
 # --------------------------------------------------------------------------- vendor history
@@ -226,3 +244,68 @@ def load_vendor_history(
     if exclude_id is not None:
         query = query.where(InvoiceRow.id != exclude_id)
     return VendorHistory.from_invoices((day, total) for day, total in session.execute(query))
+
+
+# --------------------------------------------------------------------------- text (optional)
+
+
+@dataclass(frozen=True)
+class EmbeddingPCA:
+    """PCA of header-chunk embeddings (numpy SVD; nothing to install at serving time).
+
+    Fit on the training invoices' embeddings only. The output always has
+    :data:`EMBEDDING_DIM` columns: with fewer samples or dimensions than that, the extra
+    components are zero. Signs are fixed (largest loading positive), so refitting on the
+    same data gives the same features."""
+
+    mean: Matrix
+    components: Matrix
+    """``(EMBEDDING_DIM, d)``: one unit vector per row."""
+    explained_variance_ratio: Matrix
+
+    @classmethod
+    def fit(cls, embeddings: npt.ArrayLike, n_components: int = EMBEDDING_DIM) -> EmbeddingPCA:
+        x = np.asarray(embeddings, dtype=np.float64)
+        if x.ndim != 2 or len(x) < 2:
+            raise ValueError("EmbeddingPCA.fit needs a 2-d array with at least 2 rows")
+        mean = x.mean(axis=0)
+        _, singular, vt = np.linalg.svd(x - mean, full_matrices=False)
+        k = min(n_components, vt.shape[0])
+        top = vt[:k]
+        signs = np.sign(top[np.arange(k), np.abs(top).argmax(axis=1)])
+        top = top * np.where(signs == 0, 1.0, signs)[:, None]
+        components = np.zeros((n_components, x.shape[1]))
+        components[:k] = top
+        variance = singular**2
+        ratio = np.zeros(n_components)
+        if variance.sum() > 0:
+            ratio[:k] = variance[:k] / variance.sum()
+        return cls(mean, components, ratio)
+
+    def transform(self, embeddings: npt.ArrayLike) -> Matrix:
+        """``(n, d)`` embeddings (or one ``(d,)`` vector) -> ``(n, EMBEDDING_DIM)``."""
+        x = np.atleast_2d(np.asarray(embeddings, dtype=np.float64))
+        if x.shape[1] != self.mean.shape[0]:
+            raise ValueError(f"expected {self.mean.shape[0]}-d embeddings, got {x.shape[1]}-d")
+        result: Matrix = (x - self.mean) @ self.components.T
+        return result
+
+    def features(self, embedding: npt.ArrayLike) -> dict[str, float]:
+        """One embedding's components, named like :data:`EMBEDDING_FEATURES`."""
+        row = self.transform(embedding)[0]
+        return dict(zip(EMBEDDING_FEATURES, map(float, row), strict=True))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "mean": self.mean.tolist(),
+            "components": self.components.tolist(),
+            "explained_variance_ratio": self.explained_variance_ratio.tolist(),
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> EmbeddingPCA:
+        return cls(
+            np.asarray(data["mean"], dtype=np.float64),
+            np.asarray(data["components"], dtype=np.float64),
+            np.asarray(data["explained_variance_ratio"], dtype=np.float64),
+        )
