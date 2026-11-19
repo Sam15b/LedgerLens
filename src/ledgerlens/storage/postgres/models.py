@@ -391,6 +391,8 @@ class ReminderRow(Base):
     tone: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(20), default="pending_approval", index=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    thread_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    """The agent run (LangGraph thread) waiting for a decision on this draft."""
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 

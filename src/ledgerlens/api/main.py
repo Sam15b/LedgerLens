@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
-from ledgerlens.api.routers import chat, health
+from ledgerlens.api.routers import chat, health, reminders
 from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import configure_logging
 
@@ -30,6 +30,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.state.agents = agents or AgentProvider()
     app.include_router(health.router)
     app.include_router(chat.router)
+    app.include_router(reminders.router)
     return app
 
 

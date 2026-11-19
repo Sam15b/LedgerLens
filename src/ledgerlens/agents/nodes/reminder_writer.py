@@ -26,6 +26,7 @@ from decimal import Decimal
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.runnables import RunnableConfig
 
 from ledgerlens.agents.state import LedgerState
 from ledgerlens.agents.tools import ToolBox, ToolOutcome
@@ -98,7 +99,10 @@ class ReminderWriterNode:
     def today(self) -> date:
         return self._today or date.today()
 
-    async def __call__(self, state: LedgerState) -> dict[str, Any]:
+    async def __call__(
+        self, state: LedgerState, config: RunnableConfig | None = None
+    ) -> dict[str, Any]:
+        thread_id = ((config or {}).get("configurable") or {}).get("thread_id")
         entities = state.get("entities") or {}
         vendor_ids = entities.get("vendor_ids") or []
         vendor = vendor_ids[0] if vendor_ids else None
@@ -147,9 +151,10 @@ class ReminderWriterNode:
             )
             contact = contact_out.data if contact_out.ok else None
             body = render_body(tone, reminder_facts(record, contact, days))
-            drafted = await call(
-                "draft_reminder", {"invoice": record["id"], "body": body, "tone": tone}
-            )
+            draft_args = {"invoice": record["id"], "body": body, "tone": tone}
+            if thread_id:
+                draft_args["thread_id"] = str(thread_id)  # approving it resumes this run
+            drafted = await call("draft_reminder", draft_args)
             if not drafted.ok or drafted.data is None:
                 notes.append(f"{record['invoice_number']}: {drafted.text}")
                 continue

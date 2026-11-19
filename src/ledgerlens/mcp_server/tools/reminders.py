@@ -95,10 +95,17 @@ class ReminderDraft(BaseModel):
     po_number): fix and draft again before asking for approval."""
     body: str
     created_at: datetime
+    thread_id: str | None = None
+    """The agent run waiting for a decision on it, if an agent drafted it."""
 
 
 def draft_reminder(
-    services: Services, invoice: str, body: str, tone: Tone, vendor: str | None = None
+    services: Services,
+    invoice: str,
+    body: str,
+    tone: Tone,
+    vendor: str | None = None,
+    thread_id: str | None = None,
 ) -> ReminderDraft:
     from ledgerlens.storage.postgres.db import session_scope
     from ledgerlens.storage.postgres.repositories import (
@@ -132,7 +139,7 @@ def draft_reminder(
             po_number=row.po_number,
         )
         vendor_row = VendorRepository(session).get(row.vendor_id) if row.vendor_id else None
-        reminder = ReminderRepository(session).create(row.id, body, tone)
+        reminder = ReminderRepository(session).create(row.id, body, tone, thread_id=thread_id)
         return ReminderDraft(
             reminder_id=reminder.id,
             invoice_id=row.id,
@@ -144,6 +151,7 @@ def draft_reminder(
             missing_facts=missing,
             body=body,
             created_at=reminder.created_at,
+            thread_id=thread_id,
         )
 
 
@@ -159,8 +167,11 @@ def register(server: FastMCP, services: Services) -> None:
         vendor: Annotated[
             str | None, Field(description="Narrow a number down to this vendor (id or name)")
         ] = None,
+        thread_id: Annotated[
+            str | None, Field(description="The agent run that waits for the decision, if any")
+        ] = None,
     ) -> ReminderDraft:
         """Save a payment reminder as a draft pending a person's approval. It is NEVER
         sent by this system. The body must state the invoice number, the amount, the
         original due date and the PO number; missing_facts lists any it leaves out."""
-        return await in_thread(draft_reminder, services, invoice, body, tone, vendor)
+        return await in_thread(draft_reminder, services, invoice, body, tone, vendor, thread_id)
