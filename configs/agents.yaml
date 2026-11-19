@@ -4,5 +4,7 @@ agents:
   router: { model: fast }
   qa: { model: smart }
   extractor: { model: extractor }
-  reconciler: { model: smart, price_tolerance_pct: 2.0 }
+  # 3-way match tolerances (mcp_server/tools/reconcile.py): unit price vs contract rate in %,
+  # line / total arithmetic in currency units, units invoiced beyond the PO quantity
+  reconciler: { model: smart, price_tolerance_pct: 2.0, total_tolerance: 0.01, qty_tolerance: 0 }
   reminder_writer: { model: smart }
