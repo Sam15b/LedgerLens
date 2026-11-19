@@ -47,6 +47,27 @@ def test_repo_run_config_matches_the_documented_setup() -> None:
     assert (config.compute_dtype, config.optim) == ("auto", "paged_adamw_8bit")
 
 
+def test_run_2_changes_only_rank_and_schedule_and_matches_its_record() -> None:
+    run_1 = load_train_config(DEFAULT_CONFIG).to_json()
+    run_2 = load_train_config(DEFAULT_CONFIG.with_name("run-2.yaml")).to_json()
+
+    changed = {k: (run_1[k], run_2[k]) for k in run_1 if run_1[k] != run_2[k]}
+    assert changed == {
+        "lora_r": (16, 32),
+        "lora_alpha": (32, 64),
+        "learning_rate": (2e-4, 1e-4),
+        "num_train_epochs": (3.0, 2.0),
+        "run_id": ("", "run-2"),
+    }
+    runs = DEFAULT_CONFIG.parent.parent / "runs"
+    recorded = json.loads((runs / "run-2" / "config.json").read_text(encoding="utf-8"))
+    assert recorded == run_2 | {"checkpoint_dir": "/content/drive/MyDrive/ledgerlens/finetune"}
+    # both runs train on the same files
+    assert (runs / "run-1" / "dataset.json").read_text(encoding="utf-8") == (
+        runs / "run-2" / "dataset.json"
+    ).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     ("name", "capability", "expected"),
     [

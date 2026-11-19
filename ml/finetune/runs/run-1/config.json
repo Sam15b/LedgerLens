@@ -29,7 +29,7 @@
   "logging_steps": 10,
   "seed": 13,
   "data_dir": "data/processed/finetune",
-  "checkpoint_dir": "C:/Program Files/Git/content/drive/MyDrive/ledgerlens/finetune",
+  "checkpoint_dir": "/content/drive/MyDrive/ledgerlens/finetune",
   "runs_dir": "ml/finetune/runs",
   "run_id": "run-1",
   "save_steps": 50,
