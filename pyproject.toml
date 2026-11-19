@@ -74,6 +74,11 @@ finetune = [
     # training itself runs on a GPU from requirements-ml.txt.
     "pyarrow>=15",
 ]
+anomaly = [
+    # Keras 3 autoencoder (ml/anomaly/train_autoencoder.py). It runs on TensorFlow (the `ml`
+    # extra) or, where TensorFlow has no wheel (Python 3.14), on PyTorch: KERAS_BACKEND=torch.
+    "keras>=3.5",
+]
 eval = [
     "ragas",
     "langsmith",
@@ -108,6 +113,8 @@ markers = [
 filterwarnings = [
     # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.
     "ignore::DeprecationWarning:langsmith.*",
+    # Keras 3 on the PyTorch backend calls np.array() on tensors the pre-NumPy-2 way.
+    "ignore::DeprecationWarning:keras.*",
 ]
 
 [tool.coverage.run]
@@ -171,6 +178,10 @@ disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
 module = ["peft.*", "bitsandbytes.*", "transformers.*"]  # GPU-only or not in every env
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["keras.*", "tensorflow.*"]  # Keras is only partly typed; not in every env
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
