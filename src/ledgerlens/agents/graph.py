@@ -44,6 +44,15 @@ class Node(Protocol):
     def __call__(self, state: LedgerState) -> dict[str, Any]: ...
 
 
+class AsyncNode(Protocol):
+    """A node that awaits (tools, models): run with ``graph.ainvoke`` / ``astream``."""
+
+    async def __call__(self, state: LedgerState) -> dict[str, Any]: ...
+
+
+AnyNode = Node | AsyncNode
+
+
 SPECIALISTS: dict[Intent, str] = {
     "question": "qa",
     "extract": "extractor",
@@ -140,11 +149,11 @@ def guarded(name: str, node: Any) -> Any:
 class AgentNodes:
     """The graph's nodes; any left out is a placeholder."""
 
-    router: Node
-    qa: Node = field(default_factory=lambda: unavailable("qa"))
-    extractor: Node = field(default_factory=lambda: unavailable("extractor"))
-    reconciler: Node = field(default_factory=lambda: unavailable("reconciler"))
-    reminder_writer: Node = field(default_factory=lambda: unavailable("reminder_writer"))
+    router: AnyNode
+    qa: AnyNode = field(default_factory=lambda: unavailable("qa"))
+    extractor: AnyNode = field(default_factory=lambda: unavailable("extractor"))
+    reconciler: AnyNode = field(default_factory=lambda: unavailable("reconciler"))
+    reminder_writer: AnyNode = field(default_factory=lambda: unavailable("reminder_writer"))
 
 
 def build_graph(
