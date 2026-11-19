@@ -78,6 +78,7 @@ anomaly = [
     # Keras 3 autoencoder (ml/anomaly/train_autoencoder.py). It runs on TensorFlow (the `ml`
     # extra) or, where TensorFlow has no wheel (Python 3.14), on PyTorch: KERAS_BACKEND=torch.
     "keras>=3.5",
+    "scikit-learn>=1.4",  # Isolation Forest baseline (ml/anomaly/evaluate.py)
 ]
 eval = [
     "ragas",
@@ -181,7 +182,7 @@ module = ["peft.*", "bitsandbytes.*", "transformers.*"]  # GPU-only or not in ev
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["keras.*", "tensorflow.*"]  # Keras is only partly typed; not in every env
+module = ["keras.*", "tensorflow.*", "sklearn.*"]  # Keras is only partly typed; not in every env
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

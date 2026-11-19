@@ -29,12 +29,14 @@ import numpy as np
 import numpy.typing as npt
 
 from ledgerlens.anomaly.features import Matrix
-from ml.anomaly.train_autoencoder import NORMAL, Split, load_model, load_split
+from ml.anomaly.train_autoencoder import NORMAL, Split, load_model, load_split, select_threshold
 
 Flags = npt.NDArray[np.bool_]
 Strings = npt.NDArray[np.str_]
 
 DEFAULT_K = 50
+IF_TREES = 300
+SEED = 13
 
 
 # --------------------------------------------------------------------------- metrics
@@ -158,6 +160,18 @@ def autoencoder_scores(model_dir: Path, split: Split) -> tuple[Matrix, float]:
     return saved.errors(split.x_raw), saved.threshold
 
 
+def isolation_forest_scores(
+    train: Split, splits: Sequence[Split], *, n_estimators: int = IF_TREES, seed: int = SEED
+) -> list[Matrix]:
+    """Isolation Forest baseline: fit on the training split's normal invoices (the rows
+    the autoencoder learns from, scaled the same way), then score each of ``splits``.
+    The score is ``-score_samples``: higher = isolated in fewer splits = more unusual."""
+    from sklearn.ensemble import IsolationForest
+
+    forest = IsolationForest(n_estimators=n_estimators, random_state=seed).fit(train.normal)
+    return [-np.asarray(forest.score_samples(s.x), dtype=np.float64) for s in splits]
+
+
 # --------------------------------------------------------------------------- report
 
 
@@ -198,9 +212,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> list[MethodResult]:
+    train, val = load_split(args.features, "train"), load_split(args.features, "val")
     split = load_split(args.features, args.split)
     errors, threshold = autoencoder_scores(args.model, split)
+    # the forest's cut is chosen like the autoencoder's: precision >= 0.8 on val, else p99
+    if_val, if_split = isolation_forest_scores(train, [val, split])
+    if_cut = select_threshold(if_val, val.is_anomaly)
     return [
+        evaluate(
+            "Isolation Forest",
+            if_split,
+            if_split >= if_cut.value,
+            split.labels,
+            k=args.k,
+            note=f"{IF_TREES} trees on train normals; cut {if_cut.value:.3f} ({if_cut.method})",
+        ),
         evaluate(
             "Autoencoder",
             errors,
@@ -208,7 +234,7 @@ def run(args: argparse.Namespace) -> list[MethodResult]:
             split.labels,
             k=args.k,
             note=f"reconstruction error >= {threshold:.3f}",
-        )
+        ),
     ]
 
 
