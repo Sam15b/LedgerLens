@@ -11,6 +11,9 @@
    for records without a document, ``analytics:aging``).
 4. **Answer** with the ``answer_grounded`` prompt over that evidence (``smart``); without
    a model, list the evidence itself.
+5. **Check the citations** (:func:`enforce_citations`): every answer cites evidence it
+   was given, or says no evidence was found; an uncited answer is replaced by the cited
+   evidence. The verdict is on the answer message (``citation_check``).
 
 The node's messages show the trajectory: an ``AIMessage`` with the planned tool calls,
 one ``ToolMessage`` per result, then the answer.
@@ -269,6 +272,40 @@ def evidence_answer(question: str, evidence: Evidence) -> str:
     return head + ":\n" + "\n".join(bullets)
 
 
+# --------------------------------------------------------------------------- citations
+
+TAG = re.compile(r"\[(doc:[^\]\s]+|graph|analytics:[a-z_]+)\]")
+NO_EVIDENCE = re.compile(
+    r"\b(?:no evidence|could ?n[o']t find|can ?n[o']t find|did ?n[o']t find|"
+    r"(?:does|do) ?n[o']t (?:contain|show|include)|there (?:is|are) no (?:record|invoice|"
+    r"payment|data|information)|not (?:in|found in) the (?:context|ledger))",
+    re.IGNORECASE,
+)
+CitationCheck = Literal["cited", "no_evidence", "replaced"]
+
+
+def enforce_citations(
+    answer: str, evidence: Evidence, question: str = ""
+) -> tuple[str, CitationCheck]:
+    """Every answer cites the evidence it rests on, or says that none was found.
+
+    Citations to anything the evidence does not hold are removed (a model can invent
+    ``[doc:INV-999]``). An answer left with a real citation stands (``cited``); one that
+    says nothing was found stands when that is true (``no_evidence``); anything else is
+    replaced by the cited evidence itself (``replaced``)."""
+    valid = evidence.tags
+    cleaned = TAG.sub(lambda m: m.group(0) if m.group(1) in valid else "", answer)
+    cleaned = re.sub(r"[ \t]+([.,;:])", r"\1", re.sub(r"[ \t]{2,}", " ", cleaned)).strip()
+    if TAG.search(cleaned):
+        return cleaned, "cited"
+    if not evidence.lines:
+        return evidence_answer(question, evidence), "no_evidence"
+    if NO_EVIDENCE.search(cleaned):
+        return cleaned, "no_evidence"
+    logger.warning("answer cites none of its evidence; answering with the evidence instead")
+    return evidence_answer(question, evidence), "replaced"
+
+
 # --------------------------------------------------------------------------- the node
 
 
@@ -314,9 +351,11 @@ class QANode:
                 logger.warning("QA planner unavailable (%s); planning by keywords", exc)
         return heuristic_plan(question, entities)[: self.max_calls]
 
-    async def answer(self, question: str, evidence: Evidence) -> str:
+    async def answer(self, question: str, evidence: Evidence) -> tuple[str, CitationCheck]:
+        """The answer, checked by :func:`enforce_citations`."""
         if self.llm is None or not evidence.lines:
-            return evidence_answer(question, evidence)
+            text = evidence_answer(question, evidence)
+            return text, "cited" if evidence.lines else "no_evidence"
         prompt = self.answer_prompt.render(
             today=self.today.isoformat(), question=question, context=evidence.render()
         )
@@ -326,8 +365,8 @@ class QANode:
             )
         except LLMError as exc:
             logger.warning("QA answer model unavailable (%s); listing the evidence", exc)
-            return evidence_answer(question, evidence)
-        return response.text.strip()
+            return evidence_answer(question, evidence), "cited"
+        return enforce_citations(response.text.strip(), evidence, question)
 
     async def __call__(self, state: LedgerState) -> dict[str, Any]:
         question = latest_user_text(state.get("messages", []))
@@ -340,7 +379,7 @@ class QANode:
             outcomes.append(outcome)
             tool_messages.append(message)
         evidence = collect_evidence(outcomes, minimum=min_amount(question))
-        text = await self.answer(question, evidence)
+        text, check = await self.answer(question, evidence)
         planned = AIMessage(
             "",
             name="qa",
@@ -350,7 +389,11 @@ class QANode:
             ],
         )
         return {
-            "messages": [planned, *tool_messages, AIMessage(text, name="qa")],
+            "messages": [
+                planned,
+                *tool_messages,
+                AIMessage(text, name="qa", additional_kwargs={"citation_check": check}),
+            ],
             "citations": evidence.citations,
             "errors": [f"{o.tool}: {o.text}" for o in outcomes if not o.ok],
             "step_count": 1 + len(outcomes),
