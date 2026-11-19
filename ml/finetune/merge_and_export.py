@@ -19,7 +19,8 @@ Face checkpoint: safetensors shards and the tokenizer, with the Llama 3 chat tem
 then ``llama-quantize`` turns it into ``Q4_K_M`` (4-bit k-quants, with the attention value
 and FFN down projections of half the layers kept at 6-bit): ~4.9 GB for 8B, which runs on a
 laptop CPU or an 8 GB GPU. ``<out>/<name>.Q4_K_M.gguf`` is what the Ollama ``Modelfile``
-loads. llama.cpp is not a pip package; on Colab::
+loads; the step copies ``ml/finetune/Modelfile`` next to it. llama.cpp is not a pip
+package; on Colab::
 
     git clone --depth 1 https://github.com/ggml-org/llama.cpp
     pip install -e llama.cpp/gguf-py sentencepiece
@@ -56,6 +57,7 @@ MAX_SHARD_SIZE = "2GB"
 MODEL_NAME = "ledgerlens-llama3-lora"
 DEFAULT_QUANT = "Q4_K_M"
 STEPS = ("merge", "gguf")
+MODELFILE = Path(__file__).with_name("Modelfile")
 
 Runner = Callable[[Sequence[str]], None]
 """Runs one command and raises if it fails (tests pass a fake)."""
@@ -198,6 +200,19 @@ def export_gguf(
     }
 
 
+def write_modelfile(out: Path, gguf: str, template: Path = MODELFILE) -> Path:
+    """Copy the Ollama ``Modelfile`` to ``<out>/Modelfile``, loading ``gguf`` (a file name
+    in ``out``)."""
+    lines = template.read_text(encoding="utf-8").splitlines()
+    froms = [i for i, line in enumerate(lines) if line.startswith("FROM ")]
+    if len(froms) != 1:
+        raise ValueError(f"{template} must have exactly one FROM line")
+    lines[froms[0]] = f"FROM ./{gguf}"
+    path = out / "Modelfile"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def file_record(path: Path) -> dict[str, Any]:
     return {"path": path.name, "bytes": path.stat().st_size, "sha256": sha256(path)}
 
@@ -276,8 +291,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             quant=args.quant,
             keep_f16=args.keep_f16,
         )
-        write_manifest(args.out, {"name": args.name, **gguf})
-        logger.info("wrote %s", args.out / gguf["files"]["gguf"]["path"])
+        modelfile = write_modelfile(args.out, gguf["files"]["gguf"]["path"])
+        write_manifest(args.out, {"name": args.name, **gguf, "modelfile": modelfile.name})
+        logger.info("next: ollama create %s -f %s", MODEL_NAME, modelfile)
     return 0
 
 
