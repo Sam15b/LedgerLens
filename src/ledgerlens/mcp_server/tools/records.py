@@ -1,6 +1,9 @@
 """Typed access to the ledger's records: agents read and write through these tools and
 never query the databases themselves.
 
+``save_extraction`` is the one tool that writes: a validated record goes through the same
+record write path as ingestion (:meth:`~ledgerlens.ingestion.sinks.StoresSink.write_record`).
+
 Every tool returns a pydantic model, so MCP clients get a JSON schema for the output and
 JSON values back (amounts as exact decimal strings, dates as ISO strings). A record is
 looked up by its id or by the number printed on it (``INV-889``, ``PO-1042``); numbers are
@@ -11,6 +14,7 @@ its id and the citation tag answers use (``doc:INV-889``).
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
@@ -18,8 +22,11 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 from pydantic import AfterValidator, BaseModel, Field
 
+from ledgerlens.anomaly.scorer import RULE_BAND
+from ledgerlens.core.schemas import ExtractedRecord
 from ledgerlens.mcp_server.services import Services
 from ledgerlens.mcp_server.tools import READ_ONLY, in_thread, jsonable
 from ledgerlens.mcp_server.tools.search import resolve_vendor
@@ -547,6 +554,264 @@ def _iso(day: date | None) -> str | None:
     return day.isoformat() if day else None
 
 
+# --------------------------------------------------------------------------- vendors, documents
+
+
+class VendorContact(BaseModel):
+    vendor_id: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    tax_id: str | None = None
+    email: str | None = None
+    """``None``: no email on file; a reminder needs one added before it can be sent."""
+    contract_number: str | None = None
+    """The vendor's current contract (latest start date)."""
+    payment_terms_days: int | None = None
+
+
+def get_vendor_contact(services: Services, vendor: str) -> VendorContact:
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.models import ContractRow
+    from ledgerlens.storage.postgres.repositories import VendorRepository
+
+    vendor_id = _vendor_id(services, vendor)
+    assert vendor_id is not None
+    with services.sessions() as session:
+        row = VendorRepository(session).get(vendor_id)
+        if row is None:
+            raise ToolError(f"vendor {vendor_id} is not stored")
+        contract = session.scalars(
+            select(ContractRow)
+            .where(ContractRow.vendor_id == vendor_id)
+            .order_by(ContractRow.start_date.desc(), ContractRow.id)
+            .limit(1)
+        ).first()
+        return VendorContact(
+            vendor_id=row.id,
+            name=row.canonical_name,
+            aliases=list(row.aliases),
+            tax_id=row.tax_id,
+            email=row.email,
+            contract_number=contract.contract_number if contract else None,
+            payment_terms_days=contract.payment_terms_days if contract else None,
+        )
+
+
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_CONTEXT_HEADER = re.compile(r"\A\[[^\]\n]*\]\n")
+"""The one-line ``[INVOICE INV-889 | Vendor: ...]`` header chunking puts on each chunk."""
+MAX_TEXT_CHARS = 50_000
+
+
+class DocumentText(BaseModel):
+    document_id: str
+    filename: str
+    doc_type: str
+    status: str
+    pages: int | None
+    citation: str | None
+    record_number: str | None
+    """The number of the record extracted from it, if any."""
+    text: str
+    """The document's text, rebuilt from its stored chunks (context headers removed)."""
+    truncated: bool = False
+    chunk_count: int
+
+
+def find_document_id(session: Session, document: str) -> str:
+    """A document id as given, or the document of the record with that number."""
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.models import (
+        ContractRow,
+        InvoiceRow,
+        PaymentRow,
+        PurchaseOrderRow,
+    )
+
+    if _UUID.match(document.lower()):
+        return document.lower()
+    lookups = (
+        (InvoiceRow.document_id, InvoiceRow.invoice_number),
+        (PurchaseOrderRow.document_id, PurchaseOrderRow.po_number),
+        (ContractRow.document_id, ContractRow.contract_number),
+        (PaymentRow.document_id, PaymentRow.payment_reference),
+    )
+    found: list[str] = []
+    for document_id, number in lookups:
+        found += [
+            str(d)
+            for d in session.scalars(
+                select(document_id).where(number == document, document_id.is_not(None))
+            )
+        ]
+    found = list(dict.fromkeys(found))
+    if not found:
+        raise ToolError(f"no stored document {document!r} (give a document id or a number)")
+    if len(found) > 1:
+        raise ToolError(f"{len(found)} documents carry {document!r}: {', '.join(found)}")
+    return found[0]
+
+
+def _record_number(session: Session, document_id: str) -> str | None:
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.models import (
+        ContractRow,
+        InvoiceRow,
+        PaymentRow,
+        PurchaseOrderRow,
+    )
+
+    for number, owner in (
+        (InvoiceRow.invoice_number, InvoiceRow.document_id),
+        (PurchaseOrderRow.po_number, PurchaseOrderRow.document_id),
+        (ContractRow.contract_number, ContractRow.document_id),
+        (PaymentRow.payment_reference, PaymentRow.document_id),
+    ):
+        value = session.scalars(select(number).where(owner == document_id).limit(1)).first()
+        if value:
+            return str(value)
+    return None
+
+
+def get_document_text(
+    services: Services, document: str, *, max_chars: int = 20_000
+) -> DocumentText:
+    from ledgerlens.storage.postgres.repositories import ChunkRepository, DocumentRepository
+
+    with services.sessions() as session:
+        document_id = find_document_id(session, document)
+        stored = DocumentRepository(session).get(document_id)
+        if stored is None:
+            raise ToolError(f"no stored document {document_id}")
+        chunks = ChunkRepository(session).for_document(document_id)
+        number = _record_number(session, document_id)
+    text = "\n\n".join(_CONTEXT_HEADER.sub("", chunk.text).strip() for chunk in chunks)
+    return DocumentText(
+        document_id=document_id,
+        filename=stored.filename,
+        doc_type=stored.doc_type.value,
+        status=stored.status.value,
+        pages=stored.pages,
+        citation=citation(number, document_id),
+        record_number=number,
+        text=text[:max_chars],
+        truncated=len(text) > max_chars,
+        chunk_count=len(chunks),
+    )
+
+
+# --------------------------------------------------------------------------- save_extraction
+
+FLAG_SCORE = RULE_BAND / 2
+"""Combined anomaly scores at or above this are flagged (a hard hit scores >= 0.5, an
+autoencoder flag >= 0.25: ``ledgerlens.anomaly.scorer``)."""
+
+SAVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+"""save_extraction writes, but saving the same record twice leaves the same state."""
+
+
+class AnomalySummary(BaseModel):
+    model_version: str
+    score: float
+    flagged: bool
+    reasons: list[str] = Field(default_factory=list)
+
+
+class SavedExtraction(BaseModel):
+    document_id: str
+    record_id: str
+    doc_type: str
+    record_number: str | None
+    vendor_id: str | None
+    vendor_match: str | None
+    """How the vendor was resolved (``tax_id``, ``name``, ``fuzzy``, ``new``)."""
+    citation: str | None
+    anomaly: AnomalySummary | None = None
+    """For an invoice: the anomaly score it got on saving."""
+
+
+def existing_record_id(session: Session, document_id: str, record: ExtractedRecord) -> str | None:
+    """The id of the record of ``record``'s type stored for the document, if any."""
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.repositories import record_model
+
+    model: Any = record_model(record)
+    return session.scalars(
+        select(model.id).where(model.document_id == document_id).limit(1)
+    ).first()
+
+
+def _number(record: ExtractedRecord) -> str | None:
+    for name in ("invoice_number", "po_number", "contract_number", "payment_reference"):
+        value = getattr(record, name, None)
+        if value:
+            return str(value)
+    return None
+
+
+def save_extraction(
+    services: Services, document_id: str, record: dict[str, Any]
+) -> SavedExtraction:
+    from pydantic import ValidationError
+
+    from ledgerlens.core.schemas import parse_extracted
+    from ledgerlens.ingestion.sinks import StoreWriteError
+    from ledgerlens.storage.postgres.repositories import (
+        AnomalyScoreRepository,
+        DocumentRepository,
+    )
+
+    try:
+        parsed = parse_extracted(record)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:8]
+        )
+        raise ToolError(f"the record does not validate: {problems}") from exc
+    if not _UUID.match(document_id):
+        raise ToolError(f"document_id must be a stored document's id (a UUID), not {document_id!r}")
+    with services.sessions() as session:
+        stored = DocumentRepository(session).get(document_id)
+        if stored is None:
+            raise ToolError(f"no stored document {document_id}")
+        # the record this document already holds (bulk-loaded records keep their ledger ids)
+        record_id = existing_record_id(session, document_id, parsed) or document_id
+    try:
+        vendor = services.record_sink.write_record(stored, parsed, record_id=record_id)
+    except StoreWriteError as exc:
+        raise ToolError(f"saving failed at {exc}") from exc
+    anomaly = None
+    if parsed.doc_type == "invoice":
+        with services.sessions() as session:
+            scores = AnomalyScoreRepository(session).for_invoice(record_id)
+        if scores:
+            row = scores[0]
+            anomaly = AnomalySummary(
+                model_version=row.model_version,
+                score=round(row.score, 4),
+                flagged=row.score >= FLAG_SCORE,
+                reasons=[str(reason.get("text", "")) for reason in row.reasons],
+            )
+    number = _number(parsed)
+    return SavedExtraction(
+        document_id=document_id,
+        record_id=record_id,
+        doc_type=parsed.doc_type,
+        record_number=number,
+        vendor_id=vendor.vendor_id if vendor else None,
+        vendor_match=vendor.method if vendor else None,
+        citation=citation(number, document_id),
+        anomaly=anomaly,
+    )
+
+
 # --------------------------------------------------------------------------- tools
 
 Vendor = Annotated[
@@ -624,3 +889,37 @@ def register(server: FastMCP, services: Services) -> None:
         limit: Annotated[int, Field(ge=1, le=MAX_ROWS, description="Most rows to return")] = 200,
     ) -> AnalyticsResult:
         return await in_thread(run_analytics, services, report, params, limit=limit)
+
+    @server.tool(name="get_vendor_contact", annotations=READ_ONLY)
+    async def get_vendor_contact_tool(
+        vendor: Annotated[str, Field(description="A vendor id (V001) or name")],
+    ) -> VendorContact:
+        """A vendor's name, aliases, tax id, email (if on file) and current contract terms."""
+        return await in_thread(get_vendor_contact, services, vendor)
+
+    @server.tool(name="get_document_text", annotations=READ_ONLY)
+    async def get_document_text_tool(
+        document: Annotated[
+            str, Field(description="A document id, or the number of the record it holds")
+        ],
+        max_chars: Annotated[int, Field(ge=500, le=MAX_TEXT_CHARS)] = 20_000,
+    ) -> DocumentText:
+        """The text of a stored document (as read at ingestion), for extraction or
+        quoting, with its type, status and citation tag."""
+        return await in_thread(get_document_text, services, document, max_chars=max_chars)
+
+    @server.tool(name="save_extraction", annotations=SAVE)
+    async def save_extraction_tool(
+        document_id: Annotated[str, Field(description="The stored document it was read from")],
+        record: Annotated[
+            dict[str, Any],
+            Field(
+                description="The extracted record as JSON, with doc_type (invoice, "
+                "purchase_order, contract, payment or receipt) and that type's fields"
+            ),
+        ],
+    ) -> SavedExtraction:
+        """Validate an extracted record and store it for its document: Postgres rows, the
+        vendor and graph links, and for an invoice an anomaly score. Saving the same
+        record again changes nothing."""
+        return await in_thread(save_extraction, services, document_id, record)

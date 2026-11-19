@@ -161,6 +161,43 @@ class StoresSink:
         if self.scorer is not None and isinstance(record, Invoice):
             self.score(record_id)
 
+    def write_record(
+        self, document: Document, record: ExtractedRecord, *, record_id: str | None = None
+    ) -> VendorMatch | None:
+        """Store a new extraction of an already stored document: resolve its vendor, write
+        the record's Postgres rows (the document's type follows the record), relink it in
+        the graph and score it if it is an invoice -- the record part of the write path.
+        Chunks and vectors are left as ingestion wrote them. ``record_id`` (default
+        :meth:`record_id`) is the id of the record the document already holds, when it
+        has one. Raises :class:`StoreWriteError` naming the step that failed."""
+        from ledgerlens.core.schemas import DocType
+        from ledgerlens.extraction.base import ExtractionResult
+        from ledgerlens.ingestion.pipeline import IngestResult
+
+        doc_type = DocType(record.doc_type)
+        document = document.model_copy(update={"doc_type": doc_type})
+        result = IngestResult(
+            document=document,
+            extraction=ExtractionResult(extractor="saved", doc_type=doc_type, record=record),
+        )
+        record_id = record_id or self.record_id(result)
+        vendor = self._step("vendor", lambda: self.resolve_vendor(result, record))
+        vendor_id = vendor.vendor_id if vendor else None
+
+        def rows() -> None:
+            with session_scope(self.sessions) as session:
+                repos = Repositories(session)
+                repos.documents.upsert(document)
+                self._record_rows(repos, document.id, record, record_id, vendor_id)
+
+        self._step("postgres", rows)
+        if self.linker is not None:
+            linker = self.linker
+            self._step("neo4j", lambda: self._graph(linker, document, record, record_id, vendor))
+        if self.scorer is not None and isinstance(record, Invoice):
+            self.score(record_id)
+        return vendor
+
     def score(self, invoice_id: str) -> bool:
         """Score a stored invoice into ``anomaly_scores``. Failures are logged, not
         raised: the document is stored either way, and can be scored again later."""
@@ -217,12 +254,24 @@ class StoresSink:
             repos = Repositories(session)
             repos.documents.upsert(document.with_status(DocumentStatus.PROCESSING))
             repos.chunks.replace(document.id, result.chunks)
-            repos.delete_records(document.id, keep=record_model(record) if record else None)
-            if record is None:
-                return
-            if vendor_id is not None:
-                repos.vendors.ensure(vendor_id, record.vendor_name, tax_id=_tax_id(record))
-            repos.upsert_record(record, id=record_id, document_id=document.id, vendor_id=vendor_id)
+            self._record_rows(repos, document.id, record, record_id, vendor_id)
+
+    @staticmethod
+    def _record_rows(
+        repos: Repositories,
+        document_id: str,
+        record: ExtractedRecord | None,
+        record_id: str,
+        vendor_id: str | None,
+    ) -> None:
+        """The record's rows (and its vendor's, if new); records of another type that the
+        document produced before are removed."""
+        repos.delete_records(document_id, keep=record_model(record) if record else None)
+        if record is None:
+            return
+        if vendor_id is not None:
+            repos.vendors.ensure(vendor_id, record.vendor_name, tax_id=_tax_id(record))
+        repos.upsert_record(record, id=record_id, document_id=document_id, vendor_id=vendor_id)
 
     @staticmethod
     def _vectors(
