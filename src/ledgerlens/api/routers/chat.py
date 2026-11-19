@@ -6,8 +6,16 @@
 The response is ``text/event-stream``; each event is ``event: <type>`` and one JSON
 ``data:`` line:
 
+* ``tool_call`` -- ``{"id", "name", "args", "node"}``: an agent called an MCP tool;
+* ``tool_result`` -- ``{"id", "name", "status", "content", "truncated", "node"}``: what it
+  returned (``status`` ``error`` for a failed call; the agent carries on);
 * ``token`` -- ``{"text", "node"}``: the answer text, in word-sized pieces, as each agent
   finishes;
+* ``citation`` -- ``{"tag", "document_id"}``: a document the answer can cite, once each;
+* ``interrupt`` -- ``{"thread_id", "type": "reminder_approval", "reminders": [...]}``: the
+  run waits for a person to approve or reject reminder drafts
+  (``POST /reminders/{id}/approve|reject``);
+* ``error`` -- ``{"message"}``: the run itself failed (agents' own errors are replies);
 * ``done`` -- ``{"thread_id", "status", "intent", "errors"}``: last event of every
   stream; ``status`` is ``completed``, or ``interrupted`` when the run waits for a person.
 
@@ -26,7 +34,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Overwrite
 from pydantic import BaseModel, Field
 
@@ -81,19 +89,70 @@ def turn_input(request: ChatRequest) -> dict[str, Any]:
     }
 
 
+RESULT_CHARS = 2_000
+"""``tool_result`` events carry at most this much of the result text."""
+
+
+def node_events(node: str, values: Any, cited: set[str]) -> list[str]:
+    """The events for one node's state update, in order: its tool calls, their results,
+    its answer text, and citations not sent before."""
+    if not isinstance(values, dict):
+        return []
+    out: list[str] = []
+    for message in values.get("messages", []):
+        if isinstance(message, AIMessage):
+            for call in message.tool_calls:
+                out.append(
+                    sse(
+                        "tool_call",
+                        {
+                            "id": call["id"],
+                            "name": call["name"],
+                            "args": call["args"],
+                            "node": node,
+                        },
+                    )
+                )
+            if message.text:
+                out += [
+                    sse("token", {"text": piece, "node": node}) for piece in pieces(message.text)
+                ]
+        elif isinstance(message, ToolMessage):
+            text = message.text
+            out.append(
+                sse(
+                    "tool_result",
+                    {
+                        "id": message.tool_call_id,
+                        "name": message.name,
+                        "status": message.status,
+                        "content": text[:RESULT_CHARS],
+                        "truncated": len(text) > RESULT_CHARS,
+                        "node": node,
+                    },
+                )
+            )
+    for tag, document_id in (values.get("citations") or {}).items():
+        if tag not in cited:
+            cited.add(tag)
+            out.append(sse("citation", {"tag": tag, "document_id": document_id}))
+    return out
+
+
 async def events(runtime: AgentRuntime, request: ChatRequest, thread_id: str) -> AsyncIterator[str]:
     config = {"configurable": {"thread_id": thread_id}}
+    cited: set[str] = set()
     try:
         async for update in runtime.graph.astream(
             turn_input(request), config, stream_mode="updates"
         ):
             for node, values in update.items():
-                for message in (
-                    (values or {}).get("messages", []) if isinstance(values, dict) else []
-                ):
-                    if isinstance(message, AIMessage) and message.text:
-                        for piece in pieces(message.text):
-                            yield sse("token", {"text": piece, "node": node})
+                if node == "__interrupt__":
+                    for pause in values:
+                        yield sse("interrupt", {"thread_id": thread_id, **pause.value})
+                    continue
+                for event in node_events(node, values, cited):
+                    yield event
     except Exception as exc:  # the graph guards its nodes; this is the graph itself failing
         logger.exception("chat run failed")
         yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
