@@ -1,0 +1,100 @@
+{"text": "Which Acme invoices are still unpaid?", "intent": "question"}
+{"text": "Show unpaid invoices from Acme over $5k", "intent": "question"}
+{"text": "How much do we owe Brightline Packaging?", "intent": "question"}
+{"text": "What's the total on INV-889?", "intent": "question"}
+{"text": "When is INV-005401 due?", "intent": "question"}
+{"text": "Is INV-889 paid?", "intent": "question"}
+{"text": "List all overdue invoices older than 60 days", "intent": "question"}
+{"text": "what did we spend with Kopi Sentosa last quarter", "intent": "question"}
+{"text": "Which payment settled INV-005704?", "intent": "question"}
+{"text": "Give me the AP aging summary", "intent": "question"}
+{"text": "Who is our biggest supplier by spend this year?", "intent": "question"}
+{"text": "What are the payment terms in the Acme contract?", "intent": "question"}
+{"text": "What's the contract rate for coffee beans with Greenleaf?", "intent": "question"}
+{"text": "show me PO-2025-01169", "intent": "question"}
+{"text": "How many invoices did we get from Bitforge in September?", "intent": "question"}
+{"text": "outstanding balance per vendor please", "intent": "question"}
+{"text": "Which invoices reference PO-2026-00337?", "intent": "question"}
+{"text": "When does the Acme framework agreement expire?", "intent": "question"}
+{"text": "Average days to pay for Brightline?", "intent": "question"}
+{"text": "Has INV-015404 been paid yet?", "intent": "question"}
+{"text": "What's the status of invoice INV-012893?", "intent": "question"}
+{"text": "tell me about the Greenleaf Catering contract", "intent": "question"}
+{"text": "Total spend by vendor for 2026", "intent": "question"}
+{"text": "Are there any duplicate invoices from Sparkle Facility Management?", "intent": "question"}
+{"text": "Which invoices were flagged as anomalies this month?", "intent": "question"}
+{"text": "How much is overdue in GBP?", "intent": "question"}
+{"text": "Find the invoice for 28,903.39", "intent": "question"}
+{"text": "What did we pay on 2 April 2026?", "intent": "question"}
+{"text": "Which vendors have no contract on file?", "intent": "question"}
+{"text": "Summarise unpaid invoices by currency", "intent": "question"}
+{"text": "Does Acme have any open purchase orders?", "intent": "question"}
+{"text": "What's the email address we have for Acme?", "intent": "question"}
+{"text": "Was there a reminder drafted for INV-889?", "intent": "question"}
+{"text": "how much tax was on INV-005594", "intent": "question"}
+{"text": "Show me the line items on INV-005401", "intent": "question"}
+{"text": "Does INV-889 match its PO and contract rate?", "intent": "reconcile"}
+{"text": "Reconcile INV-012893", "intent": "reconcile"}
+{"text": "Can you run a 3-way match on INV-005401?", "intent": "reconcile"}
+{"text": "Check INV-015404 against PO-2026-01620", "intent": "reconcile"}
+{"text": "Was INV-012893 billed at the contract rate?", "intent": "reconcile"}
+{"text": "Why doesn't INV-889 agree with its purchase order?", "intent": "reconcile"}
+{"text": "verify the quantities on INV-005734 against the PO", "intent": "reconcile"}
+{"text": "Are there any discrepancies between INV-005594 and its PO?", "intent": "reconcile"}
+{"text": "Has Greenleaf overcharged us on INV-012893?", "intent": "reconcile"}
+{"text": "three way match for the latest Acme invoice please", "intent": "reconcile"}
+{"text": "Does the unit price on INV-889 match the contract?", "intent": "reconcile"}
+{"text": "Compare INV-017281 with its contract terms", "intent": "reconcile"}
+{"text": "Is INV-005401 consistent with PO-2025-01169?", "intent": "reconcile"}
+{"text": "audit INV-008473 against its PO", "intent": "reconcile"}
+{"text": "Find mismatches on INV-005704", "intent": "reconcile"}
+{"text": "validate invoice INV-012893 against the purchase order and contract", "intent": "reconcile"}
+{"text": "Did we get overbilled on INV-015404?", "intent": "reconcile"}
+{"text": "Is the INV-889 total right given the PO?", "intent": "reconcile"}
+{"text": "Draft a payment reminder for INV-889", "intent": "remind"}
+{"text": "Chase Acme for their overdue invoices", "intent": "remind"}
+{"text": "Write a reminder for INV-005401, it's months overdue", "intent": "remind"}
+{"text": "Send a final notice for INV-015404", "intent": "remind"}
+{"text": "Follow up with Brightline about INV-005594", "intent": "remind"}
+{"text": "nudge Kopi Sentosa about the unpaid invoice", "intent": "remind"}
+{"text": "Prepare reminders for everything more than 30 days overdue", "intent": "remind"}
+{"text": "Can you draft an email to Greenleaf about INV-012893 being late?", "intent": "remind"}
+{"text": "Remind Sparkle Facility Management that INV-006031 is past due", "intent": "remind"}
+{"text": "write a firm reminder for INV-017281", "intent": "remind"}
+{"text": "Draft a friendly follow-up on INV-008473", "intent": "remind"}
+{"text": "Chase up all overdue Bitforge invoices", "intent": "remind"}
+{"text": "Create a dunning letter for Acme", "intent": "remind"}
+{"text": "We need to send Acme an overdue notice for INV-005401", "intent": "remind"}
+{"text": "Prepare a payment reminder for the oldest unpaid invoice", "intent": "remind"}
+{"text": "send a reminder to Kopi Sentosa about INV-005275", "intent": "remind"}
+{"text": "Draft reminder emails for every invoice over 46 days late", "intent": "remind"}
+{"text": "Extract the fields from this invoice", "intent": "extract"}
+{"text": "I uploaded a new invoice from Acme, can you process it?", "intent": "extract"}
+{"text": "Read the attached PDF and save the invoice", "intent": "extract"}
+{"text": "Parse this receipt", "intent": "extract"}
+{"text": "Pull the details out of the scanned PO I just uploaded", "intent": "extract"}
+{"text": "Process the attached contract", "intent": "extract"}
+{"text": "Ingest this document", "intent": "extract"}
+{"text": "Can you extract the line items from the uploaded invoice?", "intent": "extract"}
+{"text": "Here's a new invoice from Brightline, please capture it", "intent": "extract"}
+{"text": "Read this scan and enter the invoice", "intent": "extract"}
+{"text": "OCR the attached receipt", "intent": "extract"}
+{"text": "What's on the invoice I just uploaded? Save it to the ledger", "intent": "extract"}
+{"text": "key in the attached PO", "intent": "extract"}
+{"text": "extract invoice number, date and total from the new upload", "intent": "extract"}
+{"text": "Process this payment advice", "intent": "extract"}
+{"text": "Hi", "intent": "other"}
+{"text": "Thanks, that's all!", "intent": "other"}
+{"text": "Good morning", "intent": "other"}
+{"text": "What's the weather in London?", "intent": "other"}
+{"text": "Tell me a joke", "intent": "other"}
+{"text": "Write me a poem about spreadsheets", "intent": "other"}
+{"text": "Who won the football last night?", "intent": "other"}
+{"text": "Translate hello into French", "intent": "other"}
+{"text": "ok cool", "intent": "other"}
+{"text": "What can you do?", "intent": "other"}
+{"text": "bye", "intent": "other"}
+{"text": "What's the bitcoin price today?", "intent": "other"}
+{"text": "Can you help me write Python code to sort a list?", "intent": "other"}
+{"text": "Recommend a good movie", "intent": "other"}
+{"text": "thank you so much", "intent": "other"}
