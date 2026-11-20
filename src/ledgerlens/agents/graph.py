@@ -25,10 +25,11 @@ Guardrails:
 Human in the loop: after the reminder writer drafts reminders, :func:`human_approval`
 pauses the run with LangGraph's ``interrupt()`` (the drafts are ``pending_approval``). A
 person approves or rejects them -- the API records the decision and resumes the run with
-``Command(resume={reminder_id: "approved" | "rejected"})`` -- and the run ends by saying
-what was decided. Nothing is sent either way. Pausing needs a checkpointer
-(``build_graph(..., checkpointer=...)``): :func:`postgres_checkpointer` keeps every run's
-state in Postgres, so a run waiting for approval survives a restart of the API.
+``Command(resume={reminder_id: "approved" | "rejected"})`` -- and the run says what was
+decided, waiting again while any draft is undecided. Nothing is sent either way. Pausing
+needs a checkpointer (``build_graph(..., checkpointer=...)``): :func:`postgres_checkpointer`
+keeps every run's state in Postgres, so a run waiting for approval survives a restart of
+the API.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -221,15 +223,24 @@ def _failure(name: str, exc: Exception) -> dict[str, Any]:
     }
 
 
+def _takes_config(node: Any) -> bool:
+    try:
+        return "config" in inspect.signature(node).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins
+        return False
+
+
 def guarded(name: str, node: Any) -> Any:
-    """``node`` (sync or async) with any exception turned into an error reply."""
+    """``node`` (sync or async) with any exception turned into an error reply. A node with
+    a ``config`` parameter gets the run's config (its ``thread_id``)."""
+    with_config = _takes_config(node)
     if inspect.iscoroutinefunction(node) or inspect.iscoroutinefunction(
         getattr(node, "__call__", None)  # noqa: B004 - a callable object's async __call__
     ):
 
-        async def run_async(state: LedgerState) -> dict[str, Any]:
+        async def run_async(state: LedgerState, config: RunnableConfig) -> dict[str, Any]:
             try:
-                result: dict[str, Any] = await node(state)
+                result: dict[str, Any] = await (node(state, config) if with_config else node(state))
             except GraphBubbleUp:  # interrupt() and other control flow: not an error
                 raise
             except Exception as exc:
@@ -238,9 +249,9 @@ def guarded(name: str, node: Any) -> Any:
 
         return run_async
 
-    def run(state: LedgerState) -> dict[str, Any]:
+    def run(state: LedgerState, config: RunnableConfig) -> dict[str, Any]:
         try:
-            result: dict[str, Any] = node(state)
+            result: dict[str, Any] = node(state, config) if with_config else node(state)
         except GraphBubbleUp:
             raise
         except Exception as exc:
@@ -287,7 +298,11 @@ def build_graph(
         make_after_reminders(max_steps),
         {"human_approval": "human_approval", "respond": "respond"},
     )
-    graph.add_edge("human_approval", "respond")
+    graph.add_conditional_edges(
+        "human_approval",
+        make_after_reminders(max_steps),  # undecided drafts: wait again
+        {"human_approval": "human_approval", "respond": "respond"},
+    )
     graph.add_conditional_edges(
         "extractor",
         make_after_extract(max_steps),

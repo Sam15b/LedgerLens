@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -726,8 +726,16 @@ class ReminderRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def create(self, invoice_id: str, draft: str, tone: str) -> ReminderRow:
-        row = ReminderRow(invoice_id=invoice_id, draft=draft, tone=tone, status="pending_approval")
+    def create(
+        self, invoice_id: str, draft: str, tone: str, *, thread_id: str | None = None
+    ) -> ReminderRow:
+        row = ReminderRow(
+            invoice_id=invoice_id,
+            draft=draft,
+            tone=tone,
+            status="pending_approval",
+            thread_id=thread_id,
+        )
         self.session.add(row)
         self.session.flush()
         self.session.refresh(row)
@@ -735,6 +743,22 @@ class ReminderRepository:
 
     def get(self, reminder_id: str) -> ReminderRow | None:
         return self.session.get(ReminderRow, reminder_id, populate_existing=True)
+
+    def decide(self, reminder_id: str, decision: str) -> ReminderRow:
+        """A person's decision on a pending draft: ``approved`` or ``rejected`` (never
+        ``sent``: nothing here sends). Raises ``KeyError`` for an unknown id and
+        ``ValueError`` if the draft was already decided."""
+        if decision not in ("approved", "rejected"):
+            raise ValueError(f"a decision is approved or rejected, not {decision!r}")
+        row = self.get(reminder_id)
+        if row is None:
+            raise KeyError(reminder_id)
+        if row.status != "pending_approval":
+            raise ValueError(f"reminder {reminder_id} is already {row.status}")
+        row.status = decision
+        row.decided_at = datetime.now(UTC)
+        self.session.flush()
+        return row
 
     def find(
         self, *, status: str | None = None, invoice_id: str | None = None, limit: int = 100
