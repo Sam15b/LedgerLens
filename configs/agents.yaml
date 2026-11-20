@@ -1,5 +1,8 @@
 # See docs/layers/04-agents-mcp.md
 max_steps: 8
+# The agents call the LedgerLens MCP server's tools (agents/tools.py): over streamable HTTP
+# to the server `make mcp` runs, or stdio (a server per session).
+mcp: { transport: streamable_http, url: "http://localhost:8765/mcp" }
 agents:
   router: { model: fast }
   qa: { model: smart }
