@@ -77,6 +77,34 @@ v0 was reviewed by these checks plus a read-through of every question and answer
 wording. It has **not yet had a human domain review**. Do one before quoting results
 externally, as `docs/layers/09-evaluation.md` asks.
 
+## Synthetic extension (q052–q155)
+
+Added on 2026-11-21 with the same builder. It now has more question shapes per category
+(see its docstring), and every new question carries a `check` recipe:
+
+```bash
+python -m eval.golden_set.build_golden_set --extend data/golden/golden_set.jsonl --seed 63 \
+    --out <drafts>
+python -m eval.golden_set.review <drafts> --accept-verified
+python -m eval.golden_set.verify                  # 104/104 checks agree
+```
+
+- **Grounding**: single-document drafts must state facts found in their document's text,
+  as in v0.
+- **Graph check**: `verify.py` derives every answer a second time from Neo4j, using
+  Cypher over SETTLES amounts, REFERENCES / GOVERNS paths, rate cards, counts and totals.
+  For a clause missing from a contract it uses SQL over the contract's text. All 104
+  agree. When the answers were deliberately altered, the check failed every one.
+- **Read-through**: every question and answer was read for wording.
+
+Like v0, these questions have **not** had a human domain review. They are template
+drafts over known ground truth. LLM-drafted questions must always go through the
+interactive review (`review.py` without `--accept-verified`).
+
+The synthetic targets are lookup 25, clause 15, multi_hop 45, aggregation 30,
+reconciliation 20 and unanswerable 20 (`SYNTHETIC_TARGETS`). Hand-written SROIE lookups
+and CUAD clause questions fill the rest of the ~200.
+
 ## Validating
 
 ```bash
