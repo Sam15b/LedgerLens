@@ -1,6 +1,8 @@
 """The committed golden set validates, and the validator catches what it should."""
 
 import json
+import re
+from collections import Counter
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,7 @@ from typing import Any
 import pytest
 
 from eval.golden_set.build_golden_set import Draft, _period, check_grounding
+from eval.golden_set.ci_subset import ci_subset, quotas
 from eval.golden_set.schema import (
     CATEGORIES,
     GoldenSetError,
@@ -17,7 +20,8 @@ from eval.golden_set.schema import (
     parse_golden_set,
     problems,
 )
-from ledgerlens.core.config import repo_path
+from eval.golden_set.verify import KINDS
+from ledgerlens.core.config import get_config, repo_path
 
 GOLDEN = repo_path("data/golden/golden_set.jsonl")
 DOC = "22bac600-2669-42aa-bd5a-469d93c382a0"
@@ -76,6 +80,83 @@ def test_questions_do_not_leak_document_ids(golden: list[Any]) -> None:
 def test_cli_accepts_the_committed_set(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([str(GOLDEN)]) == 0
     assert "questions: lookup" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- the full set
+
+DOC_LABELS = {
+    "Single-doc lookup": "lookup",
+    "Contract clause": "clause",
+    "Multi-hop / relationship": "multi_hop",
+    "Aggregation": "aggregation",
+    "Reconciliation": "reconciliation",
+    "Unanswerable": "unanswerable",
+}
+
+
+def doc_counts() -> dict[str, int]:
+    """The category table in docs/layers/09-evaluation.md."""
+    text = repo_path("docs/layers/09-evaluation.md").read_text(encoding="utf-8")
+    counts = {}
+    for label, category in DOC_LABELS.items():
+        match = re.search(rf"^\| {re.escape(label)} \| (\d+) \|", text, re.M)
+        assert match, label
+        counts[category] = int(match.group(1))
+    return counts
+
+
+def test_the_full_set_matches_the_documented_counts(golden: list[Any]) -> None:
+    counts = Counter(q.category for q in golden)
+    assert dict(counts) == doc_counts()
+    assert len(golden) == sum(doc_counts().values()) == 200
+
+
+def test_ids_run_without_gaps(golden: list[Any]) -> None:
+    assert [q.id for q in golden] == [f"q{n:03d}" for n in range(1, len(golden) + 1)]
+
+
+def test_sources(golden: list[Any]) -> None:
+    by_source = Counter((q.source, q.category) for q in golden)
+    assert by_source[("cord", "lookup")] == 25 and by_source[("cuad", "clause")] == 20
+    assert {s for s, _ in by_source} == {"synthetic", "cord", "cuad"}
+    for q in golden:
+        if q.source != "synthetic":  # hand-written on one real document, no graph
+            assert q.check is None and len(q.relevant_document_ids) == 1, q.id
+            assert not q.requires_graph and q.expected, q.id
+
+
+def test_generated_questions_carry_a_known_check(golden: list[Any]) -> None:
+    generated = [q for q in golden if q.check is not None]
+    assert len(generated) == 104
+    assert all(q.source == "synthetic" and q.check["kind"] in KINDS for q in generated)
+
+
+def test_ci_subset_is_current_and_covers_every_category_and_source(golden: list[Any]) -> None:
+    config = get_config().eval
+    subset = load_golden_set(repo_path(config.ci_subset))
+    assert len(subset) == config.ci_subset_size == 40
+    assert subset == ci_subset(golden, config.ci_subset_size)  # regenerate if this fails
+    full = {q.id: q for q in golden}
+    assert all(full[q.id] == q for q in subset)
+    assert {q.category for q in subset} == set(CATEGORIES)
+    assert {q.source for q in subset} == {"synthetic", "cord", "cuad"}
+
+
+@pytest.mark.parametrize(
+    ("counts", "size", "expected"),
+    [
+        ({"a": 50, "b": 50}, 10, {"a": 5, "b": 5}),
+        ({"a": 90, "b": 5, "c": 5}, 4, {"a": 2, "b": 1, "c": 1}),
+        ({"a": 3, "b": 0}, 2, {"a": 2}),
+    ],
+)
+def test_quotas(counts: dict[str, int], size: int, expected: dict[str, int]) -> None:
+    assert quotas(counts, size) == expected
+
+
+def test_quotas_need_room_for_every_category() -> None:
+    with pytest.raises(ValueError, match="cannot cover"):
+        quotas({"a": 1, "b": 1, "c": 1}, 2)
 
 
 # --------------------------------------------------------------------------- the validator
