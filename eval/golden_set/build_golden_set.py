@@ -114,6 +114,11 @@ def money(amount: Decimal | float) -> str:
     return f"{Decimal(str(amount)):,.2f}"
 
 
+def n_of(n: int, noun: str, plural: str | None = None) -> str:
+    """``n_of(1, "invoice")`` -> ``1 invoice``; ``n_of(3, "invoice")`` -> ``3 invoices``."""
+    return f"{n} {noun if n == 1 else plural or noun + 's'}"
+
+
 def long_date(day: date) -> str:
     return f"{day.day} {day.strftime('%B %Y')}"
 
@@ -701,7 +706,8 @@ def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
             yield Draft(
                 "multi_hop",
                 f"Which invoices were billed against purchase order {po.po_number}?",
-                f"{len(items)} invoice(s) reference {po.po_number}: {listed}.",
+                f"{n_of(len(items), 'invoice')} {'references' if len(items) == 1 else 'reference'} "
+                f"{po.po_number}: {listed}.",
                 _docs(po.document_id, *(i.document_id for i in items)),
                 True,
                 "medium",
@@ -715,8 +721,8 @@ def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
             yield Draft(
                 "multi_hop",
                 f"How much has been invoiced against purchase order {po.po_number}?",
-                f"{money(total)} {items[0].currency} across {len(items)} invoice(s), against a "
-                f"PO total of {money(po.total)} {po.currency}.",
+                f"{money(total)} {items[0].currency} across {n_of(len(items), 'invoice')}, "
+                f"against a PO total of {money(po.total)} {po.currency}.",
                 _docs(po.document_id, *(i.document_id for i in items)),
                 True,
                 "hard",
@@ -784,7 +790,7 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 yield Draft(
                     "aggregation",
                     f"How many invoices did {vendor} issue in {year}?",
-                    f"{vendor} issued {len(items)} invoices dated in {year}.",
+                    f"{vendor} issued {n_of(len(items), 'invoice')} dated in {year}.",
                     docs_of(items),
                     True,
                     "medium",
@@ -801,7 +807,8 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 yield Draft(
                     "aggregation",
                     f"How many invoices did we receive from {vendor} in {label}?",
-                    f"{len(items)} {vendor} invoices are dated {start.isoformat()} to "
+                    f"{n_of(len(items), vendor + ' invoice')} "
+                    f"{'is' if len(items) == 1 else 'are'} dated between {start.isoformat()} and "
                     f"{end.isoformat()}.",
                     docs_of(items),
                     True,
@@ -827,7 +834,8 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                     "aggregation",
                     f"What was the total invoiced by {vendor} in {label}?",
                     f"{vendor} invoiced {money(total)} {currencies.pop()} across "
-                    f"{len(items)} invoices dated {start.isoformat()} to {end.isoformat()}.",
+                    f"{n_of(len(items), 'invoice')} dated {start.isoformat()} to "
+                    f"{end.isoformat()}.",
                     docs_of(items),
                     True,
                     "hard",
@@ -857,8 +865,8 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 yield Draft(
                     "aggregation",
                     f"What is our total outstanding balance with {vendor}?",
-                    f"{money(amount)} {currencies.pop()} is outstanding on {len(items)} "
-                    f"{vendor} invoices.",
+                    f"{money(amount)} {currencies.pop()} is outstanding on "
+                    f"{n_of(len(items), vendor + ' invoice')}.",
                     docs_of(items),
                     True,
                     "hard",
@@ -874,7 +882,8 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 yield Draft(
                     "aggregation",
                     f"How many {vendor} invoices are not yet paid in full?",
-                    f"{len(items)} {vendor} invoices still have an amount outstanding.",
+                    f"{n_of(len(items), vendor + ' invoice')} "
+                    f"{'still has' if len(items) == 1 else 'still have'} an amount outstanding.",
                     docs_of(items),
                     True,
                     "medium",
@@ -893,8 +902,8 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 yield Draft(
                     "aggregation",
                     f"How much did we pay {vendor} in {year}?",
-                    f"{money(total)} {currencies.pop()} across {len(items)} payments made in "
-                    f"{year}.",
+                    f"{money(total)} {currencies.pop()} across "
+                    f"{n_of(len(items), 'payment')} made in {year}.",
                     docs_of(items),
                     True,
                     "hard",
@@ -911,7 +920,8 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 yield Draft(
                     "aggregation",
                     f"How many purchase orders did we place with {vendor} in {year}?",
-                    f"{len(items)} purchase orders to {vendor} are dated in {year}.",
+                    f"{n_of(len(items), 'purchase order')} to {vendor} "
+                    f"{'is' if len(items) == 1 else 'are'} dated in {year}.",
                     docs_of(items),
                     True,
                     "medium",
@@ -1095,11 +1105,14 @@ def reconciliation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
             assert contract is not None and contract.payment_terms_days is not None
             days, allowed = terms_days(i), contract.payment_terms_days
             same = days == allowed
+            when = (
+                "the day it is dated" if days == 0 else f"{n_of(days or 0, 'day')} after its date"
+            )
             verdict = "Yes" if same else "No"
             yield Draft(
                 "reconciliation",
                 f"Do the payment terms on invoice {i.invoice_number} follow the contract?",
-                f"{verdict}. Invoice {i.invoice_number} is due {days} days after its date "
+                f"{verdict}. Invoice {i.invoice_number} is due {when} "
                 f"({i.due_date}); contract {contract.contract_number} allows "
                 f"{allowed} days.",
                 _docs(i.document_id, contract.document_id),
