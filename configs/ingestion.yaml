@@ -3,6 +3,7 @@
 loader:
   max_file_mb: 25
   allowed_mime_types: [application/pdf, image/png, image/jpeg, image/tiff]
+  upload_dir: data/uploads   # POST /documents stores files here; the worker reads them by path
 
 ocr:
   engine: tesseract        # tesseract | paddle
