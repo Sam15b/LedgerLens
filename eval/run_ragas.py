@@ -22,8 +22,13 @@ The last three compare with ``ground_truth_answer``, which is why unanswerable q
 The judge is the model router's ``judge`` alias (``--judge`` to override), through
 :func:`router_judge`; its calls and cost are in the report. Samples can be saved
 (``--save-samples``) and scored again later (``--samples``), so the answers are paid for
-once. Unanswerable questions are not scored: they have no reference
-and the right answer is a refusal, which ``benchmark_retrieval.py`` checks.
+once. Judge replies are cached too (:class:`JudgeCache`, ``data/cache/ragas_judge.sqlite``;
+``--no-cache`` to bypass), keyed by the judge's resolved model, the prompt and the
+response schema: re-scoring the same samples costs nothing, and changing the judge model
+or a RAGAS prompt misses the cache instead of reusing a stale verdict.
+
+Unanswerable questions are not scored: they have no reference and the right answer is a
+refusal, which ``benchmark_retrieval.py`` checks.
 
 Built on RAGAS 0.4's ``ragas.metrics.collections`` API: metrics take an
 ``InstructorBaseRagasLLM`` judge (``agenerate(prompt, response_model)``) and a
@@ -35,15 +40,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import re
+import sqlite3
+import threading
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import fmean
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -164,6 +172,91 @@ def router_judge(llm: StructuredLLM, *, model: str = JUDGE_ALIAS) -> InstructorB
             return await asyncio.to_thread(self.generate, prompt, response_model)
 
     return RouterJudge()
+
+
+# --------------------------------------------------------------------------- cache
+
+DEFAULT_CACHE = Path("data/cache/ragas_judge.sqlite")
+CACHE_VERSION = 1
+
+
+def judge_key(model: str, prompt: str, response_model: type[BaseModel]) -> str:
+    """SHA-256 of everything that decides a judge reply: the model(s) behind the judge, the
+    prompt and the schema asked for. Another judge model, a changed RAGAS prompt or a new
+    response model each miss the cache instead of reusing a stale verdict."""
+    payload = json.dumps(
+        {
+            "v": CACHE_VERSION,
+            "model": model,
+            "prompt": prompt,
+            "schema": response_model.model_json_schema(),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class JudgeCache:
+    """Judge replies by :func:`judge_key`, in SQLite (safe across threads and runs)."""
+
+    def __init__(self, path: Path | str = ":memory:") -> None:
+        if str(path) != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(str(path), check_same_thread=False)
+        self._db.execute("CREATE TABLE IF NOT EXISTS judge (key TEXT PRIMARY KEY, reply TEXT)")
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT reply FROM judge WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                self.misses += 1
+                return None
+            self.hits += 1
+            return str(row[0])
+
+    def put(self, key: str, reply: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO judge VALUES (?, ?)", (key, reply))
+            self._db.commit()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT count(*) FROM judge").fetchone()[0])
+
+    def close(self) -> None:
+        self._db.close()
+
+
+def cached_judge(
+    judge: InstructorBaseRagasLLM, cache: JudgeCache, *, model: str
+) -> InstructorBaseRagasLLM:
+    """``judge`` with its replies cached under ``model`` (pass the resolved model refs, not
+    just the alias, so re-pointing the alias invalidates them). Only replies that validate
+    are stored; failures are retried on the next run."""
+    from ragas.llms.base import InstructorBaseRagasLLM
+
+    class CachedJudge(InstructorBaseRagasLLM):
+        def generate(self, prompt: str, response_model: type[R]) -> R:
+            key = judge_key(model, prompt, response_model)
+            if (hit := cache.get(key)) is not None:
+                return response_model.model_validate_json(hit)
+            reply: R = cast("R", judge.generate(prompt, response_model))
+            cache.put(key, reply.model_dump_json())
+            return reply
+
+        async def agenerate(self, prompt: str, response_model: type[R]) -> R:
+            key = judge_key(model, prompt, response_model)
+            if (hit := cache.get(key)) is not None:
+                return response_model.model_validate_json(hit)
+            reply: R = cast("R", await judge.agenerate(prompt, response_model))
+            cache.put(key, reply.model_dump_json())
+            return reply
+
+    return CachedJudge()
 
 
 # --------------------------------------------------------------------------- embeddings
@@ -365,6 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--judge", default=JUDGE_ALIAS, help="model alias or provider/model (default: judge)"
     )
+    parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE, help="judge reply cache")
+    parser.add_argument("--no-cache", action="store_true", help="always call the judge")
     return parser
 
 
@@ -404,12 +499,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.save_samples:
         save_samples(samples, args.save_samples)
     meter = CostMeter()
-    judge = router_judge(metered(LLMClient(), meter), model=args.judge)
+    llm = metered(LLMClient(), meter)
+    judge = router_judge(llm, model=args.judge)
+    cache = None if args.no_cache else JudgeCache(args.cache)
+    if cache is not None:
+        resolved = ",".join(llm.config.resolve(args.judge))
+        judge = cached_judge(judge, cache, model=resolved)
     metrics = build_metrics(judge, dense_embeddings())
     results = asyncio.run(score_samples(samples, metrics, concurrency=args.concurrency))
     calls, cost = meter.take()
+    cached = f"; cache {cache.hits} hits, {cache.misses} misses" if cache else "; no cache"
     notes = [
-        f"judge: `{args.judge}` ({calls} calls, ${cost:.4f})",
+        f"judge: `{args.judge}` ({calls} calls, ${cost:.4f}{cached})",
         f"samples: {len(samples)} ({args.samples or args.set + ' set, ' + args.variant})",
     ]
     report = render_report(results, list(metrics), title=f"RAGAS ({args.set} set)", notes=notes)
