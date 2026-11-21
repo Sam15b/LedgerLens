@@ -21,10 +21,13 @@ asked about twice within a category):
 * **aggregation** -- invoice counts per vendor and year or quarter; totals invoiced per
   vendor and quarter; outstanding balances and unpaid counts; payments per vendor and
   year; POs per vendor and year; the top vendor by spend in a currency.
-* **reconciliation** (6) -- invoice prices against the contract rate (inflated and
-  clean), and exact duplicate invoices.
-* **unanswerable** (4) -- documents that do not exist; the answer is that the context
-  has nothing.
+* **reconciliation** -- invoice prices against the contract rate (inflated and clean);
+  exact duplicates and near-duplicate resubmissions; payment terms against the contract
+  (rushed and normal); whether an invoice is paid in full (yes and no).
+* **unanswerable** -- invoices, POs, remittances and vendors that do not exist, and
+  clauses a contract does not have (termination notice, late-payment interest, liability
+  cap, governing law, renewal: checked absent from the contract's text); the answer is
+  that the records do not say.
 
 Every draft is then **checked against the evidence** (:func:`check_grounding`): amounts,
 numbers and dates a single-document answer states must appear in that document's text.
@@ -932,6 +935,11 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
 
 
 def reconciliation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
+    fresh = Fresh()
+
+    def inv_key(i: InvoiceRow) -> str:
+        return i.id
+
     def rated(invoice: InvoiceRow) -> list[tuple[str, Decimal, Decimal]]:
         """(item, invoiced unit price, contract rate) for lines the rate card prices."""
         contract = ledger.contract_of(invoice)
@@ -944,44 +952,44 @@ def reconciliation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
             if line.unit_price is not None and line.description in rates
         ]
 
-    def usable(invoice: InvoiceRow) -> bool:
+    def with_contract(invoice: InvoiceRow) -> bool:
         contract = ledger.contract_of(invoice)
         return bool(
             invoice.document_id
             and ledger.unique_number(invoice)
             and contract is not None
             and contract.document_id
-            and rated(invoice)
         )
 
     def anomalies(invoice: InvoiceRow) -> list[str]:
         return list(ledger.labels.get(invoice.id, {}).get("anomalies", []))
 
-    inflated = [i for i in ledger.invoices if "price_inflation" in anomalies(i) and usable(i)]
-    clean = [i for i in ledger.invoices if not anomalies(i) and usable(i)]
-    drafts: list[Draft] = []
-    for i in _shuffled(rng, inflated)[:2] + _shuffled(rng, clean)[:2]:
-        contract = ledger.contract_of(i)
-        assert contract is not None
-        cur = i.currency
-        off = [(item, p, r) for item, p, r in rated(i) if abs(p - r) >= TOLERANCE]
-        expected: dict[str, Any]
-        if off:
-            detail = "; ".join(
-                f"{item} at {money(p)} {cur} vs the contract rate {money(r)} {cur} "
-                f"({(p - r) / r * 100:+.1f}%)"
-                for item, p, r in off
-            )
-            answer = f"No. Under {contract.contract_number}, {i.invoice_number} charges {detail}."
-            expected = {"match": False, "items": [item for item, _, _ in off]}
-        else:
-            answer = (
-                f"Yes. Every priced line on invoice {i.invoice_number} matches the rate card of "
-                f"{contract.contract_number}."
-            )
-            expected = {"match": True}
-        drafts.append(
-            Draft(
+    invoices = _shuffled(rng, ledger.invoices)
+
+    def rate_check(pool: Iterable[InvoiceRow]) -> Shape:
+        for i in fresh((i for i in pool if with_contract(i) and rated(i)), inv_key):
+            contract = ledger.contract_of(i)
+            assert contract is not None
+            cur = i.currency
+            off = [(item, p, r) for item, p, r in rated(i) if abs(p - r) >= TOLERANCE]
+            expected: dict[str, Any]
+            if off:
+                detail = "; ".join(
+                    f"{item} at {money(p)} {cur} vs the contract rate {money(r)} {cur} "
+                    f"({(p - r) / r * 100:+.1f}%)"
+                    for item, p, r in off
+                )
+                answer = (
+                    f"No. Under {contract.contract_number}, {i.invoice_number} charges {detail}."
+                )
+                expected = {"match": False, "items": [item for item, _, _ in off]}
+            else:
+                answer = (
+                    f"Yes. Every priced line on invoice {i.invoice_number} matches the rate card "
+                    f"of {contract.contract_number}."
+                )
+                expected = {"match": True}
+            yield Draft(
                 "reconciliation",
                 f"Do the unit prices on invoice {i.invoice_number} match the contract rates?",
                 answer,
@@ -989,19 +997,32 @@ def reconciliation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "hard",
                 expected,
+                check={"kind": "rate_match", "invoice_id": i.id},
             )
-        )
-    duplicates = [
-        i
-        for i in ledger.invoices
-        if i.document_id
-        and "exact_duplicate" in anomalies(i)
-        and ledger.labels[i.id].get("duplicate_of") in ledger.invoice_by_id
-    ]
-    for i in _shuffled(rng, duplicates)[:2]:
-        original = ledger.invoice_by_id[ledger.labels[i.id]["duplicate_of"]]
-        drafts.append(
-            Draft(
+
+    def inflated() -> Shape:
+        return rate_check(i for i in invoices if "price_inflation" in anomalies(i))
+
+    def clean() -> Shape:
+        return rate_check(i for i in invoices if not anomalies(i))
+
+    def duplicates(label: str) -> Iterator[tuple[InvoiceRow, InvoiceRow]]:
+        for i in invoices:
+            original = ledger.invoice_by_id.get(
+                ledger.labels.get(i.id, {}).get("duplicate_of") or ""
+            )
+            if (
+                label in anomalies(i)
+                and original is not None
+                and (i.document_id or original.document_id)  # the graph holds both
+                and i.vendor_id == original.vendor_id
+                and i.total == original.total
+            ):
+                yield i, original
+
+    def exact_duplicate() -> Shape:
+        for i, original in fresh(duplicates("exact_duplicate"), lambda pair: pair[0].id):
+            yield Draft(
                 "reconciliation",
                 f"Has {ledger.vendor_name(i.vendor_id)} invoice {i.invoice_number} been "
                 "submitted more than once?",
@@ -1012,10 +1033,113 @@ def reconciliation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "hard",
                 {"duplicate": True, "number": i.invoice_number},
+                check={"kind": "duplicate", "invoice_id": i.id, "original_id": original.id},
             )
-        )
-    return drafts[:n]
 
+    def near_duplicate() -> Shape:
+        pairs = (
+            (i, o)
+            for i, o in duplicates("near_duplicate")
+            if i.invoice_number != o.invoice_number
+            and ledger.unique_number(i)
+            and ledger.unique_number(o)
+        )
+        for i, original in fresh(pairs, lambda pair: pair[0].id):
+            days = abs((i.invoice_date - original.invoice_date).days)
+            yield Draft(
+                "reconciliation",
+                f"Does {ledger.vendor_name(i.vendor_id)} invoice {i.invoice_number} look like "
+                "a duplicate of another invoice?",
+                f"Yes. Invoice {i.invoice_number} ({i.invoice_date.isoformat()}) has the same "
+                f"vendor and total ({money(i.total)} {i.currency}) as invoice "
+                f"{original.invoice_number} ({original.invoice_date.isoformat()}), {days} days "
+                "apart.",
+                _docs(i.document_id, original.document_id),
+                True,
+                "hard",
+                {"duplicate": True, "number": original.invoice_number},
+                check={"kind": "near_duplicate", "invoice_id": i.id, "original_id": original.id},
+            )
+
+    def terms_days(i: InvoiceRow) -> int | None:
+        return (i.due_date - i.invoice_date).days if i.due_date else None
+
+    def terms_check(pool: Iterable[InvoiceRow]) -> Shape:
+        for i in fresh((i for i in pool if with_contract(i) and i.due_date), inv_key):
+            contract = ledger.contract_of(i)
+            assert contract is not None and contract.payment_terms_days is not None
+            days, allowed = terms_days(i), contract.payment_terms_days
+            same = days == allowed
+            verdict = "Yes" if same else "No"
+            yield Draft(
+                "reconciliation",
+                f"Do the payment terms on invoice {i.invoice_number} follow the contract?",
+                f"{verdict}. Invoice {i.invoice_number} is due {days} days after its date "
+                f"({i.due_date}); contract {contract.contract_number} allows "
+                f"{allowed} days.",
+                _docs(i.document_id, contract.document_id),
+                True,
+                "hard",
+                {"match": same, "days": allowed},
+                check={"kind": "terms_match", "invoice_id": i.id},
+            )
+
+    def rush_terms() -> Shape:
+        return terms_check(i for i in invoices if "rush_terms" in anomalies(i))
+
+    def normal_terms() -> Shape:
+        return terms_check(i for i in invoices if not anomalies(i))
+
+    def paid_check(paid: bool) -> Shape:
+        pool = (
+            i
+            for i in invoices
+            if i.document_id
+            and ledger.unique_number(i)
+            and ledger.paid_by[i.id]
+            and all(p.document_id for p in ledger.paid_by[i.id])
+            and (ledger.outstanding(i) < TOLERANCE) == paid
+            and ledger.outstanding(i) > -TOLERANCE  # overpaid: not a clean yes or no
+        )
+        for i in fresh(pool, inv_key):
+            payments = ledger.paid_by[i.id]
+            refs = ", ".join(p.payment_reference for p in payments)
+            if paid:
+                answer = (
+                    f"Yes. Invoice {i.invoice_number} ({money(i.total)} {i.currency}) was paid "
+                    f"in full by {refs}."
+                )
+            else:
+                answer = (
+                    f"No. Invoice {i.invoice_number} totals {money(i.total)} {i.currency}; "
+                    f"{refs} paid {money(ledger.paid[i.id])} {i.currency}, leaving "
+                    f"{money(ledger.outstanding(i))} {i.currency} outstanding."
+                )
+            yield Draft(
+                "reconciliation",
+                f"Has invoice {i.invoice_number} been paid in full?",
+                answer,
+                _docs(i.document_id, *(p.document_id for p in payments)),
+                True,
+                "medium",
+                {"match": paid} | ({} if paid else {"amount": money(ledger.outstanding(i))}),
+                check={"kind": "paid_in_full", "invoice_id": i.id},
+            )
+
+    return round_robin(
+        n,
+        inflated(),
+        clean(),
+        exact_duplicate(),
+        near_duplicate(),
+        rush_terms(),
+        normal_terms(),
+        paid_check(True),
+        paid_check(False),
+    )
+
+
+# --------------------------------------------------------------------------- unanswerable
 
 UNANSWERABLE = [
     ("What is the total on invoice INV-999999?", "There is no invoice INV-999999 in the records."),
@@ -1032,13 +1156,153 @@ UNANSWERABLE = [
         "There is no purchase order PO-1999-00001 in the records.",
     ),
 ]
+"""Golden set v0's four; the generator yields them again, with their checks."""
+
+FAKE_VENDORS = (
+    "Zenith Robotics Ltd",
+    "Aurora Biofuels GmbH",
+    "Kestrel Aviation Services Ltd",
+    "Pinnacle Quarry Supplies Pty",
+    "Solace Wellness Retreats SARL",
+    "Tidewater Desalination Inc",
+)
+MISSING_CLAUSES = (
+    (
+        "What notice period does contract {number} require for termination?",
+        ("terminat", "notice"),
+        "termination notice period",
+    ),
+    (
+        "What late-payment interest does contract {number} charge?",
+        ("interest", "late payment", "late-payment"),
+        "late-payment interest",
+    ),
+    (
+        "What is the liability cap in contract {number}?",
+        ("liabil",),
+        "liability cap",
+    ),
+    (
+        "Which country's law governs contract {number}?",
+        ("governing law", "governed by", "laws of"),
+        "governing-law clause",
+    ),
+    (
+        "Does contract {number} renew automatically?",
+        ("renew",),
+        "renewal clause",
+    ),
+)
 
 
 def unanswerable(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
-    return [
-        Draft("unanswerable", q, a, (), False, "medium", {"answerable": False})
-        for q, a in UNANSWERABLE[:n]
-    ]
+    invoice_numbers = {i.invoice_number for i in ledger.invoices}
+    po_numbers = set(ledger.po_by_number)
+    references = {p.payment_reference for p in ledger.payments}
+    vendor_words = {
+        word.lower()
+        for v in ledger.vendors.values()
+        for name in (v.canonical_name, *(v.aliases or []))
+        for word in name.split()
+        if len(word) > 3
+    }
+
+    def unused(make: Callable[[], str], taken: set[str]) -> str:
+        while (value := make()) in taken:
+            pass
+        taken.add(value)
+        return value
+
+    def none(question: str, answer: str, check: dict[str, Any]) -> Draft:
+        return Draft(
+            "unanswerable",
+            question,
+            answer,
+            (),
+            False,
+            "medium",
+            {"answerable": False},
+            check=check,
+        )
+
+    def fixed() -> Shape:
+        checks: list[dict[str, Any]] = [
+            {"kind": "missing_invoice", "number": "INV-999999"},
+            {"kind": "missing_invoice", "number": "INV-000000"},
+            {"kind": "missing_vendor", "name": "Zenith Robotics Ltd"},
+            {"kind": "missing_po", "number": "PO-1999-00001"},
+        ]
+        for (q, a), check in zip(UNANSWERABLE, checks, strict=True):
+            yield none(q, a, check)
+
+    def missing_invoice() -> Shape:
+        templates = (
+            ("When is invoice {n} due?", "There is no invoice {n} in the records."),
+            ("Which purchase order does invoice {n} reference?", "There is no invoice {n}."),
+            ("How much is still owed on invoice {n}?", "There is no invoice {n} in the records."),
+        )
+        while True:
+            number = unused(lambda: f"INV-{rng.randrange(900_000, 999_999):06d}", invoice_numbers)
+            q, a = rng.choice(templates)
+            yield none(
+                q.format(n=number),
+                a.format(n=number),
+                {"kind": "missing_invoice", "number": number},
+            )
+
+    def missing_po() -> Shape:
+        while True:
+            number = unused(
+                lambda: f"PO-20{rng.randrange(10, 20)}-{rng.randrange(1, 99999):05d}", po_numbers
+            )
+            yield none(
+                f"Which invoices were billed against purchase order {number}?",
+                f"There is no purchase order {number} in the records.",
+                {"kind": "missing_po", "number": number},
+            )
+
+    def missing_payment() -> Shape:
+        while True:
+            ref = unused(lambda: f"PAY-2019-{rng.randrange(1, 999999):06d}", references)
+            yield none(
+                f"How much was paid in remittance {ref}?",
+                f"There is no remittance {ref} in the records.",
+                {"kind": "missing_payment", "reference": ref},
+            )
+
+    def missing_vendor() -> Shape:
+        for name in FAKE_VENDORS[1:]:
+            if any(word.lower() in vendor_words for word in name.split() if len(word) > 3):
+                continue
+            yield none(
+                f"How many invoices did {name} issue in 2025?",
+                f"There is no vendor {name} in the records, so there are no invoices from it.",
+                {"kind": "missing_vendor", "name": name},
+            )
+
+    def missing_clause() -> Shape:
+        contracts = _shuffled(rng, (c for c in ledger.contracts.values() if c.document_id))
+        clauses = list(MISSING_CLAUSES)
+        for k, c in enumerate(contracts):
+            template, keywords, what = clauses[k % len(clauses)]
+            text = ledger.texts.get(c.document_id or "", "").lower()
+            if not text or any(word in text for word in keywords):
+                continue
+            yield none(
+                template.format(number=c.contract_number),
+                f"Contract {c.contract_number} has no {what}; the records do not say.",
+                {"kind": "missing_clause", "contract_id": c.id, "keywords": list(keywords)},
+            )
+
+    return round_robin(
+        n,
+        fixed(),
+        missing_invoice(),
+        missing_clause(),
+        missing_po(),
+        missing_vendor(),
+        missing_payment(),
+    )
 
 
 GENERATORS: dict[str, Callable[[Ledger, random.Random, int], list[Draft]]] = {
