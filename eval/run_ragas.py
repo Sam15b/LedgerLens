@@ -19,8 +19,10 @@ contexts (chunk texts and GraphRAG facts from the default retriever), the answer
 The last three compare with ``ground_truth_answer``, which is why unanswerable questions
 (no reference) are left out.
 
-Samples can be saved (``--save-samples``) and scored again later (``--samples``), so the
-answers are paid for once. Unanswerable questions are not scored: they have no reference
+The judge is the model router's ``judge`` alias (``--judge`` to override), through
+:func:`router_judge`; its calls and cost are in the report. Samples can be saved
+(``--save-samples``) and scored again later (``--samples``), so the answers are paid for
+once. Unanswerable questions are not scored: they have no reference
 and the right answer is a refusal, which ``benchmark_retrieval.py`` checks.
 
 Built on RAGAS 0.4's ``ragas.metrics.collections`` API: metrics take an
@@ -35,14 +37,18 @@ import argparse
 import asyncio
 import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import fmean
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+
+from pydantic import BaseModel
 
 from eval.golden_set.schema import GoldenQuestion, load_golden_set
+from ledgerlens.llm.types import Message
 
 if TYPE_CHECKING:
     from ragas.embeddings.base import BaseRagasEmbedding
@@ -50,6 +56,9 @@ if TYPE_CHECKING:
     from ragas.metrics.collections.base import BaseMetric
 
     from ledgerlens.retrieval import RetrievalResult, Retriever
+
+T = TypeVar("T", bound=BaseModel)
+R = TypeVar("R", bound=BaseModel)
 
 CATEGORY_ORDER = ("lookup", "clause", "multi_hop", "aggregation", "reconciliation")
 SKIPPED_CATEGORIES = ("unanswerable",)
@@ -114,6 +123,47 @@ def save_samples(samples: Sequence[Sample], path: Path) -> None:
 def load_samples(path: Path) -> list[Sample]:
     lines = path.read_text(encoding="utf-8").splitlines()
     return [Sample(**json.loads(line)) for line in lines if line.strip()]
+
+
+# --------------------------------------------------------------------------- judge
+
+JUDGE_ALIAS = "judge"
+"""``configs/models.yaml``: one fixed model for evaluation, so scores stay comparable."""
+
+
+class StructuredLLM(Protocol):
+    """What the judge needs from :class:`~ledgerlens.llm.router.LLMClient`."""
+
+    def structured(
+        self,
+        messages: list[Message],
+        schema: type[T],
+        *,
+        model: str = ...,
+        temperature: float = ...,
+        max_tokens: int | None = ...,
+    ) -> T: ...
+
+
+def router_judge(llm: StructuredLLM, *, model: str = JUDGE_ALIAS) -> InstructorBaseRagasLLM:
+    """The RAGAS judge on the model router: each metric prompt goes to ``model`` (the
+    ``judge`` alias by default) as one user message, and the reply comes back as the
+    metric's response model through :meth:`LLMClient.structured` -- native structured
+    output, with one repair round if it does not validate. Fallbacks, retries, cost
+    logging and the ``llm_calls`` record all come from the router, like every other call."""
+    from ragas.llms.base import InstructorBaseRagasLLM
+
+    class RouterJudge(InstructorBaseRagasLLM):
+        def __init__(self) -> None:
+            self.model = model
+
+        def generate(self, prompt: str, response_model: type[R]) -> R:
+            return llm.structured([Message.user(prompt)], response_model, model=self.model)
+
+        async def agenerate(self, prompt: str, response_model: type[R]) -> R:
+            return await asyncio.to_thread(self.generate, prompt, response_model)
+
+    return RouterJudge()
 
 
 # --------------------------------------------------------------------------- embeddings
@@ -237,6 +287,15 @@ async def score_samples(
 
 # --------------------------------------------------------------------------- report
 
+_KEYLIKE = re.compile(r"\b(sk|pk|AIza|AKIA)[-_A-Za-z0-9*]{6,}")
+
+
+def clean_error(text: str, limit: int = 200) -> str:
+    """A judge error fit for a committed report: key-like strings redacted (providers echo
+    a masked key), one line, shortened."""
+    flat = " ".join(_KEYLIKE.sub("<redacted>", text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
 
 def summarize(results: Sequence[Scored], metrics: Sequence[str]) -> dict[str, dict[str, Any]]:
     """Mean (and how many samples scored) per metric, overall and per category."""
@@ -279,7 +338,7 @@ def render_report(
     failures = [(r.sample.question_id, m, e) for r in results for m, e in r.errors.items()]
     if failures:
         lines += ["", f"## Not scored ({len(failures)})", ""]
-        lines += [f"- {qid} {metric}: {error}" for qid, metric, error in failures[:50]]
+        lines += [f"- {qid} {metric}: {clean_error(error)}" for qid, metric, error in failures[:50]]
     return "\n".join(lines) + "\n"
 
 
@@ -303,6 +362,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-samples", type=Path, help="write the samples built here")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument(
+        "--judge", default=JUDGE_ALIAS, help="model alias or provider/model (default: judge)"
+    )
     return parser
 
 
@@ -329,7 +391,10 @@ def live_samples(args: argparse.Namespace, questions: Sequence[GoldenQuestion]) 
     )
 
 
-def main(argv: Sequence[str] | None = None, *, judge: InstructorBaseRagasLLM | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    from eval.benchmark_retrieval import CostMeter, metered
+    from ledgerlens.llm.router import LLMClient
+
     args = build_parser().parse_args(argv)
     if args.samples:
         samples = load_samples(args.samples)
@@ -338,11 +403,16 @@ def main(argv: Sequence[str] | None = None, *, judge: InstructorBaseRagasLLM | N
         samples = live_samples(args, questions)
     if args.save_samples:
         save_samples(samples, args.save_samples)
-    if judge is None:
-        raise SystemExit("no judge model configured")
+    meter = CostMeter()
+    judge = router_judge(metered(LLMClient(), meter), model=args.judge)
     metrics = build_metrics(judge, dense_embeddings())
     results = asyncio.run(score_samples(samples, metrics, concurrency=args.concurrency))
-    report = render_report(results, list(metrics), title=f"RAGAS ({args.set} set)")
+    calls, cost = meter.take()
+    notes = [
+        f"judge: `{args.judge}` ({calls} calls, ${cost:.4f})",
+        f"samples: {len(samples)} ({args.samples or args.set + ' set, ' + args.variant})",
+    ]
+    report = render_report(results, list(metrics), title=f"RAGAS ({args.set} set)", notes=notes)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(report, encoding="utf-8")
