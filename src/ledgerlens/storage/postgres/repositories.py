@@ -212,6 +212,23 @@ class DocumentRepository:
         )
         return [to_document(row) for row in rows]
 
+    def find(
+        self,
+        *,
+        status: DocumentStatus | None = None,
+        doc_type: DocType | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Document]:
+        """Newest first, optionally of one status and/or type."""
+        stmt = select(DocumentRow)
+        if status is not None:
+            stmt = stmt.where(DocumentRow.status == status.value)
+        if doc_type is not None:
+            stmt = stmt.where(DocumentRow.doc_type == doc_type.value)
+        stmt = stmt.order_by(DocumentRow.created_at.desc(), DocumentRow.id)
+        return [to_document(row) for row in self.session.scalars(stmt.limit(limit).offset(offset))]
+
     def delete(self, document_id: str) -> bool:
         """Delete a document; its chunks and extracted records cascade with it."""
         result = self.session.execute(delete(DocumentRow).where(DocumentRow.id == document_id))
@@ -268,6 +285,10 @@ class ChunkRepository:
                 .order_by(ChunkRow.chunk_index)
             )
         )
+
+    def count(self, document_id: str) -> int:
+        stmt = select(func.count()).select_from(ChunkRow).where(ChunkRow.document_id == document_id)
+        return int(self.session.scalar(stmt) or 0)
 
     def texts(self, ids: Iterable[str]) -> dict[str, str]:
         """Full text by vector id -- Pinecone hits carry only a truncated copy."""
@@ -967,6 +988,34 @@ class Repositories:
             result = self.session.execute(delete(table).where(table.c.document_id == document_id))
             removed += result.rowcount  # type: ignore[attr-defined]
         return removed
+
+    def record_for_document(
+        self, document_id: str, doc_type: DocType = DocType.UNKNOWN
+    ) -> tuple[str, ExtractedRecord] | None:
+        """``(record id, record)`` extracted from a document, or ``None`` if it has none.
+        An invoice row of a ``receipt`` document comes back as the receipt."""
+        invoice = self.session.scalars(
+            select(InvoiceRow).where(InvoiceRow.document_id == document_id)
+        ).one_or_none()
+        if invoice is not None:
+            is_receipt = doc_type is DocType.RECEIPT
+            return invoice.id, to_receipt(invoice) if is_receipt else to_invoice(invoice)
+        po = self.session.scalars(
+            select(PurchaseOrderRow).where(PurchaseOrderRow.document_id == document_id)
+        ).one_or_none()
+        if po is not None:
+            return po.id, to_purchase_order(po)
+        payment = self.session.scalars(
+            select(PaymentRow).where(PaymentRow.document_id == document_id)
+        ).one_or_none()
+        if payment is not None:
+            return payment.id, to_payment(payment)
+        contract = self.session.scalars(
+            select(ContractRow).where(ContractRow.document_id == document_id)
+        ).one_or_none()
+        if contract is not None:
+            return contract.id, to_contract(contract)
+        return None
 
     def upsert_record(
         self,
