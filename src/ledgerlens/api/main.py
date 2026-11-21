@@ -55,6 +55,8 @@ CODES = {
     404: "not_found",
     405: "method_not_allowed",
     409: "conflict",
+    413: "too_large",
+    415: "unsupported_media_type",
     422: "invalid_request",
     429: "too_many_requests",
     503: "unavailable",

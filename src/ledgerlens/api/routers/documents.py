@@ -16,6 +16,11 @@ The raw file is kept at ``<upload_dir>/<document_id>/<original name>``: the work
 it by path (so API and worker must share the folder) and the document keeps its original
 file name. If the queue is down the document stays ``queued`` and the response is 503;
 uploading the same file again queues it.
+
+Limits (``loader`` in ``configs/ingestion.yaml``): a body over ``max_file_mb`` is refused
+with 413 before it is read (:class:`UploadLimitRoute`); the type is sniffed from the bytes
+and must be one of ``allowed_mime_types`` (415 otherwise); an empty, corrupt or
+password-protected file is 422.
 """
 
 from __future__ import annotations
@@ -23,30 +28,91 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Message
 
 from ledgerlens.core.config import get_config, repo_path
 from ledgerlens.core.ids import is_document_id
 from ledgerlens.core.schemas import DocType, Document, DocumentStatus
-from ledgerlens.ingestion.loaders import DedupeRegistry, FileLoader, LoaderError, LoadResult
+from ledgerlens.ingestion.loaders import (
+    DedupeRegistry,
+    FileLoader,
+    FileTooLargeError,
+    LoaderError,
+    LoadResult,
+    UnsupportedFileError,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/documents", tags=["documents"])
-
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ -]+")
 MAX_NAME_CHARS = 150
+MULTIPART_OVERHEAD_BYTES = 64 * 1024
+"""Room for the multipart boundaries and part headers around the file itself."""
+
+
+# --------------------------------------------------------------------------- limits
+
+
+def max_upload_bytes() -> int:
+    return int(get_config().ingestion.loader.max_file_mb * 1024 * 1024)
+
+
+def too_large(limit: int) -> HTTPException:
+    mb = limit / 1024 / 1024
+    return HTTPException(
+        status.HTTP_413_CONTENT_TOO_LARGE, f"the upload is over the {mb:g} MB limit"
+    )
+
+
+class UploadLimitRoute(APIRoute):
+    """Refuses a request body over the upload limit before it is parsed.
+
+    FastAPI reads the whole multipart body (spooling the file to disk) before the endpoint
+    runs, so the limit is enforced here: a declared ``Content-Length`` over it is refused
+    at once, and a body sent without one is counted as it arrives and cut off at the limit.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def limited(request: Request) -> Response:
+            if request.method != "POST":
+                return await handler(request)
+            file_limit = max_upload_bytes()
+            limit = file_limit + MULTIPART_OVERHEAD_BYTES
+            declared = request.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > limit:
+                raise too_large(file_limit)
+            received = 0
+            receive = request.receive
+
+            async def counted() -> Message:
+                nonlocal received
+                message = await receive()
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise too_large(file_limit)
+                return message
+
+            return await handler(Request(request.scope, counted))
+
+        return limited
+
+
+router = APIRouter(prefix="/documents", tags=["documents"], route_class=UploadLimitRoute)
 
 
 class UploadOut(BaseModel):
@@ -207,6 +273,16 @@ Queue = Annotated[Enqueue, Depends(get_enqueue)]
 # --------------------------------------------------------------------------- upload
 
 
+def loader_error_status(exc: LoaderError) -> int:
+    """413 over the size limit, 415 for a type ingestion does not take (sniffed from the
+    bytes, whatever the name or declared type says), 422 for an empty or unreadable file."""
+    if isinstance(exc, FileTooLargeError):
+        return status.HTTP_413_CONTENT_TOO_LARGE
+    if isinstance(exc, UnsupportedFileError):
+        return status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+    return status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
 def load_upload(registry: DedupeRegistry, data: bytes, filename: str) -> LoadResult:
     """Inspect the bytes and claim their hash (blocking: hashing, page count, Postgres)."""
     return FileLoader(get_config().ingestion.loader, registry=registry).load_bytes(data, filename)
@@ -233,7 +309,7 @@ async def upload_document(
     try:
         loaded = await run_in_threadpool(load_upload, registry, data, filename)
     except LoaderError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        raise HTTPException(loader_error_status(exc), str(exc)) from exc
 
     if loaded.duplicate:
         existing = await run_in_threadpool(store.get, loaded.document_id)
