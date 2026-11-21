@@ -498,3 +498,39 @@ async def test_review_flagged_invoices(api: httpx.AsyncClient, ledger: Ledger) -
     confirmed = (await api.get("/anomalies", params={"review": "confirmed"})).json()
     assert [f["id"] for f in confirmed] == [flag["id"]]
     assert confirmed[0]["review_note"] == "billed above the contract rate"
+
+
+async def test_draft_reminders_and_approve_one(
+    api: httpx.AsyncClient, ledger: Ledger, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Collections: "Draft reminders for invoices 30+ days overdue" -- Router -> Reminder
+    writer, paused for a person's approval; nothing is ever sent."""
+    caplog.set_level(logging.INFO)
+    turn = await chat(api, "Draft reminders for invoices 30+ days overdue")
+
+    assert routed(caplog) == ["routed to remind by rules"]
+    assert turn.tools[0] == "list_overdue" and turn.tools[-1] == "draft_reminder"
+    assert turn.tools.count("draft_reminder") == 1  # 10 days overdue is under 30
+    assert turn.names[-2:] == ["interrupt", "done"]
+    (draft,) = turn.of("interrupt")[0]["reminders"]
+    assert draft["invoice_number"] == ledger.inv(1) and draft["tone"] == "firm"
+    body = " ".join(draft["body"].split())
+    assert ledger.inv(1) in body and "is now 40 days overdue" in body
+    done = turn.done
+    assert done["status"] == "interrupted"
+
+    pending = (await api.get("/reminders")).json()
+    assert [r["id"] for r in pending] == [draft["reminder_id"]]
+    assert pending[0]["thread_id"] == done["thread_id"]
+
+    approved = await api.post(f"/reminders/{draft['reminder_id']}/approve")
+    assert approved.status_code == 200
+    body = approved.json()
+    assert body["resumed"] is True and body["thread_status"] == "completed"
+    assert "Nothing has been sent" in body["reply"]
+    assert body["reminder"]["status"] == "approved"
+    assert (await api.get("/reminders")).json() == []  # none left pending
+    every = (await api.get("/reminders", params={"status": "all"})).json()
+    assert [r["status"] for r in every] == ["approved"]  # never "sent"
+    again = await api.post(f"/reminders/{draft['reminder_id']}/reject")
+    assert again.status_code == 409
