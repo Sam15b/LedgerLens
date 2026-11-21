@@ -38,6 +38,15 @@ Every draft also carries a ``check``: the record ids and the kind of question, f
 which ``eval/golden_set/verify.py`` derives the answer a second time from Neo4j.
 
 Sampling is seeded (``--seed``), so the same stores give the same drafts.
+
+To grow an existing set, draft only what it is missing (numbered after its last id, never
+repeating one of its questions), then review the drafts into it::
+
+    python -m eval.golden_set.build_golden_set --extend data/golden/golden_set.jsonl
+    python -m eval.golden_set.review data/golden/golden_set.draft.jsonl --verify
+
+(``--extend`` writes ``--out``, by default ``data/golden/golden_set.draft.jsonl``; pass
+``--seed 63`` to get Day 63's drafts again.)
 """
 
 from __future__ import annotations
@@ -57,7 +66,13 @@ from typing import Any, TypeVar
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from eval.golden_set.schema import GoldenQuestion, dump_golden_set, problems, summary
+from eval.golden_set.schema import (
+    GoldenQuestion,
+    dump_golden_set,
+    load_golden_set,
+    problems,
+    summary,
+)
 from ledgerlens.extraction.normalize import find_dates
 from ledgerlens.storage.postgres.db import get_session_factory
 from ledgerlens.storage.postgres.models import (
@@ -78,6 +93,16 @@ DEFAULT_COUNTS = {
     "reconciliation": 6,
     "unanswerable": 4,
 }
+SYNTHETIC_TARGETS = {
+    "lookup": 25,
+    "clause": 15,
+    "multi_hop": 45,
+    "aggregation": 30,
+    "reconciliation": 20,
+    "unanswerable": 20,
+}
+"""The synthetic part of the ~200-question set (docs/layers/09-evaluation.md): hand-written
+SROIE lookups and CUAD clauses make up the rest of those two categories."""
 TOLERANCE = Decimal("0.01")
 MAX_COUNTED = 25
 """Aggregations over more records than this are skipped: their evidence lists get too long
@@ -1373,15 +1398,85 @@ def build(
     return [draft.to_question(n) for n, draft in enumerate(drafts, start=1)], rejected
 
 
+def next_number(questions: Sequence[GoldenQuestion]) -> int:
+    return max((int(q.id[1:]) for q in questions), default=0) + 1
+
+
+def extend(
+    ledger: Ledger,
+    existing: Sequence[GoldenQuestion],
+    targets: dict[str, int],
+    *,
+    seed: int = 63,
+) -> tuple[list[GoldenQuestion], list[str]]:
+    """New grounded drafts that bring each category of ``existing`` up to its target,
+    numbered after the last existing id. A draft asking a question the set already has is
+    skipped, so existing ids keep their meaning."""
+    rng = random.Random(seed)
+    asked = {q.question.strip().lower() for q in existing}
+    have: Counter[str] = Counter(str(q.category) for q in existing)
+    drafts: list[Draft] = []
+    rejected: list[str] = []
+    for category, target in targets.items():
+        need = target - have[category]
+        if need <= 0:
+            continue
+        taken = 0
+        for draft in GENERATORS[category](ledger, rng, need * 3 + 10):
+            if taken == need:
+                break
+            if draft.question.strip().lower() in asked:
+                continue
+            issues = check_grounding(draft, ledger.texts)
+            if issues:
+                rejected.append(f"{draft.question} -- {'; '.join(issues)}")
+                continue
+            asked.add(draft.question.strip().lower())
+            drafts.append(draft)
+            taken += 1
+        if taken < need:
+            rejected.append(f"{category}: only {taken} of {need} new drafts")
+    start = next_number(existing)
+    return [d.to_question(start + k) for k, d in enumerate(drafts)], rejected
+
+
+def parse_targets(text: str) -> dict[str, int]:
+    """``lookup=25,clause=15`` -> ``{"lookup": 25, "clause": 15}``."""
+    out: dict[str, int] = {}
+    for part in filter(None, (p.strip() for p in text.split(","))):
+        name, _, value = part.partition("=")
+        if name not in GENERATORS or not value.isdigit():
+            raise argparse.ArgumentTypeError(f"not a category=count: {part!r}")
+        out[name] = int(value)
+    return out
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Draft golden-set questions from the stores.")
     parser.add_argument("--out", type=Path, default=Path("data/golden/golden_set.draft.jsonl"))
     parser.add_argument("--records", type=Path, default=RECORDS)
     parser.add_argument("--seed", type=int, default=39)
+    parser.add_argument(
+        "--extend",
+        type=Path,
+        metavar="GOLDEN",
+        help="draft only new questions, numbered after this set's, up to --targets",
+    )
+    parser.add_argument(
+        "--targets",
+        type=parse_targets,
+        default=SYNTHETIC_TARGETS,
+        help="per-category totals for --extend (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
     with get_session_factory()() as session:
         ledger = load_ledger(session, args.records)
-    questions, rejected = build(ledger, seed=args.seed)
+    if args.extend:
+        questions, rejected = extend(
+            ledger, load_golden_set(args.extend), args.targets, seed=args.seed
+        )
+    else:
+        questions, rejected = build(ledger, seed=args.seed)
     for line in rejected:
         print(f"REJECTED {line}")
     for problem in problems(questions):
