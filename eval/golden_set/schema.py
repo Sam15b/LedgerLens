@@ -65,6 +65,10 @@ class GoldenQuestion(BaseModel):
     answer checks. Amounts are strings as printed (``"12,656.66"``)."""
     source: str = "synthetic"
     reviewed: bool = False
+    check: dict[str, Any] | None = None
+    """How to derive the answer again from the stores, independently of the builder
+    (``{"kind": "settled_by", "invoice_id": ...}``, see ``verify.py``). Generated
+    questions carry one; hand-written ones and golden set v0 do not."""
 
     @model_validator(mode="after")
     def _evidence(self) -> GoldenQuestion:
@@ -103,7 +107,7 @@ def load_golden_set(path: Path | str = DEFAULT_PATH) -> list[GoldenQuestion]:
 
 def dump_golden_set(questions: Sequence[GoldenQuestion], path: Path | str) -> None:
     """Write one question per line, fields in schema order."""
-    lines = [q.model_dump_json(exclude_defaults=False) for q in questions]
+    lines = [q.model_dump_json(exclude={"check"} if q.check is None else None) for q in questions]
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

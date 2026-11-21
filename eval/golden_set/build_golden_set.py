@@ -8,16 +8,19 @@ from the generator's ``data/synthetic/records.jsonl``. Only records rendered as 
 can be evidence, so every question is about rendered documents, and each relevant
 document id is a real ``documents.id``.
 
-Per category (counts are the defaults):
+Each category mixes several question **shapes** (one draft of each in turn, no record
+asked about twice within a category):
 
-* **lookup** (12) -- an invoice's total, due date or PO; a PO's total; a remittance's
-  amount and vendor.
-* **clause** (8) -- a contract's payment terms, a rate on its rate card, its end date.
-* **multi_hop** (12) -- which payment settled an invoice; which contract governs an
-  invoice's PO; what is still owed on a partly paid invoice; a vendor's invoices with a
-  PO and no payment.
-* **aggregation** (10) -- invoice counts and totals per vendor and period, outstanding
-  balances, the top vendor by spend in a currency.
+* **lookup** -- an invoice's total, due date, date or PO; a PO's total or supplier; a
+  remittance's amount and vendor, or its date.
+* **clause** -- a contract's payment terms, start or end date, a rate on its rate card, the
+  unit an item is priced in.
+* **multi_hop** -- which payment settled an invoice; which contract governs an invoice's
+  PO, and the payment days it allows; what is still owed on a partly paid invoice; a
+  vendor's invoices with a PO and no payment; which invoices billed a PO, and how much.
+* **aggregation** -- invoice counts per vendor and year or quarter; totals invoiced per
+  vendor and quarter; outstanding balances and unpaid counts; payments per vendor and
+  year; POs per vendor and year; the top vendor by spend in a currency.
 * **reconciliation** (6) -- invoice prices against the contract rate (inflated and
   clean), and exact duplicate invoices.
 * **unanswerable** (4) -- documents that do not exist; the answer is that the context
@@ -27,6 +30,9 @@ Every draft is then **checked against the evidence** (:func:`check_grounding`): 
 numbers and dates a single-document answer states must appear in that document's text.
 A draft that fails is dropped and reported. Drafts are written with ``reviewed: false``;
 reviewing them is a separate, manual step before they join the golden set.
+
+Every draft also carries a ``check``: the record ids and the kind of question, from
+which ``eval/golden_set/verify.py`` derives the answer a second time from Neo4j.
 
 Sampling is seeded (``--seed``), so the same stores give the same drafts.
 """
@@ -38,7 +44,7 @@ import json
 import random
 import re
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -70,6 +76,9 @@ DEFAULT_COUNTS = {
     "unanswerable": 4,
 }
 TOLERANCE = Decimal("0.01")
+MAX_COUNTED = 25
+"""Aggregations over more records than this are skipped: their evidence lists get too long
+to score retrieval against."""
 T = TypeVar("T")
 
 
@@ -198,8 +207,10 @@ class Draft:
     expected: dict[str, Any] = field(default_factory=dict)
     grounded_in: str | None = None
     """For single-document answers: the document whose text must contain ``expected``."""
+    check: dict[str, Any] = field(default_factory=dict)
+    """How ``verify.py`` derives the answer again from the graph (``kind`` + record ids)."""
 
-    def to_question(self, number: int) -> GoldenQuestion:
+    def to_question(self, number: int, *, reviewed: bool = False) -> GoldenQuestion:
         return GoldenQuestion(
             id=f"q{number:03d}",
             category=self.category,  # type: ignore[arg-type]
@@ -209,6 +220,8 @@ class Draft:
             requires_graph=self.requires_graph,
             difficulty=self.difficulty,  # type: ignore[arg-type]
             expected=self.expected,
+            reviewed=reviewed,
+            check=self.check or None,
         )
 
 
@@ -222,16 +235,57 @@ def _shuffled(rng: random.Random, items: Iterable[T]) -> list[T]:
     return out
 
 
+Shape = Iterator[Draft]
+
+
+def round_robin(n: int, *shapes: Shape) -> list[Draft]:
+    """Up to ``n`` drafts, one from each shape in turn, so a category mixes its shapes."""
+    out: list[Draft] = []
+    active = list(shapes)
+    while active and len(out) < n:
+        for shape in list(active):
+            draft = next(shape, None)
+            if draft is None:
+                active.remove(shape)
+                continue
+            out.append(draft)
+            if len(out) == n:
+                break
+    return out
+
+
+class Fresh:
+    """Hands out each record once within a category, so two shapes never ask about the
+    same invoice."""
+
+    def __init__(self) -> None:
+        self.used: set[str] = set()
+
+    def __call__(self, items: Iterable[T], key: Callable[[T], str]) -> Iterator[T]:
+        for item in items:
+            k = key(item)
+            if k not in self.used:
+                self.used.add(k)
+                yield item
+
+
+# --------------------------------------------------------------------------- lookup
+
+
 def lookup(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
     invoices = _shuffled(
         rng, (i for i in ledger.invoices if i.document_id and ledger.unique_number(i))
     )
     pos = _shuffled(rng, (p for p in ledger.purchase_orders.values() if p.document_id))
     payments = _shuffled(rng, (p for p in ledger.payments if p.document_id))
-    drafts: list[Draft] = []
-    for i in invoices[:4]:
-        drafts.append(
-            Draft(
+    fresh = Fresh()
+
+    def inv_key(i: InvoiceRow) -> str:
+        return i.id
+
+    def invoice_total() -> Shape:
+        for i in fresh(invoices, inv_key):
+            yield Draft(
                 "lookup",
                 f"What is the total on invoice {i.invoice_number}?",
                 f"Invoice {i.invoice_number} from {ledger.vendor_name(i.vendor_id)} totals "
@@ -241,13 +295,13 @@ def lookup(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"amount": money(i.total), "currency": i.currency},
                 i.document_id,
+                {"kind": "invoice_total", "invoice_id": i.id},
             )
-        )
-    for i in invoices[4:6]:
-        if i.due_date is None:
-            continue
-        drafts.append(
-            Draft(
+
+    def invoice_due() -> Shape:
+        for i in fresh((i for i in invoices if i.due_date), inv_key):
+            assert i.due_date is not None
+            yield Draft(
                 "lookup",
                 f"When is invoice {i.invoice_number} due?",
                 f"Invoice {i.invoice_number} is due on {i.due_date.isoformat()}.",
@@ -256,11 +310,12 @@ def lookup(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"date": i.due_date.isoformat()},
                 i.document_id,
+                {"kind": "invoice_due", "invoice_id": i.id},
             )
-        )
-    for i in [i for i in invoices[6:] if i.po_number][:2]:
-        drafts.append(
-            Draft(
+
+    def invoice_po() -> Shape:
+        for i in fresh((i for i in invoices if i.po_number), inv_key):
+            yield Draft(
                 "lookup",
                 f"Which purchase order does invoice {i.invoice_number} reference?",
                 f"Invoice {i.invoice_number} references purchase order {i.po_number}.",
@@ -269,11 +324,26 @@ def lookup(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"number": i.po_number},
                 i.document_id,
+                {"kind": "invoice_po", "invoice_id": i.id},
             )
-        )
-    for p in pos[:2]:
-        drafts.append(
-            Draft(
+
+    def invoice_date() -> Shape:
+        for i in fresh(invoices, inv_key):
+            yield Draft(
+                "lookup",
+                f"What is the date of invoice {i.invoice_number}?",
+                f"Invoice {i.invoice_number} is dated {i.invoice_date.isoformat()}.",
+                _docs(i.document_id),
+                False,
+                "easy",
+                {"date": i.invoice_date.isoformat()},
+                i.document_id,
+                {"kind": "invoice_date", "invoice_id": i.id},
+            )
+
+    def po_total() -> Shape:
+        for p in fresh(pos, lambda p: p.id):
+            yield Draft(
                 "lookup",
                 f"What is the total of purchase order {p.po_number}?",
                 f"Purchase order {p.po_number} to {ledger.vendor_name(p.vendor_id)} totals "
@@ -283,12 +353,28 @@ def lookup(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"amount": money(p.total), "currency": p.currency},
                 p.document_id,
+                {"kind": "po_total", "po_id": p.id},
             )
-        )
-    for pay in payments[:2]:
-        vendor = ledger.vendor_name(pay.vendor_id)
-        drafts.append(
-            Draft(
+
+    def po_vendor() -> Shape:
+        for p in fresh(pos, lambda p: p.id):
+            vendor = ledger.vendor_name(p.vendor_id)
+            yield Draft(
+                "lookup",
+                f"Which supplier is purchase order {p.po_number} addressed to?",
+                f"Purchase order {p.po_number} is addressed to {vendor}.",
+                _docs(p.document_id),
+                False,
+                "easy",
+                {"vendor": vendor},
+                p.document_id,
+                {"kind": "po_vendor", "po_id": p.id},
+            )
+
+    def payment_amount() -> Shape:
+        for pay in fresh(payments, lambda p: p.id):
+            vendor = ledger.vendor_name(pay.vendor_id)
+            yield Draft(
                 "lookup",
                 f"How much was paid in remittance {pay.payment_reference}, and to which vendor?",
                 f"Remittance {pay.payment_reference} paid {money(pay.amount)} {pay.currency} to "
@@ -298,18 +384,50 @@ def lookup(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"amount": money(pay.amount), "currency": pay.currency, "vendor": vendor},
                 pay.document_id,
+                {"kind": "payment_amount", "payment_id": pay.id},
             )
-        )
-    return drafts[:n]
+
+    def payment_date() -> Shape:
+        for pay in fresh(payments, lambda p: p.id):
+            yield Draft(
+                "lookup",
+                f"On what date was remittance {pay.payment_reference} paid?",
+                f"Remittance {pay.payment_reference} was paid on {pay.paid_at.isoformat()}.",
+                _docs(pay.document_id),
+                False,
+                "easy",
+                {"date": pay.paid_at.isoformat()},
+                pay.document_id,
+                {"kind": "payment_date", "payment_id": pay.id},
+            )
+
+    return round_robin(
+        n,
+        invoice_total(),
+        invoice_due(),
+        invoice_po(),
+        po_total(),
+        payment_amount(),
+        invoice_date(),
+        po_vendor(),
+        payment_date(),
+    )
+
+
+# --------------------------------------------------------------------------- clause
 
 
 def clause(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
     contracts = _shuffled(rng, (c for c in ledger.contracts.values() if c.document_id))
-    drafts: list[Draft] = []
-    for c in contracts[:3]:
-        vendor = ledger.vendor_name(c.vendor_id)
-        drafts.append(
-            Draft(
+    fresh = Fresh()
+
+    def key(c: ContractRow) -> str:
+        return c.id
+
+    def terms() -> Shape:
+        for c in fresh(contracts, key):
+            vendor = ledger.vendor_name(c.vendor_id)
+            yield Draft(
                 "clause",
                 f"Within how many days must invoices be paid under our contract with {vendor}?",
                 f"Contract {c.contract_number} requires payment within {c.payment_terms_days} "
@@ -319,30 +437,31 @@ def clause(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"days": c.payment_terms_days},
                 c.document_id,
+                {"kind": "contract_terms", "contract_id": c.id},
             )
-        )
-    for c in contracts[3:6]:
-        entry = rng.choice(c.rate_card)
-        rate = money(Decimal(entry["unit_price"]))
-        unit = f" per {entry['unit']}" if entry.get("unit") else ""
-        drafts.append(
-            Draft(
+
+    def rate() -> Shape:
+        for c in fresh((c for c in contracts if c.rate_card), key):
+            entry = rng.choice(c.rate_card)
+            price = money(Decimal(entry["unit_price"]))
+            unit = f" per {entry['unit']}" if entry.get("unit") else ""
+            yield Draft(
                 "clause",
                 f"What rate does the {ledger.vendor_name(c.vendor_id)} contract set for "
                 f"{entry['item']}?",
-                f"Contract {c.contract_number} sets {entry['item']} at {rate} {c.currency}{unit}.",
+                f"Contract {c.contract_number} sets {entry['item']} at {price} {c.currency}{unit}.",
                 _docs(c.document_id),
                 False,
                 "medium",
-                {"amount": rate, "currency": c.currency},
+                {"amount": price, "currency": c.currency},
                 c.document_id,
+                {"kind": "contract_rate", "contract_id": c.id, "item": entry["item"]},
             )
-        )
-    for c in contracts[6:]:
-        if len(drafts) >= 8 or c.end_date is None:
-            continue
-        drafts.append(
-            Draft(
+
+    def end() -> Shape:
+        for c in fresh((c for c in contracts if c.end_date), key):
+            assert c.end_date is not None
+            yield Draft(
                 "clause",
                 f"When does contract {c.contract_number} expire?",
                 f"Contract {c.contract_number} with {ledger.vendor_name(c.vendor_id)} runs "
@@ -352,33 +471,66 @@ def clause(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 "easy",
                 {"date": c.end_date.isoformat()},
                 c.document_id,
+                {"kind": "contract_end", "contract_id": c.id},
             )
-        )
-    return drafts[:n]
+
+    def start() -> Shape:
+        for c in fresh(contracts, key):
+            yield Draft(
+                "clause",
+                f"From what date does our agreement with {ledger.vendor_name(c.vendor_id)} run?",
+                f"Contract {c.contract_number} runs from {c.start_date.isoformat()}.",
+                _docs(c.document_id),
+                False,
+                "easy",
+                {"date": c.start_date.isoformat()},
+                c.document_id,
+                {"kind": "contract_start", "contract_id": c.id},
+            )
+
+    def unit() -> Shape:
+        for c in fresh((c for c in contracts if any(e.get("unit") for e in c.rate_card)), key):
+            entry = rng.choice([e for e in c.rate_card if e.get("unit")])
+            yield Draft(
+                "clause",
+                f"In what unit does contract {c.contract_number} price {entry['item']}?",
+                f"Contract {c.contract_number} prices {entry['item']} per {entry['unit']}.",
+                _docs(c.document_id),
+                False,
+                "medium",
+                {"items": [entry["unit"]]},
+                c.document_id,
+                {"kind": "contract_unit", "contract_id": c.id, "item": entry["item"]},
+            )
+
+    return round_robin(n, terms(), rate(), end(), start(), unit())
+
+
+# --------------------------------------------------------------------------- multi-hop
 
 
 def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
-    drafts: list[Draft] = []
+    fresh = Fresh()
 
     def rendered(invoice: InvoiceRow) -> bool:
         return bool(invoice.document_id) and ledger.unique_number(invoice)
 
-    # which payment settled an invoice: fully paid by exactly one rendered remittance
-    settled = _shuffled(
-        rng,
-        (
+    def inv_key(i: InvoiceRow) -> str:
+        return i.id
+
+    def settled_by() -> Shape:
+        """Fully paid by exactly one rendered remittance."""
+        settled = (
             i
-            for i in ledger.invoices
+            for i in _shuffled(rng, ledger.invoices)
             if rendered(i)
             and len(ledger.paid_by[i.id]) == 1
             and ledger.paid_by[i.id][0].document_id
             and ledger.outstanding(i) < TOLERANCE
-        ),
-    )
-    for i in settled[:4]:
-        pay = ledger.paid_by[i.id][0]
-        drafts.append(
-            Draft(
+        )
+        for i in fresh(settled, inv_key):
+            pay = ledger.paid_by[i.id][0]
+            yield Draft(
                 "multi_hop",
                 f"Which payment settled invoice {i.invoice_number}?",
                 f"Invoice {i.invoice_number} was settled by remittance {pay.payment_reference} "
@@ -387,18 +539,20 @@ def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "medium",
                 {"number": pay.payment_reference, "date": pay.paid_at.isoformat()},
+                check={"kind": "settled_by", "invoice_id": i.id},
             )
-        )
-    # which contract governs the PO an invoice references
-    governed = [
-        (i, c)
-        for i in ledger.invoices
-        if rendered(i) and (c := ledger.contract_of(i)) is not None and c.document_id
-    ]
-    for i, c in _shuffled(rng, governed)[:3]:
-        po = ledger.po_by_number[i.po_number or ""]
-        drafts.append(
-            Draft(
+
+    def governing() -> list[tuple[InvoiceRow, ContractRow]]:
+        return [
+            (i, c)
+            for i in _shuffled(rng, ledger.invoices)
+            if rendered(i) and (c := ledger.contract_of(i)) is not None and c.document_id
+        ]
+
+    def governing_contract() -> Shape:
+        for i, c in fresh(governing(), lambda pair: pair[0].id):
+            po = ledger.po_by_number[i.po_number or ""]
+            yield Draft(
                 "multi_hop",
                 f"Which contract governs the purchase order on invoice {i.invoice_number}?",
                 f"Invoice {i.invoice_number} references {po.po_number}, which is governed by "
@@ -407,25 +561,42 @@ def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "medium",
                 {"number": c.contract_number, "po_number": po.po_number},
+                check={"kind": "governing_contract", "invoice_id": i.id},
             )
+
+    def terms_via_contract() -> Shape:
+        for i, c in fresh(governing(), lambda pair: pair[0].id):
+            po = ledger.po_by_number[i.po_number or ""]
+            yield Draft(
+                "multi_hop",
+                f"How many days does the contract behind invoice {i.invoice_number} allow "
+                "for payment?",
+                f"Invoice {i.invoice_number} bills purchase order {po.po_number}, governed by "
+                f"contract {c.contract_number}, which allows {c.payment_terms_days} days.",
+                _docs(i.document_id, c.document_id, po.document_id),
+                True,
+                "hard",
+                {"days": c.payment_terms_days, "number": c.contract_number},
+                check={"kind": "terms_via_contract", "invoice_id": i.id},
+            )
+
+    def owed() -> Shape:
+        """What is still owed on a partly paid invoice (the synthetic remittances each pay
+        one invoice, so "which invoices did remittance X pay" has no interesting answer)."""
+        partial = (
+            i
+            for i in _shuffled(rng, ledger.invoices)
+            if rendered(i) and ledger.paid_by[i.id] and ledger.outstanding(i) >= TOLERANCE
         )
-    # what is still owed on a partly paid invoice (the synthetic remittances each pay one
-    # invoice, so "which invoices did remittance X pay" has no interesting answer)
-    partial = [
-        i
-        for i in ledger.invoices
-        if rendered(i) and ledger.paid_by[i.id] and ledger.outstanding(i) >= TOLERANCE
-    ]
-    for i in _shuffled(rng, partial)[:3]:
-        payments = ledger.paid_by[i.id]
-        paid = ", ".join(
-            f"{p.payment_reference} ({money(a.amount)} {i.currency})"
-            for p in payments
-            for a in p.allocations
-            if a.invoice_id == i.id
-        )
-        drafts.append(
-            Draft(
+        for i in fresh(partial, inv_key):
+            payments = ledger.paid_by[i.id]
+            paid = ", ".join(
+                f"{p.payment_reference} ({money(a.amount)} {i.currency})"
+                for p in payments
+                for a in p.allocations
+                if a.invoice_id == i.id
+            )
+            yield Draft(
                 "multi_hop",
                 f"How much is still owed on invoice {i.invoice_number}?",
                 f"{money(ledger.outstanding(i))} {i.currency}: invoice {i.invoice_number} totals "
@@ -434,28 +605,30 @@ def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "hard",
                 {"amount": money(ledger.outstanding(i)), "currency": i.currency},
+                check={"kind": "owed", "invoice_id": i.id},
             )
-        )
-    # a vendor's invoices with a PO and no payment at all (no shared numbers: duplicates
-    # would list one number twice)
-    open_by_vendor: dict[str, list[InvoiceRow]] = defaultdict(list)
-    for i in ledger.invoices:
-        if i.vendor_id and i.po_number and not ledger.paid_by[i.id]:
-            open_by_vendor[i.vendor_id].append(i)
-    candidates = [
-        (vendor_id, items)
-        for vendor_id, items in sorted(open_by_vendor.items())
-        if 1 <= len(items) <= 6
-        and any(i.document_id for i in items)
-        and all(ledger.unique_number(i) for i in items)
-    ]
-    for vendor_id, items in _shuffled(rng, candidates)[:3]:
-        items = sorted(items, key=lambda i: i.invoice_date)
-        listed = ", ".join(
-            f"{i.invoice_number} ({money(i.total)} {i.currency}, PO {i.po_number})" for i in items
-        )
-        drafts.append(
-            Draft(
+
+    def open_with_po() -> Shape:
+        """A vendor's invoices with a PO and no payment at all (no shared numbers:
+        duplicates would list one number twice)."""
+        by_vendor: dict[str, list[InvoiceRow]] = defaultdict(list)
+        for i in ledger.invoices:
+            if i.vendor_id and i.po_number and not ledger.paid_by[i.id]:
+                by_vendor[i.vendor_id].append(i)
+        candidates = [
+            (vendor_id, items)
+            for vendor_id, items in sorted(by_vendor.items())
+            if 1 <= len(items) <= 6
+            and any(i.document_id for i in items)
+            and all(ledger.unique_number(i) for i in items)
+        ]
+        for vendor_id, items in _shuffled(rng, candidates):
+            items = sorted(items, key=lambda i: i.invoice_date)
+            listed = ", ".join(
+                f"{i.invoice_number} ({money(i.total)} {i.currency}, PO {i.po_number})"
+                for i in items
+            )
+            yield Draft(
                 "multi_hop",
                 f"Which {ledger.vendor_name(vendor_id)} invoices reference a purchase order but "
                 "have no payment?",
@@ -464,9 +637,78 @@ def multi_hop(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "hard",
                 {"numbers": [i.invoice_number for i in items]},
+                check={"kind": "open_with_po", "vendor_id": vendor_id},
             )
+
+    def billed_against(po: PurchaseOrderRow) -> list[InvoiceRow]:
+        return sorted(
+            (
+                i
+                for i in ledger.invoices
+                if i.po_number == po.po_number and i.vendor_id == po.vendor_id
+            ),
+            key=lambda i: (i.invoice_date, i.invoice_number),
         )
-    return drafts[:n]
+
+    def po_candidates() -> list[tuple[PurchaseOrderRow, list[InvoiceRow]]]:
+        out = []
+        for po in _shuffled(rng, sorted(ledger.purchase_orders.values(), key=lambda p: p.id)):
+            items = billed_against(po)
+            if (
+                po.document_id
+                and ledger.po_by_number.get(po.po_number) is po
+                and items
+                and all(ledger.unique_number(i) for i in items)
+                and len({i.currency for i in items}) == 1
+            ):
+                out.append((po, items))
+        return out
+
+    candidates = po_candidates()
+    half = len(candidates) // 2
+
+    def po_invoices() -> Shape:
+        for po, items in candidates[:half]:
+            listed = ", ".join(f"{i.invoice_number} ({money(i.total)} {i.currency})" for i in items)
+            yield Draft(
+                "multi_hop",
+                f"Which invoices were billed against purchase order {po.po_number}?",
+                f"{len(items)} invoice(s) reference {po.po_number}: {listed}.",
+                _docs(po.document_id, *(i.document_id for i in items)),
+                True,
+                "medium",
+                {"numbers": [i.invoice_number for i in items]},
+                check={"kind": "po_invoices", "po_id": po.id},
+            )
+
+    def po_invoiced() -> Shape:
+        for po, items in candidates[half:]:
+            total = sum((i.total for i in items), Decimal(0))
+            yield Draft(
+                "multi_hop",
+                f"How much has been invoiced against purchase order {po.po_number}?",
+                f"{money(total)} {items[0].currency} across {len(items)} invoice(s), against a "
+                f"PO total of {money(po.total)} {po.currency}.",
+                _docs(po.document_id, *(i.document_id for i in items)),
+                True,
+                "hard",
+                {"amount": money(total), "count": len(items)},
+                check={"kind": "po_invoiced", "po_id": po.id},
+            )
+
+    return round_robin(
+        n,
+        settled_by(),
+        governing_contract(),
+        owed(),
+        open_with_po(),
+        po_invoices(),
+        terms_via_contract(),
+        po_invoiced(),
+    )
+
+
+# --------------------------------------------------------------------------- aggregation
 
 
 def _period(rng: random.Random) -> tuple[str, date, date]:
@@ -482,89 +724,190 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
     for i in ledger.invoices:
         if i.vendor_id in ledger.vendors:
             by_vendor[i.vendor_id].append(i)
-    vendors = _shuffled(
-        rng, sorted(v for v, items in by_vendor.items() if any(i.document_id for i in items))
-    )
+    vendors = sorted(v for v, items in by_vendor.items() if any(i.document_id for i in items))
+    pos_by_vendor: dict[str, list[PurchaseOrderRow]] = defaultdict(list)
+    for po in ledger.purchase_orders.values():
+        pos_by_vendor[po.vendor_id or ""].append(po)
+    pays_by_vendor: dict[str, list[PaymentRow]] = defaultdict(list)
+    for pay in ledger.payments:
+        pays_by_vendor[pay.vendor_id or ""].append(pay)
+    asked: set[tuple[str, str]] = set()  # (vendor, shape): one question of a shape per vendor
 
-    def docs_of(items: Iterable[InvoiceRow]) -> tuple[str, ...]:
-        return _docs(*(i.document_id for i in sorted(items, key=lambda i: i.invoice_date)))
+    def docs_of(items: Iterable[InvoiceRow | PurchaseOrderRow | PaymentRow]) -> tuple[str, ...]:
+        def when(item: InvoiceRow | PurchaseOrderRow | PaymentRow) -> date:
+            if isinstance(item, InvoiceRow):
+                return item.invoice_date
+            return item.order_date if isinstance(item, PurchaseOrderRow) else item.paid_at
 
-    counts: list[Draft] = []
-    totals: list[Draft] = []
-    balances: list[Draft] = []
-    tops: list[Draft] = []
-    for vendor_id in vendors:
-        vendor = ledger.vendor_name(vendor_id)
-        if len(counts) < 3:  # invoice count in a year
+        return _docs(*(i.document_id for i in sorted(items, key=when)))
+
+    def each_vendor(shape: str) -> Iterator[str]:
+        for vendor_id in _shuffled(rng, vendors):
+            if (vendor_id, shape) not in asked:
+                asked.add((vendor_id, shape))
+                yield vendor_id
+
+    def count_year() -> Shape:
+        for vendor_id in each_vendor("count_year"):
             year = rng.choice([2025, 2026])
             items = [i for i in by_vendor[vendor_id] if i.invoice_date.year == year]
-            if docs_of(items):
-                counts.append(
-                    Draft(
-                        "aggregation",
-                        f"How many invoices did {vendor} issue in {year}?",
-                        f"{vendor} issued {len(items)} invoices dated in {year}.",
-                        docs_of(items),
-                        True,
-                        "medium",
-                        {"count": len(items)},
-                    )
+            vendor = ledger.vendor_name(vendor_id)
+            if docs_of(items) and len(items) <= MAX_COUNTED:
+                yield Draft(
+                    "aggregation",
+                    f"How many invoices did {vendor} issue in {year}?",
+                    f"{vendor} issued {len(items)} invoices dated in {year}.",
+                    docs_of(items),
+                    True,
+                    "medium",
+                    {"count": len(items)},
+                    check={"kind": "count_year", "vendor_id": vendor_id, "year": year},
                 )
-                continue
-        if len(totals) < 3:  # total invoiced in a quarter
+
+    def count_quarter() -> Shape:
+        for vendor_id in each_vendor("count_quarter"):
+            label, start, end = _period(rng)
+            items = [i for i in by_vendor[vendor_id] if start <= i.invoice_date <= end]
+            vendor = ledger.vendor_name(vendor_id)
+            if docs_of(items) and len(items) <= MAX_COUNTED:
+                yield Draft(
+                    "aggregation",
+                    f"How many invoices did we receive from {vendor} in {label}?",
+                    f"{len(items)} {vendor} invoices are dated {start.isoformat()} to "
+                    f"{end.isoformat()}.",
+                    docs_of(items),
+                    True,
+                    "medium",
+                    {"count": len(items)},
+                    check={
+                        "kind": "count_period",
+                        "vendor_id": vendor_id,
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                )
+
+    def total_quarter() -> Shape:
+        for vendor_id in each_vendor("total_quarter"):
             label, start, end = _period(rng)
             items = [i for i in by_vendor[vendor_id] if start <= i.invoice_date <= end]
             currencies = {i.currency for i in items}
-            if docs_of(items) and len(currencies) == 1:
+            vendor = ledger.vendor_name(vendor_id)
+            if docs_of(items) and len(currencies) == 1 and len(items) <= MAX_COUNTED:
                 total = sum((i.total for i in items), Decimal(0))
-                totals.append(
-                    Draft(
-                        "aggregation",
-                        f"What was the total invoiced by {vendor} in {label}?",
-                        f"{vendor} invoiced {money(total)} {currencies.pop()} across "
-                        f"{len(items)} invoices dated {start.isoformat()} to {end.isoformat()}.",
-                        docs_of(items),
-                        True,
-                        "hard",
-                        {"amount": money(total), "count": len(items)},
-                    )
+                yield Draft(
+                    "aggregation",
+                    f"What was the total invoiced by {vendor} in {label}?",
+                    f"{vendor} invoiced {money(total)} {currencies.pop()} across "
+                    f"{len(items)} invoices dated {start.isoformat()} to {end.isoformat()}.",
+                    docs_of(items),
+                    True,
+                    "hard",
+                    {"amount": money(total), "count": len(items)},
+                    check={
+                        "kind": "total_period",
+                        "vendor_id": vendor_id,
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                    },
                 )
+
+    def open_items(vendor_id: str) -> list[InvoiceRow] | None:
+        """Not fully paid; ``None`` when shared numbers make it ambiguous (Ledger.paid)."""
+        items = [i for i in by_vendor[vendor_id] if ledger.outstanding(i) >= TOLERANCE]
+        return items if all(ledger.unique_number(i) for i in items) else None
+
+    def balance() -> Shape:
+        for vendor_id in each_vendor("balance"):
+            items = open_items(vendor_id)
+            if items is None:
                 continue
-        if len(balances) < 2:  # outstanding balance
-            items = [i for i in by_vendor[vendor_id] if ledger.outstanding(i) >= TOLERANCE]
             currencies = {i.currency for i in items}
-            unambiguous = all(ledger.unique_number(i) for i in items)  # see Ledger.paid
-            if docs_of(items) and len(currencies) == 1 and len(items) <= 15 and unambiguous:
-                balance = sum((ledger.outstanding(i) for i in items), Decimal(0))
-                balances.append(
-                    Draft(
-                        "aggregation",
-                        f"What is our total outstanding balance with {vendor}?",
-                        f"{money(balance)} {currencies.pop()} is outstanding on {len(items)} "
-                        f"{vendor} invoices.",
-                        docs_of(items),
-                        True,
-                        "hard",
-                        {"amount": money(balance), "count": len(items)},
-                    )
+            vendor = ledger.vendor_name(vendor_id)
+            if docs_of(items) and len(currencies) == 1 and len(items) <= 15:
+                amount = sum((ledger.outstanding(i) for i in items), Decimal(0))
+                yield Draft(
+                    "aggregation",
+                    f"What is our total outstanding balance with {vendor}?",
+                    f"{money(amount)} {currencies.pop()} is outstanding on {len(items)} "
+                    f"{vendor} invoices.",
+                    docs_of(items),
+                    True,
+                    "hard",
+                    {"amount": money(amount), "count": len(items)},
+                    check={"kind": "balance", "vendor_id": vendor_id},
                 )
-    spend: dict[tuple[str, int], dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    for i in ledger.invoices:
-        if i.vendor_id in ledger.vendors:
-            spend[(i.currency, i.invoice_date.year)][i.vendor_id or ""] += i.total
-    for currency, year in _shuffled(rng, sorted(spend)):
-        ranking = sorted(spend[(currency, year)].items(), key=lambda kv: -kv[1])
-        if len(tops) == 2 or len(ranking) < 2:
-            continue
-        top, amount = ranking[0]
-        items = [
-            i for i in by_vendor[top] if i.invoice_date.year == year and i.currency == currency
-        ]
-        if not docs_of(items):
-            continue
-        vendor = ledger.vendor_name(top)
-        tops.append(
-            Draft(
+
+    def unpaid_count() -> Shape:
+        for vendor_id in each_vendor("unpaid_count"):
+            items = open_items(vendor_id)
+            vendor = ledger.vendor_name(vendor_id)
+            if items and docs_of(items) and len(items) <= 25:
+                yield Draft(
+                    "aggregation",
+                    f"How many {vendor} invoices are not yet paid in full?",
+                    f"{len(items)} {vendor} invoices still have an amount outstanding.",
+                    docs_of(items),
+                    True,
+                    "medium",
+                    {"count": len(items)},
+                    check={"kind": "unpaid_count", "vendor_id": vendor_id},
+                )
+
+    def paid_year() -> Shape:
+        for vendor_id in each_vendor("paid_year"):
+            year = rng.choice([2025, 2026])
+            items = [p for p in pays_by_vendor[vendor_id] if p.paid_at.year == year]
+            currencies = {p.currency for p in items}
+            vendor = ledger.vendor_name(vendor_id)
+            if docs_of(items) and len(currencies) == 1 and len(items) <= MAX_COUNTED:
+                total = sum((p.amount for p in items), Decimal(0))
+                yield Draft(
+                    "aggregation",
+                    f"How much did we pay {vendor} in {year}?",
+                    f"{money(total)} {currencies.pop()} across {len(items)} payments made in "
+                    f"{year}.",
+                    docs_of(items),
+                    True,
+                    "hard",
+                    {"amount": money(total), "count": len(items)},
+                    check={"kind": "paid_year", "vendor_id": vendor_id, "year": year},
+                )
+
+    def po_count_year() -> Shape:
+        for vendor_id in each_vendor("po_count_year"):
+            year = rng.choice([2025, 2026])
+            items = [p for p in pos_by_vendor[vendor_id] if p.order_date.year == year]
+            vendor = ledger.vendor_name(vendor_id)
+            if docs_of(items) and len(items) <= MAX_COUNTED:
+                yield Draft(
+                    "aggregation",
+                    f"How many purchase orders did we place with {vendor} in {year}?",
+                    f"{len(items)} purchase orders to {vendor} are dated in {year}.",
+                    docs_of(items),
+                    True,
+                    "medium",
+                    {"count": len(items)},
+                    check={"kind": "po_count_year", "vendor_id": vendor_id, "year": year},
+                )
+
+    def top_vendor() -> Shape:
+        spend: dict[tuple[str, int], dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+        for i in ledger.invoices:
+            if i.vendor_id in ledger.vendors:
+                spend[(i.currency, i.invoice_date.year)][i.vendor_id or ""] += i.total
+        for currency, year in _shuffled(rng, sorted(spend)):
+            ranking = sorted(spend[(currency, year)].items(), key=lambda kv: -kv[1])
+            if len(ranking) < 2 or ranking[0][1] == ranking[1][1]:
+                continue
+            top, amount = ranking[0]
+            items = [
+                i for i in by_vendor[top] if i.invoice_date.year == year and i.currency == currency
+            ]
+            if not docs_of(items):
+                continue
+            vendor = ledger.vendor_name(top)
+            yield Draft(
                 "aggregation",
                 f"Which vendor did we spend the most with in {currency} in {year}?",
                 f"{vendor}: {money(amount)} {currency} invoiced in {year}.",
@@ -572,9 +915,20 @@ def aggregation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
                 True,
                 "hard",
                 {"vendor": vendor, "amount": money(amount)},
+                check={"kind": "top_vendor", "currency": currency, "year": year},
             )
-        )
-    return [*counts, *totals, *balances, *tops][:n]
+
+    return round_robin(
+        n,
+        count_year(),
+        total_quarter(),
+        balance(),
+        top_vendor(),
+        paid_year(),
+        po_count_year(),
+        count_quarter(),
+        unpaid_count(),
+    )
 
 
 def reconciliation(ledger: Ledger, rng: random.Random, n: int) -> list[Draft]:
@@ -725,6 +1079,11 @@ def check_grounding(draft: Draft, texts: dict[str, str]) -> list[str]:
         issues.append(f"number {expected['number']} not in the document")
     if "date" in expected and date.fromisoformat(expected["date"]) not in set(find_dates(flat)):
         issues.append(f"date {expected['date']} not in the document")
+    if "vendor" in expected and expected["vendor"].lower() not in flat.lower():
+        issues.append(f"vendor {expected['vendor']} not in the document")
+    for item in expected.get("items", []):
+        if str(item).lower() not in flat.lower():
+            issues.append(f"{item} not in the document")
     if "days" in expected and not re.search(rf"\b{expected['days']}\s+days\b", flat):
         issues.append(f"{expected['days']} days not in the document")
     return issues
