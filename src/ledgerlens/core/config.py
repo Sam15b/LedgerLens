@@ -310,6 +310,8 @@ class AnomalyConfig(_Section):
 
 class EvalConfig(_Section):
     golden_set: str = "data/golden/golden_set.jsonl"
+    ci_subset: str = "data/golden/golden_ci.jsonl"
+    """The stratified CI subset of ``golden_set`` (``eval/golden_set/ci_subset.py``)."""
     ci_subset_size: int = Field(default=40, gt=0)
     k: int = Field(default=5, gt=0)
     regression_threshold_pts: float = Field(default=3, ge=0)
