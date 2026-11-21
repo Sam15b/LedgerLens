@@ -44,7 +44,8 @@ langchain-mcp-adapters>=0.1
 mcp>=1.2
 
 # --- Evaluation / observability ---
-ragas>=0.2
+ragas>=0.4
+instructor>=1.17              # RAGAS judge plumbing; older releases import mistralai.async_client (gone in mistralai 1.x)
 langsmith>=0.1
 
 # --- Dev tools ---

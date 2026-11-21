@@ -82,7 +82,8 @@ anomaly = [
     "scikit-learn>=1.4",  # Isolation Forest baseline (ml/anomaly/evaluate.py)
 ]
 eval = [
-    "ragas",
+    "ragas>=0.4",  # eval/run_ragas.py uses the 0.4 ragas.metrics.collections API
+    "instructor>=1.17",  # older releases import mistralai.async_client, gone in mistralai 1.x
     "langsmith",
     "matplotlib",  # eval/ocr_robustness.py --plot
 ]
@@ -189,4 +190,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*"]  # no inline types; not installed by every extra
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The pre-commit mypy env has no ragas (an eval extra with a large LangChain tree), so its
+# judge / embedding base classes are Any there; CI's full run installs the eval extra.
+module = ["eval.run_ragas"]
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = ["ragas.*"]  # only in the eval extra
 ignore_missing_imports = true
