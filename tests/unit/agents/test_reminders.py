@@ -12,7 +12,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from ledgerlens.agents.graph import AgentNodes, build_graph, read_decisions
-from ledgerlens.agents.nodes.reminder_writer import REMINDER_TOOLS, ReminderWriterNode
+from ledgerlens.agents.nodes.reminder_writer import (
+    REMINDER_TOOLS,
+    ReminderWriterNode,
+    min_days_overdue,
+)
 from ledgerlens.agents.nodes.router import Router
 from ledgerlens.agents.tools import ToolBox, ToolOutcome
 from ledgerlens.mcp_server.tools.reminders import missing_facts
@@ -74,7 +78,8 @@ class Ledger(ToolBox):
         rows = [
             {"invoice_id": i["id"], "invoice_number": n}
             for n, i in self.invoices.items()
-            if i["status"] == "unpaid" and date.fromisoformat(i["due_date"]) < TODAY
+            if i["status"] == "unpaid"
+            and (TODAY - date.fromisoformat(i["due_date"])).days >= args["min_days"]
         ]
         return {"invoices": rows[: args["limit"]], "count": len(rows)}
 
@@ -191,6 +196,35 @@ async def test_overdue_list_when_no_invoice_is_named() -> None:
     )
     assert ledger.calls[0][0] == "list_overdue"
     assert [d["invoice_number"] for d in ledger.drafts] == ["INV-1"]
+
+
+async def test_the_requested_overdue_threshold_is_kept() -> None:
+    ledger = Ledger([invoice("INV-1", 40), invoice("INV-2", 10), invoice("INV-3", 30)])
+    await graph(ledger).ainvoke(
+        {"messages": [HumanMessage("Draft reminders for invoices 30+ days overdue")]}, THREAD
+    )
+    assert ledger.calls[0][0] == "list_overdue" and ledger.calls[0][1]["min_days"] == 30
+    assert sorted(d["invoice_number"] for d in ledger.drafts) == ["INV-1", "INV-3"]
+
+
+@pytest.mark.parametrize(
+    ("text", "days"),
+    [
+        ("Draft reminders for invoices 30+ days overdue", 30),
+        ("remind everyone 45 days or more overdue", 45),
+        ("chase invoices at least 60 days past due", 60),
+        ("invoices over 30 days late", 31),
+        ("anything more than 15 days overdue?", 16),
+        ("reminders for invoices overdue by 20 days", 20),
+        ("bills overdue for more than 7 days", 8),
+        ("Prepare reminders for everything overdue", 1),
+        ("Chase INV-30 for Acme", 1),
+        ("pay within 30 days", 1),
+        ("invoices 0 days overdue", 1),
+    ],
+)
+def test_min_days_overdue(text: str, days: int) -> None:
+    assert min_days_overdue(text) == days
 
 
 def test_read_decisions() -> None:

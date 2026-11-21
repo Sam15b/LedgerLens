@@ -2,7 +2,8 @@
 approve. Nothing is ever sent (docs/layers/04-agents-mcp.md, "Reminder writer").
 
 Which invoices: the ones the request names, else what ``list_overdue`` returns (for the
-vendor named, if any), at most :data:`MAX_DRAFTS`. For each, through the MCP tools:
+vendor named, if any, and at least as overdue as the request says: "30+ days overdue",
+:func:`min_days_overdue`), at most :data:`MAX_DRAFTS`. For each, through the MCP tools:
 
 1. ``get_invoice`` -- amount, outstanding, original due date, PO number, status;
 2. the tone from days overdue (:func:`~ledgerlens.mcp_server.tools.reminders.tone_for`):
@@ -21,6 +22,7 @@ reject them (:mod:`ledgerlens.agents.graph`).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -28,6 +30,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig
 
+from ledgerlens.agents.nodes.router import latest_user_text
 from ledgerlens.agents.state import LedgerState
 from ledgerlens.agents.tools import ToolBox, ToolOutcome
 from ledgerlens.core.prompts import PromptError, load_prompt
@@ -38,6 +41,29 @@ logger = logging.getLogger(__name__)
 REMINDER_TOOLS = ("list_overdue", "get_invoice", "get_vendor_contact", "draft_reminder")
 MAX_DRAFTS = 5
 SENDER = "Accounts Payable"
+
+
+_LATE = r"(?:overdue|late|past\s+due)"
+_MORE = r"(?P<more>over|more\s+than|longer\s+than|beyond)\s+"
+_DAYS_THEN_LATE = re.compile(
+    rf"(?:{_MORE}|(?:at\s+least|min(?:imum)?)\s+)?(?P<n>\d{{1,4}})\s*(?P<plus>\+)?\s*"
+    rf"days?\s+(?:or\s+more\s+)?{_LATE}\b",
+    re.IGNORECASE,
+)
+_LATE_BY_DAYS = re.compile(
+    rf"\b{_LATE}\s+(?:by\s+|for\s+)?(?:{_MORE}|(?:at\s+least)\s+)?(?P<n>\d{{1,4}})\s*\+?\s*days?",
+    re.IGNORECASE,
+)
+
+
+def min_days_overdue(text: str) -> int:
+    """The overdue threshold a request sets: ``"30+ days overdue"`` and ``"at least 30
+    days late"`` -> 30, ``"over 30 days past due"`` -> 31; 1 (anything overdue) if none."""
+    match = _DAYS_THEN_LATE.search(text) or _LATE_BY_DAYS.search(text)
+    if match is None:
+        return 1
+    days = int(match.group("n")) + (1 if match.group("more") else 0)
+    return max(days, 1)
 
 
 def _amount(value: Any) -> str:
@@ -118,7 +144,7 @@ class ReminderWriterNode:
         invoices = list(entities.get("invoice_numbers") or [])
         if not invoices:
             args: dict[str, Any] = {
-                "min_days": 1,
+                "min_days": min_days_overdue(latest_user_text(state.get("messages") or [])),
                 "limit": self.max_drafts,
                 "as_of": self.today.isoformat(),
             }
