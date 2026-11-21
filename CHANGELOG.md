@@ -8,6 +8,97 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-21
+
+Phase 5 — Agents + MCP: a LangGraph agent graph serves all five user stories of
+[docs/01-project-overview.md](docs/01-project-overview.md) through the API. Fourteen MCP
+tools are the graph's only way to reach the stores, and the same tools serve any external
+MCP client. `tests/e2e/test_stories.py` runs every story through the API against
+Postgres, Neo4j, Redis and the arq worker:
+
+- unpaid invoices over $5k for a vendor;
+- upload a document and extract it;
+- reconcile an invoice;
+- review an anomaly flag;
+- approve a reminder.
+
+The release also carries the anomaly detection (6c) and fine-tuning (6a) milestones.
+
+### Agents + MCP (Phase 5)
+
+#### Added
+
+- **MCP server** (`ledgerlens.mcp_server`, FastMCP over stdio or streamable HTTP,
+  `make mcp`, `make mcp-inspect`). Its 14 tools:
+  - search and query: `search_documents` (default retriever), `graph_query` (templates
+    or Text2Cypher), `run_analytics`;
+  - records: `get_invoice` / `get_po` / `get_contract`, `get_payments`, `list_overdue`,
+    `get_vendor_contact`, `get_document_text`, `save_extraction`;
+  - checks and drafts: `reconcile`, `score_anomaly`, `draft_reminder`.
+
+  The search models warm up when the server starts.
+- **Reconciler** (`ledgerlens.reconcile`): a deterministic 3-way match of invoice, PO,
+  contract and payments with tolerances, which reports each check as passed, a mismatch
+  or not checked.
+- **Agents** (`ledgerlens.agents`). `LedgerState` and a graph that routes on intent:
+  - the router uses rules, then a model (`fast`);
+  - QA plans its search, graph and analytics calls and answers with enforced citations;
+  - the extractor saves its record and reconciles invoices on its own;
+  - the reconciler explains the match report;
+  - the reminder writer picks the tone from days overdue and pauses with `interrupt()`
+    until a person decides.
+
+  Step limit and tool-error guardrails. Postgres checkpointer.
+- **API**:
+  - `POST /chat` streams SSE events: `token`, `tool_call`, `tool_result`, `citation`,
+    `interrupt`, `error`, `done`;
+  - `POST /reminders/{id}/approve|reject` resumes the paused run;
+  - `POST /documents` stores the upload and queues an ingestion job. A duplicate returns
+    200, and the size and type limits answer 413 / 415 / 422;
+  - `GET /documents[/{id}]` returns status and extracted fields;
+  - `GET /anomalies` and `POST /anomalies/{id}/review` (confirmed / false positive);
+  - request ids on every log line and in one error shape.
+- Migrations `0002` (`reminders.thread_id`) and `0003` (`anomaly_scores.review`,
+  `review_note`, `reviewed_at`).
+- Tests:
+  - router intent accuracy on a labelled utterance set;
+  - one reconciler test per mismatch type;
+  - agent trajectory tests;
+  - the SSE event sequence;
+  - the API endpoints;
+  - upload → worker → `ready`;
+  - the five end-to-end stories.
+- [docs/layers/04-agents-mcp.md](docs/layers/04-agents-mcp.md) explains how to connect
+  Claude Desktop, Claude Code, MCP Inspector or the Python SDK. Both transports were
+  checked with an external client.
+
+#### Changed
+
+- The reminder writer keeps the overdue threshold a request sets ("30+ days overdue").
+  Before, it drafted every overdue invoice.
+- Run uvicorn on a selector event loop (`make api`), because psycopg's async mode does
+  not run on Windows' Proactor loop.
+- Package version 0.5.0.
+
+#### Known issues
+
+- No working LLM key here, so every model path has only run with scripted models or
+  fallen back to rules or keywords:
+  - router model accuracy;
+  - QA planning and answers;
+  - reconciler narration;
+  - LLM extraction;
+  - Text2Cypher.
+
+  On fresh utterances the router's rules alone score 0.50.
+- `token` events are pieces of finished answers: model output is not streamed into the
+  graph yet.
+- The end-to-end stories use a stand-in with no hits for vector search: they are answered
+  from the graph and Postgres.
+- The arq worker needs POSIX (Docker/WSL). The API and the worker must share
+  `loader.upload_dir`.
+- The rules extractor reads the fixture invoice's header fields but not its line items.
+
 ### Anomaly detection milestone (Phase 6c: rules + Keras autoencoder)
 
 Every invoice the stores sink writes is scored for anomalies, with reasons a reviewer can
@@ -417,7 +508,8 @@ command and reports its health.
 - Package version is read from `src/ledgerlens/__init__.py` (single source) and reset to
   `0.0.0` to match the roadmap's `v0.<phase>.0` scheme.
 
-[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Sam15b/LedgerLens/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Sam15b/LedgerLens/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Sam15b/LedgerLens/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/Sam15b/LedgerLens/compare/v0.2.0...v0.1.0

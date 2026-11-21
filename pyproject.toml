@@ -142,7 +142,8 @@ known-first-party = ["ledgerlens", "eval", "ml", "scripts"]
 
 [tool.mypy]
 python_version = "3.11"
-mypy_path = "src"
+mypy_path = ["src", "."]
+explicit_package_bases = true  # tests/*/conftest.py are tests.<dir>.conftest, not all "conftest"
 strict = true
 files = ["src", "tests"]
 # PyMuPDF ships py.typed but leaves constructors (Document, Rect, ...) unannotated.
