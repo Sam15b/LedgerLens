@@ -40,7 +40,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
-from ledgerlens.api.routers import chat, health, reminders
+from ledgerlens.api.routers import anomalies, chat, documents, health, reminders
 from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import configure_logging, reset_request_id, set_request_id
 
@@ -55,6 +55,8 @@ CODES = {
     404: "not_found",
     405: "method_not_allowed",
     409: "conflict",
+    413: "too_large",
+    415: "unsupported_media_type",
     422: "invalid_request",
     429: "too_many_requests",
     503: "unavailable",
@@ -167,6 +169,8 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(chat.router)
     app.include_router(reminders.router)
+    app.include_router(documents.router)
+    app.include_router(anomalies.router)
     return app
 
 

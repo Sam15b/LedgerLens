@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Table, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,7 @@ from ledgerlens.core.schemas import (
     Receipt,
 )
 from ledgerlens.storage.postgres.models import (
+    ANOMALY_REVIEWS,
     REMINDER_STATUSES,
     AnomalyScoreRow,
     Base,
@@ -212,6 +214,23 @@ class DocumentRepository:
         )
         return [to_document(row) for row in rows]
 
+    def find(
+        self,
+        *,
+        status: DocumentStatus | None = None,
+        doc_type: DocType | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Document]:
+        """Newest first, optionally of one status and/or type."""
+        stmt = select(DocumentRow)
+        if status is not None:
+            stmt = stmt.where(DocumentRow.status == status.value)
+        if doc_type is not None:
+            stmt = stmt.where(DocumentRow.doc_type == doc_type.value)
+        stmt = stmt.order_by(DocumentRow.created_at.desc(), DocumentRow.id)
+        return [to_document(row) for row in self.session.scalars(stmt.limit(limit).offset(offset))]
+
     def delete(self, document_id: str) -> bool:
         """Delete a document; its chunks and extracted records cascade with it."""
         result = self.session.execute(delete(DocumentRow).where(DocumentRow.id == document_id))
@@ -268,6 +287,10 @@ class ChunkRepository:
                 .order_by(ChunkRow.chunk_index)
             )
         )
+
+    def count(self, document_id: str) -> int:
+        stmt = select(func.count()).select_from(ChunkRow).where(ChunkRow.document_id == document_id)
+        return int(self.session.scalar(stmt) or 0)
 
     def texts(self, ids: Iterable[str]) -> dict[str, str]:
         """Full text by vector id -- Pinecone hits carry only a truncated copy."""
@@ -809,6 +832,70 @@ class AnomalyScoreRepository:
         )
         return list(self.session.scalars(stmt))
 
+    def get(self, score_id: int) -> AnomalyScoreRow | None:
+        return self.session.get(AnomalyScoreRow, score_id, populate_existing=True)
+
+    def flags(
+        self,
+        *,
+        min_score: float = 0.0,
+        review: str | None = None,
+        reviewed: bool | None = None,
+        vendor_id: str | None = None,
+        model_version: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[tuple[AnomalyScoreRow, InvoiceRow]]:
+        """Scores of at least ``min_score`` with their invoices, highest first.
+
+        One score per invoice: ``model_version``'s, else the newest. ``review`` keeps one
+        verdict; ``reviewed`` keeps reviewed (``True``) or unreviewed (``False``) scores.
+        """
+        if review is not None and review not in ANOMALY_REVIEWS:
+            raise ValueError(f"unknown anomaly review {review!r}")
+        if model_version is not None:
+            ids = select(AnomalyScoreRow.id).where(AnomalyScoreRow.model_version == model_version)
+        else:  # the newest score of each invoice
+            ids = (
+                select(AnomalyScoreRow.id)
+                .ext(distinct_on(AnomalyScoreRow.invoice_id))
+                .order_by(
+                    AnomalyScoreRow.invoice_id,
+                    AnomalyScoreRow.created_at.desc(),
+                    AnomalyScoreRow.id.desc(),
+                )
+            )
+        stmt = (
+            select(AnomalyScoreRow, InvoiceRow)
+            .join(InvoiceRow, InvoiceRow.id == AnomalyScoreRow.invoice_id)
+            .where(AnomalyScoreRow.id.in_(ids.scalar_subquery()))
+            .where(AnomalyScoreRow.score >= min_score)
+        )
+        if review is not None:
+            stmt = stmt.where(AnomalyScoreRow.review == review)
+        if reviewed is not None:
+            column = AnomalyScoreRow.review
+            stmt = stmt.where(column.is_not(None) if reviewed else column.is_(None))
+        if vendor_id is not None:
+            stmt = stmt.where(InvoiceRow.vendor_id == vendor_id)
+        stmt = stmt.order_by(AnomalyScoreRow.score.desc(), AnomalyScoreRow.id)
+        rows = self.session.execute(stmt.limit(limit).offset(offset))
+        return [(row[0], row[1]) for row in rows]
+
+    def review(self, score_id: int, verdict: str, note: str | None = None) -> AnomalyScoreRow:
+        """Record a person's verdict on a score (a later review replaces it). Raises
+        ``KeyError`` for an unknown score and ``ValueError`` for an unknown verdict."""
+        if verdict not in ANOMALY_REVIEWS:
+            raise ValueError(f"a review is one of {', '.join(ANOMALY_REVIEWS)}, not {verdict!r}")
+        row = self.get(score_id)
+        if row is None:
+            raise KeyError(score_id)
+        row.review = verdict
+        row.review_note = note
+        row.reviewed_at = datetime.now(UTC)
+        self.session.flush()
+        return row
+
     def unscored(self, model_version: str) -> list[str]:
         """Invoices with no score from ``model_version``, oldest first."""
         scored = select(AnomalyScoreRow.invoice_id).where(
@@ -967,6 +1054,34 @@ class Repositories:
             result = self.session.execute(delete(table).where(table.c.document_id == document_id))
             removed += result.rowcount  # type: ignore[attr-defined]
         return removed
+
+    def record_for_document(
+        self, document_id: str, doc_type: DocType = DocType.UNKNOWN
+    ) -> tuple[str, ExtractedRecord] | None:
+        """``(record id, record)`` extracted from a document, or ``None`` if it has none.
+        An invoice row of a ``receipt`` document comes back as the receipt."""
+        invoice = self.session.scalars(
+            select(InvoiceRow).where(InvoiceRow.document_id == document_id)
+        ).one_or_none()
+        if invoice is not None:
+            is_receipt = doc_type is DocType.RECEIPT
+            return invoice.id, to_receipt(invoice) if is_receipt else to_invoice(invoice)
+        po = self.session.scalars(
+            select(PurchaseOrderRow).where(PurchaseOrderRow.document_id == document_id)
+        ).one_or_none()
+        if po is not None:
+            return po.id, to_purchase_order(po)
+        payment = self.session.scalars(
+            select(PaymentRow).where(PaymentRow.document_id == document_id)
+        ).one_or_none()
+        if payment is not None:
+            return payment.id, to_payment(payment)
+        contract = self.session.scalars(
+            select(ContractRow).where(ContractRow.document_id == document_id)
+        ).one_or_none()
+        if contract is not None:
+            return contract.id, to_contract(contract)
+        return None
 
     def upsert_record(
         self,

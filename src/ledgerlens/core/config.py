@@ -199,6 +199,9 @@ class LoaderConfig(_Section):
     allowed_mime_types: list[str] = Field(
         default_factory=lambda: ["application/pdf", "image/png", "image/jpeg", "image/tiff"]
     )
+    upload_dir: str = "data/uploads"
+    """Where ``POST /documents`` keeps uploaded files for the worker (repo-relative). The
+    worker reads them by path, so API and worker must share it."""
 
 
 class PreprocessConfig(_Section):
