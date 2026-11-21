@@ -9,7 +9,15 @@ contexts (chunk texts and GraphRAG facts from the default retriever), the answer
 
 * **faithfulness** -- the share of the answer's claims the contexts support;
 * **answer relevancy** -- how well questions regenerated from the answer match the asked
-  question (cosine similarity of their embeddings; the local dense model).
+  question (cosine similarity of their embeddings; the local dense model);
+* **context precision** -- whether the contexts that hold the reference answer are ranked
+  above those that do not;
+* **context recall** -- the share of the reference answer's claims the contexts support;
+* **answer correctness** -- the answer against the reference: claim-level F1 (0.75)
+  blended with their embedding similarity (0.25).
+
+The last three compare with ``ground_truth_answer``, which is why unanswerable questions
+(no reference) are left out.
 
 Samples can be saved (``--save-samples``) and scored again later (``--samples``), so the
 answers are paid for once. Unanswerable questions are not scored: they have no reference
@@ -153,7 +161,13 @@ class MetricSpec:
 def build_metrics(
     llm: InstructorBaseRagasLLM, embeddings: BaseRagasEmbedding
 ) -> dict[str, MetricSpec]:
-    from ragas.metrics.collections import AnswerRelevancy, Faithfulness
+    from ragas.metrics.collections import (
+        AnswerCorrectness,
+        AnswerRelevancy,
+        ContextPrecision,
+        ContextRecall,
+        Faithfulness,
+    )
 
     return {
         "faithfulness": MetricSpec(
@@ -161,6 +175,16 @@ def build_metrics(
         ),
         "answer_relevancy": MetricSpec(
             AnswerRelevancy(llm=llm, embeddings=embeddings), ("user_input", "response")
+        ),
+        "context_precision": MetricSpec(
+            ContextPrecision(llm=llm), ("user_input", "reference", "retrieved_contexts")
+        ),
+        "context_recall": MetricSpec(
+            ContextRecall(llm=llm), ("user_input", "retrieved_contexts", "reference")
+        ),
+        "answer_correctness": MetricSpec(
+            AnswerCorrectness(llm=llm, embeddings=embeddings),
+            ("user_input", "response", "reference"),
         ),
     }
 
