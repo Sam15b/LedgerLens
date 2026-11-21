@@ -451,3 +451,50 @@ async def test_upload_an_invoice_and_get_its_fields(
     after = (await api.get(f"/documents/{document_id}")).json()
     assert after["record"]["invoice_number"] == "INV-2026-0417"
     assert after["record"]["total"] == "498.0000"
+
+
+async def test_does_an_invoice_match_its_po_and_contract_rate(
+    api: httpx.AsyncClient, ledger: Ledger, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Finance controller: "Does INV-889 match its PO and contract rate?" -- Router ->
+    Reconciler."""
+    caplog.set_level(logging.INFO)
+    turn = await chat(api, f"Does {ledger.inv(2)} match its PO and contract rate?")
+
+    assert routed(caplog) == ["routed to reconcile by rules"]
+    assert turn.tools == ["reconcile"]
+    (result,) = turn.of("tool_result")
+    assert result["name"] == "reconcile"
+    reply = turn.reply
+    against = f"against PO {ledger.po(2)} and contract {ledger.contract}."
+    assert reply.startswith(f"{ledger.inv(2)} does not match {against}")
+    assert "Mismatches: unit_price." in reply
+    assert f"{WRAP} at 45.00 vs 42.41 (+6.1%)" in reply
+
+    # prices and quantities agree with the PO, but it is 40 days past due and unpaid
+    overdue = await chat(api, f"Does {ledger.inv(1)} match its PO?")
+    assert overdue.tools == ["reconcile"]
+    assert "Mismatches: payment." in overdue.reply
+    assert "7500.00 USD outstanding, 40 day(s) past due 2026-04-10" in overdue.reply
+    assert "Passed: po_exists, vendor_match, line_qty, total, terms." in overdue.reply
+
+
+async def test_review_flagged_invoices(api: httpx.AsyncClient, ledger: Ledger) -> None:
+    """Finance controller: review flagged invoices -- anomaly service -> dashboard."""
+    flagged = (await api.get("/anomalies")).json()
+    assert [f["invoice_number"] for f in flagged] == [ledger.inv(2)]  # the rate breach
+    (flag,) = flagged
+    assert flag["flagged"] and flag["score"] >= 0.5 and flag["model_version"] == "rules-only"
+    assert any(r["source"] == "rule" and "42.41" in r["text"] for r in flag["reasons"])
+    every = (await api.get("/anomalies", params={"min_score": 0})).json()
+    assert {f["invoice_number"] for f in every} == {ledger.inv(n) for n in (1, 2, 3)}
+
+    reviewed = await api.post(
+        f"/anomalies/{flag['id']}/review",
+        json={"verdict": "confirmed", "note": "billed above the contract rate"},
+    )
+    assert reviewed.status_code == 200 and reviewed.json()["review"] == "confirmed"
+    assert (await api.get("/anomalies")).json() == []  # nothing left to review
+    confirmed = (await api.get("/anomalies", params={"review": "confirmed"})).json()
+    assert [f["id"] for f in confirmed] == [flag["id"]]
+    assert confirmed[0]["review_note"] == "billed above the contract rate"
