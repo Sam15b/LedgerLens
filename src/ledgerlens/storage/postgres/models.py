@@ -64,6 +64,7 @@ MONEY = Numeric(18, 4)
 RECORD_ID = String(64)
 INVOICE_STATUSES = ("unpaid", "partially_paid", "paid", "disputed", "void")
 REMINDER_STATUSES = ("pending_approval", "approved", "rejected", "sent")
+ANOMALY_REVIEWS = ("confirmed", "false_positive")
 PAYMENT_METHODS: tuple[str, ...] = get_args(PaymentMethod)
 
 
@@ -365,7 +366,10 @@ class AnomalyScoreRow(Base):
     """One anomaly model's verdict on an invoice; re-scoring with a model version replaces it."""
 
     __tablename__ = "anomaly_scores"
-    __table_args__ = (UniqueConstraint("invoice_id", "model_version"),)
+    __table_args__ = (
+        UniqueConstraint("invoice_id", "model_version"),
+        one_of("review", ANOMALY_REVIEWS),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     invoice_id: Mapped[str] = mapped_column(
@@ -374,6 +378,10 @@ class AnomalyScoreRow(Base):
     model_version: Mapped[str] = mapped_column(String(64))
     score: Mapped[float] = mapped_column(Float)
     reasons: Mapped[list[Any]] = mapped_column(JSONB, server_default=sql_text("'[]'::jsonb"))
+    review: Mapped[str | None] = mapped_column(String(20), index=True)
+    """A person's verdict on the flag (``confirmed`` / ``false_positive``), for retraining."""
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created_at()
 
 

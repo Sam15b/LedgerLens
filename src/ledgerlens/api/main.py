@@ -40,7 +40,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
-from ledgerlens.api.routers import chat, documents, health, reminders
+from ledgerlens.api.routers import anomalies, chat, documents, health, reminders
 from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import configure_logging, reset_request_id, set_request_id
 
@@ -168,6 +168,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(reminders.router)
     app.include_router(documents.router)
+    app.include_router(anomalies.router)
     return app
 
 

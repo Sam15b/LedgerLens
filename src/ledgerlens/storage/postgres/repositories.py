@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Table, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,7 @@ from ledgerlens.core.schemas import (
     Receipt,
 )
 from ledgerlens.storage.postgres.models import (
+    ANOMALY_REVIEWS,
     REMINDER_STATUSES,
     AnomalyScoreRow,
     Base,
@@ -829,6 +831,70 @@ class AnomalyScoreRepository:
             .order_by(AnomalyScoreRow.created_at.desc(), AnomalyScoreRow.id.desc())
         )
         return list(self.session.scalars(stmt))
+
+    def get(self, score_id: int) -> AnomalyScoreRow | None:
+        return self.session.get(AnomalyScoreRow, score_id, populate_existing=True)
+
+    def flags(
+        self,
+        *,
+        min_score: float = 0.0,
+        review: str | None = None,
+        reviewed: bool | None = None,
+        vendor_id: str | None = None,
+        model_version: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[tuple[AnomalyScoreRow, InvoiceRow]]:
+        """Scores of at least ``min_score`` with their invoices, highest first.
+
+        One score per invoice: ``model_version``'s, else the newest. ``review`` keeps one
+        verdict; ``reviewed`` keeps reviewed (``True``) or unreviewed (``False``) scores.
+        """
+        if review is not None and review not in ANOMALY_REVIEWS:
+            raise ValueError(f"unknown anomaly review {review!r}")
+        if model_version is not None:
+            ids = select(AnomalyScoreRow.id).where(AnomalyScoreRow.model_version == model_version)
+        else:  # the newest score of each invoice
+            ids = (
+                select(AnomalyScoreRow.id)
+                .ext(distinct_on(AnomalyScoreRow.invoice_id))
+                .order_by(
+                    AnomalyScoreRow.invoice_id,
+                    AnomalyScoreRow.created_at.desc(),
+                    AnomalyScoreRow.id.desc(),
+                )
+            )
+        stmt = (
+            select(AnomalyScoreRow, InvoiceRow)
+            .join(InvoiceRow, InvoiceRow.id == AnomalyScoreRow.invoice_id)
+            .where(AnomalyScoreRow.id.in_(ids.scalar_subquery()))
+            .where(AnomalyScoreRow.score >= min_score)
+        )
+        if review is not None:
+            stmt = stmt.where(AnomalyScoreRow.review == review)
+        if reviewed is not None:
+            column = AnomalyScoreRow.review
+            stmt = stmt.where(column.is_not(None) if reviewed else column.is_(None))
+        if vendor_id is not None:
+            stmt = stmt.where(InvoiceRow.vendor_id == vendor_id)
+        stmt = stmt.order_by(AnomalyScoreRow.score.desc(), AnomalyScoreRow.id)
+        rows = self.session.execute(stmt.limit(limit).offset(offset))
+        return [(row[0], row[1]) for row in rows]
+
+    def review(self, score_id: int, verdict: str, note: str | None = None) -> AnomalyScoreRow:
+        """Record a person's verdict on a score (a later review replaces it). Raises
+        ``KeyError`` for an unknown score and ``ValueError`` for an unknown verdict."""
+        if verdict not in ANOMALY_REVIEWS:
+            raise ValueError(f"a review is one of {', '.join(ANOMALY_REVIEWS)}, not {verdict!r}")
+        row = self.get(score_id)
+        if row is None:
+            raise KeyError(score_id)
+        row.review = verdict
+        row.review_note = note
+        row.reviewed_at = datetime.now(UTC)
+        self.session.flush()
+        return row
 
     def unscored(self, model_version: str) -> list[str]:
         """Invoices with no score from ``model_version``, oldest first."""
