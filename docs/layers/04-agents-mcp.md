@@ -93,6 +93,9 @@ Built with the Python MCP SDK (`FastMCP`). Runs over **stdio** (local clients) o
 | `reconcile` | `invoice_id` | match report |
 | `score_anomaly` | `invoice_id` | score + reasons |
 | `draft_reminder` | `invoice_id, body, tone` | reminder id (status pending) |
+| `get_vendor_contact` | `vendor` | name, email (may be `null`) |
+| `get_document_text` | `document` (id or record number), `max_chars?` | text as read at ingestion + doc type |
+| `save_extraction` | `document_id, record` | stored record id (+ anomaly verdict) |
 
 ```python
 # mcp_server/tools/search.py (sketch)
@@ -105,6 +108,69 @@ def search_documents(query: str, doc_type: str | None = None,
 
 LangGraph loads the tools via `langchain-mcp-adapters` (`MultiServerMCPClient`), and each
 agent node is bound only to the tools it needs.
+
+### Connecting external MCP clients
+
+The same 14 tools work from any MCP client. The server reads `.env` from the repo root.
+It needs the stores up (`make up`), and for `search_documents` it also needs
+`PINECONE_HOST=http://localhost:5080` when you use Pinecone Local. Without it, the
+retriever warm-up logs a `PineconeNotConfiguredError` and every other tool still works.
+
+**Over stdio** (the client starts the server):
+
+```bash
+python -m ledgerlens.mcp_server.server                  # what a stdio client runs
+```
+
+- **Claude Desktop**: add the server to `claude_desktop_config.json`
+  (`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS).
+  Use absolute paths, because Claude Desktop does not start in the repo:
+
+  ```json
+  {
+    "mcpServers": {
+      "ledgerlens": {
+        "command": "E:/LedgerLens/.venv/Scripts/python.exe",
+        "args": ["-m", "ledgerlens.mcp_server.server"],
+        "env": { "PINECONE_HOST": "http://localhost:5080" }
+      }
+    }
+  }
+  ```
+
+  Restart Claude Desktop. The tools then appear under *ledgerlens*.
+- **Claude Code**: `claude mcp add ledgerlens -- <venv python> -m ledgerlens.mcp_server.server`.
+- **MCP Inspector**: `make mcp-inspect`. It needs Node.js and runs
+  `npx @modelcontextprotocol/inspector` on the stdio server. Open the URL it prints,
+  then *Connect* → *Tools* → *List Tools*.
+
+**Over streamable HTTP** (one long-running server for several clients; this is how the
+agents connect):
+
+```bash
+make mcp                                                # http://localhost:8765/mcp
+```
+
+- **Claude Code**: `claude mcp add --transport http ledgerlens http://localhost:8765/mcp`.
+- **MCP Inspector**: run `npx @modelcontextprotocol/inspector`, choose transport
+  *Streamable HTTP* and enter the URL `http://localhost:8765/mcp`.
+- **Python** (`mcp` SDK), the client this was checked with:
+
+  ```python
+  from mcp import ClientSession
+  from mcp.client.streamable_http import streamablehttp_client
+
+  async with streamablehttp_client("http://localhost:8765/mcp") as (read, write, _):
+      async with ClientSession(read, write) as session:
+          await session.initialize()
+          print([t.name for t in (await session.list_tools()).tools])   # 14 tools
+          await session.call_tool("list_overdue", {"min_days": 60, "limit": 5})
+  ```
+
+**Before you connect a client to real data:** most tools only read. `draft_reminder`
+only stores a `pending_approval` draft, and nothing is ever sent. `save_extraction`
+**overwrites** the stored record of a document and relinks it in the graph, so don't
+let an external client call it on the dev ledger unless you mean to.
 
 ## API integration
 - `POST /chat` → runs the graph, streams via **SSE**: `token`, `tool_call`, `tool_result`, `citation`, `interrupt`, `done` events.
