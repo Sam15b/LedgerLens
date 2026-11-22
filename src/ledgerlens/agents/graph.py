@@ -50,6 +50,7 @@ from langgraph.types import interrupt
 
 from ledgerlens.agents.state import Intent, LedgerState
 from ledgerlens.core.config import get_config, get_settings
+from ledgerlens.observability.tracing import Span, span
 
 logger = logging.getLogger(__name__)
 
@@ -230,33 +231,72 @@ def _takes_config(node: Any) -> bool:
         return False
 
 
+def _node_span(name: str) -> Any:
+    """The span of one node run (a graph interrupt is not an error)."""
+    return span(name, attributes={"agent.node": name}, expected=(GraphBubbleUp,))
+
+
+def _annotate(opened: Span, result: dict[str, Any]) -> None:
+    """What the node decided, on its span."""
+    if result.get("intent"):
+        opened.set("agent.intent", result["intent"])
+    for message in result.get("messages") or []:
+        if isinstance(message, AIMessage) and message.text:
+            opened.set_outputs(reply=message.text)
+
+
 def guarded(name: str, node: Any) -> Any:
-    """``node`` (sync or async) with any exception turned into an error reply. A node with
-    a ``config`` parameter gets the run's config (its ``thread_id``)."""
+    """``node`` (sync or async) with any exception turned into an error reply, run in a
+    span of its own. A node with a ``config`` parameter gets the run's config (its
+    ``thread_id``)."""
     with_config = _takes_config(node)
     if inspect.iscoroutinefunction(node) or inspect.iscoroutinefunction(
         getattr(node, "__call__", None)  # noqa: B004 - a callable object's async __call__
     ):
 
         async def run_async(state: LedgerState, config: RunnableConfig) -> dict[str, Any]:
-            try:
-                result: dict[str, Any] = await (node(state, config) if with_config else node(state))
-            except GraphBubbleUp:  # interrupt() and other control flow: not an error
-                raise
-            except Exception as exc:
-                return _failure(name, exc)
-            return result
+            with _node_span(name) as opened:
+                try:
+                    result: dict[str, Any] = await (
+                        node(state, config) if with_config else node(state)
+                    )
+                except GraphBubbleUp:  # interrupt() and other control flow: not an error
+                    raise
+                except Exception as exc:
+                    opened.record_error(exc)
+                    return _failure(name, exc)
+                _annotate(opened, result)
+                return result
 
         return run_async
 
     def run(state: LedgerState, config: RunnableConfig) -> dict[str, Any]:
-        try:
-            result: dict[str, Any] = node(state, config) if with_config else node(state)
-        except GraphBubbleUp:
-            raise
-        except Exception as exc:
-            return _failure(name, exc)
-        return result
+        with _node_span(name) as opened:
+            try:
+                result: dict[str, Any] = node(state, config) if with_config else node(state)
+            except GraphBubbleUp:
+                raise
+            except Exception as exc:
+                opened.record_error(exc)
+                return _failure(name, exc)
+            _annotate(opened, result)
+            return result
+
+    return run
+
+
+def traced(name: str, node: Node) -> Node:
+    """A built-in node (respond, stopped, human approval) in a span of its own."""
+
+    def run(state: LedgerState) -> dict[str, Any]:
+        with _node_span(name) as opened:
+            try:
+                result = node(state)
+            except GraphBubbleUp:  # waiting for a person
+                opened.set("agent.interrupted", True)
+                raise
+            _annotate(opened, result)
+            return result
 
     return run
 
@@ -281,15 +321,15 @@ def build_graph(
     graph.add_node("router", guarded("router", nodes.router))
     for name in SPECIALISTS.values():
         graph.add_node(name, guarded(name, getattr(nodes, name)))
-    graph.add_node("respond", respond)
-    graph.add_node("stopped", make_stopped(max_steps))
+    graph.add_node("respond", traced("respond", respond))
+    graph.add_node("stopped", traced("stopped", make_stopped(max_steps)))
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
         "router",
         make_route(max_steps),
         {name: name for name in [*SPECIALISTS.values(), "respond", "stopped"]},
     )
-    graph.add_node("human_approval", human_approval)
+    graph.add_node("human_approval", traced("human_approval", human_approval))
     for name in SPECIALISTS.values():
         if name not in ("extractor", "reminder_writer"):
             graph.add_edge(name, "respond")

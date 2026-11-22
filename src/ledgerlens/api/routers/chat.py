@@ -21,6 +21,9 @@ The response is ``text/event-stream``; each event is ``event: <type>`` and one J
 
 A conversation is a ``thread_id`` (one is made if the request has none; send it back to
 continue). The graph's checkpointer keeps the thread, so each turn starts from the last.
+
+Each request is one trace (``observability/tracing.py``): a ``chat`` span with the
+router, the agents, their tool calls and LLM calls nested under it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,8 @@ from langgraph.types import Overwrite
 from pydantic import BaseModel, Field
 
 from ledgerlens.api.agent import AgentRuntime, AgentUnavailableError
+from ledgerlens.core.logging import get_request_id
+from ledgerlens.observability.tracing import span
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,28 @@ def node_events(node: str, values: Any, cited: set[str]) -> list[str]:
 
 
 async def events(runtime: AgentRuntime, request: ChatRequest, thread_id: str) -> AsyncIterator[str]:
+    attributes = {"thread_id": thread_id, "request_id": get_request_id()}
+    inputs = {"message": request.message, "document_ids": request.document_ids}
+    with span("chat", inputs=inputs, attributes=attributes) as traced:
+        async for event in run_events(runtime, request, thread_id):
+            yield event
+        state = await runtime.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        values = state.values or {}
+        done = {
+            "thread_id": thread_id,
+            "status": "interrupted" if state.next else "completed",
+            "intent": values.get("intent"),
+            "errors": values.get("errors", []),
+        }
+        traced.set_attributes({"agent.intent": done["intent"], "chat.status": done["status"]})
+        traced.set_outputs(**done)
+        yield sse("done", done)
+
+
+async def run_events(
+    runtime: AgentRuntime, request: ChatRequest, thread_id: str
+) -> AsyncIterator[str]:
+    """The run's events, up to (not including) ``done``."""
     config = {"configurable": {"thread_id": thread_id}}
     cited: set[str] = set()
     try:
@@ -156,17 +183,6 @@ async def events(runtime: AgentRuntime, request: ChatRequest, thread_id: str) ->
     except Exception as exc:  # the graph guards its nodes; this is the graph itself failing
         logger.exception("chat run failed")
         yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
-    state = await runtime.graph.aget_state(config)
-    values = state.values or {}
-    yield sse(
-        "done",
-        {
-            "thread_id": thread_id,
-            "status": "interrupted" if state.next else "completed",
-            "intent": values.get("intent"),
-            "errors": values.get("errors", []),
-        },
-    )
 
 
 @router.post("/chat", response_class=StreamingResponse)

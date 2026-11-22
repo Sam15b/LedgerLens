@@ -28,6 +28,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from ledgerlens.core.config import MCPConnectionConfig, get_config
+from ledgerlens.observability.tracing import span
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,11 @@ def _text(content: Any) -> str:
     return str(content)
 
 
+def tool_attributes(outcome: ToolOutcome) -> dict[str, Any]:
+    """Span attributes for a tool call."""
+    return {"tool.ok": outcome.ok}
+
+
 class ToolBox:
     """Tools by name; :meth:`only` narrows them to what one agent may call."""
 
@@ -75,7 +81,18 @@ class ToolBox:
         return ToolBox([self.tools[name] for name in names if name in self.tools])
 
     async def call(self, name: str, args: Mapping[str, Any]) -> tuple[ToolOutcome, ToolMessage]:
-        """Call a tool; errors come back as a failed outcome and an error message."""
+        """Call a tool, in a span; errors come back as a failed outcome and an error
+        message."""
+        with span(f"tool {name}", kind="tool", inputs=args, attributes={"tool.name": name}) as s:
+            outcome, message = await self._call(name, args)
+            s.set_attributes(tool_attributes(outcome))
+            if outcome.ok:
+                s.set_outputs(text=outcome.text)
+            else:
+                s.record_error(outcome.text)
+            return outcome, message
+
+    async def _call(self, name: str, args: Mapping[str, Any]) -> tuple[ToolOutcome, ToolMessage]:
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         tool = self.tools.get(name)
         if tool is None:
