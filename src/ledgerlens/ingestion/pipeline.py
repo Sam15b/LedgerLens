@@ -49,7 +49,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledgerlens.core.config import IngestionConfig, get_config, repo_path
-from ledgerlens.core.logging import configure_logging
+from ledgerlens.core.logging import configure_logging, request_context
 from ledgerlens.core.schemas import DocType, Document, DocumentStatus
 from ledgerlens.extraction.base import ExtractionError, ExtractionResult, Extractor
 from ledgerlens.ingestion.chunking import Chunk, chunk_document
@@ -59,6 +59,7 @@ from ledgerlens.ingestion.layout import PageContent, ScannedPage, layout_pages
 from ledgerlens.ingestion.loaders import FileLoader
 from ledgerlens.ingestion.ocr import OCREngine, OCRError, get_engine
 from ledgerlens.llm.router import LLMClient
+from ledgerlens.observability.cost import document_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,9 @@ class IngestionPipeline:
         self._status(result.document)
         try:
             self._read(result, Path(path), loaded.file.mime_type)
-            self._understand(result, doc_type)
+            # LLM calls (classify, extract) are recorded against this document.
+            with request_context(document_request_id(result.document.id)):
+                self._understand(result, doc_type)
             if embed and self.embedder is not None and self.embedder.sparse.is_fitted:
                 self.embed(result)
         except _StepError as exc:
