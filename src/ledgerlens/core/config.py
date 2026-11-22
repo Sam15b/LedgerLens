@@ -323,6 +323,8 @@ class EvalConfig(_Section):
     ci_subset_size: int = Field(default=40, gt=0)
     k: int = Field(default=5, gt=0)
     regression_threshold_pts: float = Field(default=3, ge=0)
+    gate_metrics: list[str] = Field(default_factory=lambda: ["faithfulness", "recall@5"])
+    """Metrics the CI gate fails on (``eval/regression.py``); others are shown only."""
     targets: dict[str, float] = Field(default_factory=dict)
 
 

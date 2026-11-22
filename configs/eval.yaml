@@ -3,7 +3,8 @@ golden_set: data/golden/golden_set.jsonl
 ci_subset: data/golden/golden_ci.jsonl   # stratified subset for fast regression checks
 ci_subset_size: 40
 k: 5
-regression_threshold_pts: 3
+regression_threshold_pts: 3   # CI fails if a gated metric drops more than this vs main
+gate_metrics: [faithfulness, recall@5]
 targets:
   recall@5: 0.90        # retrieval, vs relevant_document_ids (eval/runner.py)
   faithfulness: 0.85

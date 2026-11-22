@@ -27,6 +27,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the baseline is the newest report committed on the base branch
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -43,6 +45,10 @@ jobs:
           pip install -e ".[storage,ingestion,llm,agents,eval]"
       - name: Run the CI subset
         run: python -m eval.runner --set ci --no-db --report-dir eval/reports/ci-run
+      - name: Compare with the base branch's last report
+        run: >-
+          python -m eval.regression --current eval/reports/ci-run/summary_ci.json
+          --base-ref origin/${{ github.base_ref || 'main' }}
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v4

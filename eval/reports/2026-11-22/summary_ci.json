@@ -1,0 +1,42 @@
+{
+  "suite": "ci",
+  "run_id": "21b011ca3904",
+  "date": "2026-11-22",
+  "git_sha": "b8bbc3a90222691cf7c3961aba0d5b9b8a4b970a",
+  "git_dirty": false,
+  "config_hash": "ddb8c4b7de5f1c0c2a437565c3a10173261517574ae7dcf69167c0ee0ff11c53",
+  "options": {
+    "suite": "ci",
+    "questions": 40,
+    "variant": "R4",
+    "k": 5,
+    "filters": "analyzer",
+    "exact_hybrid": true,
+    "answers": true,
+    "answer_model": "smart",
+    "ragas": true,
+    "judge": "judge"
+  },
+  "llm_status": "skipped, AllProvidersFailedError: all models for 'smart' failed (openai/gpt-4o: openai returned HTTP 401: Incorrect API key provided: <redacted>. You can find your API key at https://platform.openai.com/accou\u2026",
+  "metrics": {
+    "questions": 40,
+    "answerable": 36,
+    "errors": 0,
+    "recall@5": 0.8694444444444445,
+    "mrr": 0.8935185185185185,
+    "evidence_recall": 0.9666666666666666,
+    "answered": 0,
+    "facts_found": null,
+    "citations_ok": null,
+    "recall@5.aggregation": 0.7999999999999999,
+    "recall@5.clause": 1.0,
+    "recall@5.lookup": 1.0,
+    "recall@5.multi_hop": 0.7777777777777778,
+    "recall@5.reconciliation": 0.625,
+    "latency.retrieval.p50_ms": 4620.5,
+    "latency.retrieval.p95_ms": 11321.8,
+    "cost.query.mean_usd": 0.0,
+    "cost.query.p95_usd": 0.0,
+    "cost.total_usd": 0.0
+  }
+}
