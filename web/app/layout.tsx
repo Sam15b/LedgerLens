@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Suspense } from "react";
 
+import { ApiStatus, ApiStatusPending } from "@/components/ApiStatus";
 import { Sidebar } from "@/components/Sidebar";
 import { THEME_SCRIPT } from "@/components/theme";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -34,7 +36,16 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>
       <body className="flex min-h-full flex-col font-sans md:flex-row">
-        <Sidebar footer={<ThemeToggle />} />
+        <Sidebar
+          footer={
+            <div className="flex flex-col gap-3">
+              <Suspense fallback={<ApiStatusPending />}>
+                <ApiStatus />
+              </Suspense>
+              <ThemeToggle />
+            </div>
+          }
+        />
         <main className="min-w-0 flex-1 px-6 py-8 md:h-screen md:overflow-y-auto md:px-10">
           <div className="mx-auto max-w-6xl">{children}</div>
         </main>
