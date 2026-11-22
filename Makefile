@@ -13,9 +13,6 @@ DATASET ?= sroie
 MCP_PORT ?= 8765
 EVAL_ARGS ?=
 
-# Placeholder for targets whose implementation lands in a later roadmap phase.
-todo = @echo make $@: not implemented yet - $(1)
-
 .DEFAULT_GOAL := help
 .PHONY: help setup install-ml up down init migrate data ingest worker enqueue api mcp mcp-inspect web \
         test test-int cov lint format eval eval-ci clean
@@ -69,8 +66,8 @@ mcp:              ## Run the MCP server over streamable HTTP on :$(MCP_PORT)/mcp
 mcp-inspect:      ## Open the MCP Inspector on the server over stdio (needs Node.js / npx)
 	npx @modelcontextprotocol/inspector $(PY) -m ledgerlens.mcp_server.server
 
-web:              ## Run the Next.js dashboard
-	$(call todo,Phase 8: web/)
+web:              ## Run the Next.js dashboard on :3000 (calls the API: run `make api` too)
+	cd web && pnpm install --frozen-lockfile && pnpm dev
 
 # --- Quality -------------------------------------------------------------------------
 test:             ## Unit tests
