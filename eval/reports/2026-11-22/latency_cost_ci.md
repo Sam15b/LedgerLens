@@ -1,19 +1,20 @@
 # Latency and cost (ci set, 2026-11-22)
 
-40 questions, retriever `R4`; git `b8bbc3a90222`, config `ddb8c4b7de5f`.
+40 questions, retriever `R4`; git `d33fce718cd3`, config `7e0023bbba5c`.
 
 ## Latency
 
 | | n | mean ms | p50 ms | p95 ms | max ms |
 |---|---:|---:|---:|---:|---:|
-| retrieval | 40 | 5077 | 4620 | 11322 | 16776 |
+| retrieval | 40 | 5378 | 5538 | 11193 | 16359 |
 | stage: analyze | 40 | 1 | 1 | 2 | 2 |
-| stage: embed | 40 | 66 | 64 | 79 | 108 |
-| stage: fetch_text | 40 | 5 | 5 | 7 | 10 |
-| stage: graph | 40 | 19 | 9 | 74 | 147 |
-| stage: rerank | 40 | 4905 | 4473 | 11101 | 16622 |
-| stage: search | 40 | 82 | 57 | 147 | 689 |
-| stage: total | 40 | 5077 | 4620 | 11322 | 16776 |
+| stage: anchor | 11 | 1125 | 1174 | 1381 | 1420 |
+| stage: embed | 40 | 65 | 63 | 76 | 127 |
+| stage: fetch_text | 40 | 4 | 4 | 7 | 7 |
+| stage: graph | 40 | 11 | 6 | 39 | 61 |
+| stage: rerank | 40 | 4904 | 4594 | 10979 | 16203 |
+| stage: search | 40 | 82 | 59 | 159 | 370 |
+| stage: total | 40 | 5378 | 5538 | 11193 | 16359 |
 
 ## Cost per query
 
