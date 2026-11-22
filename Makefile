@@ -11,6 +11,7 @@ PY ?= $(if $(wildcard $(VENV_PY)),$(VENV_PY),python)
 
 DATASET ?= sroie
 MCP_PORT ?= 8765
+EVAL_ARGS ?=
 
 # Placeholder for targets whose implementation lands in a later roadmap phase.
 todo = @echo make $@: not implemented yet - $(1)
@@ -90,11 +91,11 @@ format:           ## Auto-format and auto-fix lint issues
 	$(PY) -m ruff format .
 	$(PY) -m ruff check --fix .
 
-eval:             ## Full evaluation suite -> eval/reports/<date>/
-	$(call todo,Phase 7: eval runner)
+eval:             ## Full evaluation suite -> eval/reports/<date>/summary.md (EVAL_ARGS="--no-answers")
+	$(PY) -m eval.runner --set full $(EVAL_ARGS)
 
-eval-ci:          ## 40-question CI evaluation subset
-	$(call todo,Phase 7: eval runner)
+eval-ci:          ## 40-question CI subset -> eval/reports/<date>/summary_ci.md
+	$(PY) -m eval.runner --set ci $(EVAL_ARGS)
 
 clean:            ## Remove caches and build artifacts
 	$(PY) -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for pat in ('.pytest_cache', '.mypy_cache', '.ruff_cache', 'htmlcov', 'build', 'dist', '**/__pycache__') for p in pathlib.Path('.').glob(pat) if '.venv' not in p.parts]"
