@@ -20,6 +20,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: write  # the results comment
 
 jobs:
   eval-ci:
@@ -46,9 +47,36 @@ jobs:
       - name: Run the CI subset
         run: python -m eval.runner --set ci --no-db --report-dir eval/reports/ci-run
       - name: Compare with the base branch's last report
+        id: gate
+        continue-on-error: true  # post the comment first; the last step fails the job
         run: >-
           python -m eval.regression --current eval/reports/ci-run/summary_ci.json
           --base-ref origin/${{ github.base_ref || 'main' }}
+          --comment eval/reports/ci-run/comment.md
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Post the results on the pull request
+        # Fork PRs get a read-only token: their results stay in the job log and artifact.
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          hashFiles('eval/reports/ci-run/comment.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("eval/reports/ci-run/comment.md", "utf8");
+            const marker = "<!-- ledgerlens-eval-gate -->";
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const previous = comments.find((c) => c.body && c.body.startsWith(marker));
+            if (previous) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,3 +84,8 @@ jobs:
           name: eval-ci-report
           path: eval/reports/ci-run/
           if-no-files-found: ignore
+      - name: Fail on a regression
+        if: steps.gate.outcome == 'failure'
+        run: |
+          echo "::error::A gated metric regressed vs the base branch's last report (see the PR comment)."
+          exit 1

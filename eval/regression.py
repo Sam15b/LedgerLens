@@ -12,6 +12,9 @@ a file instead. Each metric is compared in points (one point = 0.01 of a 0-1 sco
 * the other scores, latency and cost are shown for context and never fail it.
 
 With no baseline on ``main`` yet the gate passes and says so. Exit code 1 means it failed.
+
+``--comment <file>`` also writes the result as the pull request comment the workflow
+posts (and updates on every push: it starts with :data:`COMMENT_MARKER`).
 """
 
 from __future__ import annotations
@@ -222,6 +225,37 @@ def verdict(comparison: Comparison) -> str:
     return f"Eval gate FAILED on {names} (threshold {threshold})."
 
 
+COMMENT_MARKER = "<!-- ledgerlens-eval-gate -->"
+
+
+def _short(sha: Any) -> str:
+    return f"`{str(sha)[:12]}`" if sha else "unknown"
+
+
+def render_comment(
+    comparison: Comparison, current: Mapping[str, Any], *, run_url: str | None = None
+) -> str:
+    """The pull request comment: verdict, the table, and where both numbers came from."""
+    suite = current.get("suite", "ci")
+    icon = "white_check_mark" if comparison.passed else "x"
+    lines = [
+        COMMENT_MARKER,
+        f"### :{icon}: Eval gate ({suite} set)",
+        "",
+        verdict(comparison),
+        "",
+        *render_table(comparison),
+        "",
+        f"- this PR: git {_short(current.get('git_sha'))}, config "
+        f"{_short(current.get('config_hash'))}; answers: {current.get('llm_status', 'unknown')}",
+        f"- baseline: {comparison.baseline_source or 'none'}",
+    ]
+    lines += [f"- {note}" for note in comparison.notes]
+    if run_url:
+        lines.append(f"- full report: [workflow run]({run_url}) (artifact `eval-ci-report`)")
+    return "\n".join(lines) + "\n"
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -233,6 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline", type=Path, help="baseline summary JSON (default: git)")
     parser.add_argument("--base-ref", default="origin/main", help="where to find the baseline")
     parser.add_argument("--suite", default=None, help="default: the current run's suite")
+    parser.add_argument("--comment", type=Path, help="also write the PR comment (markdown)")
+    parser.add_argument("--run-url", default=None, help="link to the workflow run, for the comment")
     return parser
 
 
@@ -261,6 +297,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("\n".join(render_table(comparison)))
     for note in comparison.notes:
         print(note)
+    if args.comment:
+        args.comment.parent.mkdir(parents=True, exist_ok=True)
+        text = render_comment(comparison, current, run_url=args.run_url)
+        args.comment.write_text(text, encoding="utf-8")
     return 0 if comparison.passed else 1
 
 
