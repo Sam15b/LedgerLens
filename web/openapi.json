@@ -184,6 +184,30 @@
         "title": "ChatRequest",
         "type": "object"
       },
+      "DailyCost": {
+        "properties": {
+          "calls": {
+            "title": "Calls",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "day": {
+            "format": "date",
+            "title": "Day",
+            "type": "string"
+          }
+        },
+        "required": [
+          "day",
+          "calls",
+          "cost_usd"
+        ],
+        "title": "DailyCost",
+        "type": "object"
+      },
       "DecisionOut": {
         "properties": {
           "note": {
@@ -305,6 +329,39 @@
         ],
         "title": "DocType",
         "type": "string"
+      },
+      "DocumentCounts": {
+        "properties": {
+          "failed": {
+            "default": 0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "processing": {
+            "default": 0,
+            "title": "Processing",
+            "type": "integer"
+          },
+          "queued": {
+            "default": 0,
+            "title": "Queued",
+            "type": "integer"
+          },
+          "ready": {
+            "default": 0,
+            "title": "Ready",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total"
+        ],
+        "title": "DocumentCounts",
+        "type": "object"
       },
       "DocumentDetail": {
         "properties": {
@@ -566,6 +623,65 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "Overview": {
+        "properties": {
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "documents": {
+            "$ref": "#/components/schemas/DocumentCounts"
+          },
+          "flagged_invoices": {
+            "title": "Flagged Invoices",
+            "type": "integer"
+          },
+          "llm_cost_by_day": {
+            "items": {
+              "$ref": "#/components/schemas/DailyCost"
+            },
+            "title": "Llm Cost By Day",
+            "type": "array"
+          },
+          "llm_costs_recorded": {
+            "title": "Llm Costs Recorded",
+            "type": "boolean"
+          },
+          "open_invoices": {
+            "title": "Open Invoices",
+            "type": "integer"
+          },
+          "overdue_invoices": {
+            "title": "Overdue Invoices",
+            "type": "integer"
+          },
+          "pending_reminders": {
+            "title": "Pending Reminders",
+            "type": "integer"
+          },
+          "unpaid": {
+            "items": {
+              "$ref": "#/components/schemas/UnpaidByCurrency"
+            },
+            "title": "Unpaid",
+            "type": "array"
+          }
+        },
+        "required": [
+          "as_of",
+          "documents",
+          "unpaid",
+          "open_invoices",
+          "overdue_invoices",
+          "flagged_invoices",
+          "pending_reminders",
+          "llm_cost_by_day",
+          "llm_costs_recorded"
+        ],
+        "title": "Overview",
+        "type": "object"
+      },
       "ReminderOut": {
         "properties": {
           "created_at": {
@@ -655,6 +771,39 @@
           "verdict"
         ],
         "title": "ReviewIn",
+        "type": "object"
+      },
+      "UnpaidByCurrency": {
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "open_invoices": {
+            "title": "Open Invoices",
+            "type": "integer"
+          },
+          "outstanding": {
+            "title": "Outstanding",
+            "type": "string"
+          },
+          "overdue": {
+            "title": "Overdue",
+            "type": "string"
+          },
+          "overdue_invoices": {
+            "title": "Overdue Invoices",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "currency",
+          "open_invoices",
+          "outstanding",
+          "overdue_invoices",
+          "overdue"
+        ],
+        "title": "UnpaidByCurrency",
         "type": "object"
       },
       "UploadOut": {
@@ -1383,6 +1532,69 @@
         "summary": "Reject",
         "tags": [
           "reminders"
+        ]
+      }
+    },
+    "/stats/overview": {
+      "get": {
+        "description": "Documents by status, unpaid and overdue totals per currency, unreviewed anomaly\nflags, reminders awaiting approval, and LLM cost per day.",
+        "operationId": "overview_stats_overview_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "as_of",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "As Of"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Overview",
+        "tags": [
+          "stats"
         ]
       }
     }

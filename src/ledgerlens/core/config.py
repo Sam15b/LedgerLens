@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     configs_dir: Path | None = None  # defaults to <repo>/configs, then ./configs
     health_check_timeout_s: float = 3.0
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    """Comma-separated browser origins allowed to call the API (the dashboard)."""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
 
     # PostgreSQL
     database_url: str = "postgresql+psycopg://ledger:ledger@localhost:5432/ledgerlens"

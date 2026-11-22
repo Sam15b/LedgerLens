@@ -218,6 +218,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/stats/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Overview
+         * @description Documents by status, unpaid and overdue totals per currency, unreviewed anomaly
+         *     flags, reminders awaiting approval, and LLM cost per day.
+         */
+        get: operations["overview_stats_overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -281,6 +302,18 @@ export interface components {
             /** Thread Id */
             thread_id?: string | null;
         };
+        /** DailyCost */
+        DailyCost: {
+            /** Calls */
+            calls: number;
+            /** Cost Usd */
+            cost_usd: number;
+            /**
+             * Day
+             * Format: date
+             */
+            day: string;
+        };
         /** DecisionOut */
         DecisionOut: {
             /** Note */
@@ -315,6 +348,31 @@ export interface components {
          * @enum {string}
          */
         DocType: "invoice" | "receipt" | "purchase_order" | "payment" | "contract" | "unknown";
+        /** DocumentCounts */
+        DocumentCounts: {
+            /**
+             * Failed
+             * @default 0
+             */
+            failed: number;
+            /**
+             * Processing
+             * @default 0
+             */
+            processing: number;
+            /**
+             * Queued
+             * @default 0
+             */
+            queued: number;
+            /**
+             * Ready
+             * @default 0
+             */
+            ready: number;
+            /** Total */
+            total: number;
+        };
         /** DocumentDetail */
         DocumentDetail: {
             /**
@@ -403,6 +461,29 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** Overview */
+        Overview: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            documents: components["schemas"]["DocumentCounts"];
+            /** Flagged Invoices */
+            flagged_invoices: number;
+            /** Llm Cost By Day */
+            llm_cost_by_day: components["schemas"]["DailyCost"][];
+            /** Llm Costs Recorded */
+            llm_costs_recorded: boolean;
+            /** Open Invoices */
+            open_invoices: number;
+            /** Overdue Invoices */
+            overdue_invoices: number;
+            /** Pending Reminders */
+            pending_reminders: number;
+            /** Unpaid */
+            unpaid: components["schemas"]["UnpaidByCurrency"][];
+        };
         /** ReminderOut */
         ReminderOut: {
             /**
@@ -434,6 +515,19 @@ export interface components {
              * @enum {string}
              */
             verdict: "confirmed" | "false_positive";
+        };
+        /** UnpaidByCurrency */
+        UnpaidByCurrency: {
+            /** Currency */
+            currency: string;
+            /** Open Invoices */
+            open_invoices: number;
+            /** Outstanding */
+            outstanding: string;
+            /** Overdue */
+            overdue: string;
+            /** Overdue Invoices */
+            overdue_invoices: number;
         };
         /** UploadOut */
         UploadOut: {
@@ -829,6 +923,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DecisionOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    overview_stats_overview_get: {
+        parameters: {
+            query?: {
+                as_of?: string | null;
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Overview"];
                 };
             };
             /** @description Validation Error */
