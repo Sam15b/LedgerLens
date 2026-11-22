@@ -50,7 +50,7 @@ from ledgerlens.llm.types import (
     Usage,
 )
 from ledgerlens.observability.cost import CostLedger, LLMCallRecord
-from ledgerlens.observability.tracing import Span, get_tracer, span
+from ledgerlens.observability.tracing import Span, get_tracer, llm_attributes, span
 
 logger = logging.getLogger(__name__)
 
@@ -410,9 +410,23 @@ def _span_inputs(messages: list[Message]) -> dict[str, Any]:
 
 
 def _trace_response(traced: Span, alias: str, response: LLMResponse) -> None:
-    """What the call returned, on its span."""
+    """What the call returned, on its span: provider, model, tokens, cost and latency (also
+    added up on the spans above it)."""
     traced.set_attributes(
-        {"llm.alias": alias, "llm.provider": response.provider, "llm.model": response.model}
+        llm_attributes(
+            alias=alias,
+            provider=response.provider,
+            model=response.model,
+            tokens_in=response.usage.tokens_in,
+            tokens_out=response.usage.tokens_out,
+            cost_usd=response.cost_usd,
+            latency_ms=response.latency_ms,
+        )
+    )
+    traced.add_usage(
+        tokens_in=response.usage.tokens_in,
+        tokens_out=response.usage.tokens_out,
+        cost_usd=response.cost_usd,
     )
     traced.set_outputs(text=response.text)
 

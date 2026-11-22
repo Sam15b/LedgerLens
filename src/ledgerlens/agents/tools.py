@@ -28,7 +28,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from ledgerlens.core.config import MCPConnectionConfig, get_config
-from ledgerlens.observability.tracing import span
+from ledgerlens.observability.tracing import retrieval_attributes, span
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,22 @@ def _text(content: Any) -> str:
 
 
 def tool_attributes(outcome: ToolOutcome) -> dict[str, Any]:
-    """Span attributes for a tool call."""
-    return {"tool.ok": outcome.ok}
+    """Span attributes for a tool call; a search also gets the retriever variant and the
+    chunk ids it returned (``search_documents`` hits carry them)."""
+    attributes: dict[str, Any] = {"tool.ok": outcome.ok}
+    data = outcome.data or {}
+    hits = data.get("hits")
+    if isinstance(hits, list):
+        ids = [
+            str(hit.get("chunk_id") or hit.get("document_id", ""))
+            for hit in hits
+            if isinstance(hit, dict)
+        ]
+        k = outcome.args.get("k")
+        attributes |= retrieval_attributes(
+            str(data.get("retriever") or "unknown"), ids, k=k if isinstance(k, int) else None
+        )
+    return attributes
 
 
 class ToolBox:

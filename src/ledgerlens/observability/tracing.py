@@ -16,6 +16,16 @@ Finished spans go to one backend (``TRACING_BACKEND``):
 * ``jsonl`` -- one JSON line per span in ``TRACING_PATH``, for a machine with no LangSmith
   key; ``python -m ledgerlens.observability.tracing show`` prints the last trace as a tree.
 
+Attributes follow one naming scheme, so a trace reads the same in any backend:
+
+* LLM calls (:func:`llm_attributes`): ``llm.alias``, ``llm.provider``, ``llm.model``,
+  ``llm.tokens_in``, ``llm.tokens_out``, ``llm.cost_usd``, ``llm.latency_ms``. Each call's
+  tokens and cost also add up on every span above it (``usage.tokens_in``,
+  ``usage.tokens_out``, ``usage.cost_usd``, ``usage.llm_calls``), so the ``chat`` span
+  holds what the whole request cost;
+* retrieval (:func:`retrieval_attributes`): ``retriever.variant`` (``r4_graphrag``, ...),
+  ``retriever.k`` and ``retriever.top_k_ids``, the chunk ids returned, best first.
+
 With no backend the tracer is off: :func:`span` still runs the code inside it and hands
 out a no-op span, so callers never check whether tracing is on. A backend error is logged
 and dropped; it never reaches the traced code.
@@ -221,16 +231,72 @@ class LangSmithBackend:
     def end(self, record: SpanRecord, handle: Any) -> None:
         if handle is None:
             return
+        metadata = dict(record.attributes)
+        outputs = dict(record.outputs)
+        if record.kind == "llm":  # LangSmith's own fields, for its token and cost columns
+            metadata.setdefault("ls_provider", record.attributes.get("llm.provider"))
+            metadata.setdefault("ls_model_name", record.attributes.get("llm.model"))
+            outputs["usage_metadata"] = langsmith_usage(record.attributes)
         handle.end(
-            outputs=record.outputs,
+            outputs=outputs,
             error=record.error,
             end_time=record.end_time,
-            metadata=record.attributes,
+            metadata=metadata,
         )
         handle.post()
 
     def flush(self) -> None:
         self.client.flush()
+
+
+def langsmith_usage(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    """LangSmith ``usage_metadata`` from an LLM span's attributes."""
+    tokens_in = int(attributes.get("llm.tokens_in") or 0)
+    tokens_out = int(attributes.get("llm.tokens_out") or 0)
+    usage: dict[str, Any] = {
+        "input_tokens": tokens_in,
+        "output_tokens": tokens_out,
+        "total_tokens": tokens_in + tokens_out,
+    }
+    if attributes.get("llm.cost_usd") is not None:
+        usage["total_cost"] = attributes["llm.cost_usd"]
+    return usage
+
+
+# --------------------------------------------------------------------------- attributes
+
+
+def llm_attributes(
+    *,
+    alias: str,
+    provider: str,
+    model: str,
+    tokens_in: int,
+    tokens_out: int,
+    cost_usd: float | None,
+    latency_ms: float,
+) -> dict[str, Any]:
+    """Span attributes for one LLM call (``cost_usd`` ``None``: the model has no price)."""
+    return {
+        "llm.alias": alias,
+        "llm.provider": provider,
+        "llm.model": model,
+        "llm.tokens_in": tokens_in,
+        "llm.tokens_out": tokens_out,
+        "llm.cost_usd": cost_usd,
+        "llm.latency_ms": latency_ms,
+    }
+
+
+def retrieval_attributes(
+    variant: str, ids: Sequence[str], *, k: int | None = None
+) -> dict[str, Any]:
+    """Span attributes for one retrieval: the variant and the ids it returned, best first."""
+    return {
+        "retriever.variant": variant,
+        "retriever.k": k if k is not None else len(ids),
+        "retriever.top_k_ids": list(ids),
+    }
 
 
 # --------------------------------------------------------------------------- spans
@@ -267,6 +333,19 @@ class Span:
     def record_error(self, exc: BaseException | str) -> None:
         self.record.error = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
 
+    def add_usage(self, *, tokens_in: int, tokens_out: int, cost_usd: float | None) -> None:
+        """Count one LLM call's tokens and cost on this span and every span above it."""
+        with self.tracer.lock:
+            node: Span | None = self
+            while node is not None:
+                attrs = node.record.attributes
+                attrs["usage.llm_calls"] = attrs.get("usage.llm_calls", 0) + 1
+                attrs["usage.tokens_in"] = attrs.get("usage.tokens_in", 0) + tokens_in
+                attrs["usage.tokens_out"] = attrs.get("usage.tokens_out", 0) + tokens_out
+                cost = attrs.get("usage.cost_usd", 0.0) + (cost_usd or 0.0)
+                attrs["usage.cost_usd"] = round(cost, 8)
+                node = node.parent
+
     def end(self) -> None:
         if self._ended:
             return
@@ -296,6 +375,9 @@ class NoopSpan(Span):
     def record_error(self, exc: BaseException | str) -> None:
         pass
 
+    def add_usage(self, *, tokens_in: int, tokens_out: int, cost_usd: float | None) -> None:
+        pass
+
     def end(self) -> None:
         pass
 
@@ -315,6 +397,7 @@ class Tracer:
 
     def __init__(self, backend: TraceBackend | None = None) -> None:
         self.backend = backend
+        self.lock = threading.Lock()
         self._warned = False
 
     @property
