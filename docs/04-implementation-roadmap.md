@@ -143,11 +143,11 @@ via API; MCP server also works from an external MCP client (e.g. Claude Desktop 
 
 ## Phase 7 — Evaluation suite (week 10–11) · [guide](layers/09-evaluation.md)
 
-- [ ] Golden set expanded to ~200 Qs across categories
-- [ ] RAGAS: faithfulness, answer relevancy, context precision/recall
-- [ ] recall@k, extraction F1, p95 latency, cost per document
-- [ ] LangSmith or Phoenix tracing wired to every agent run
-- [ ] `eval.yml` GitHub Action with regression thresholds
+- [x] Golden set expanded to ~200 Qs across categories
+- [x] RAGAS: faithfulness, answer relevancy, context precision/recall (scores need an LLM key)
+- [x] recall@k, extraction F1, p95 latency, cost per document
+- [x] LangSmith or Phoenix tracing wired to every agent run
+- [x] `eval.yml` GitHub Action with regression thresholds (live once the eval-store secrets exist)
 
 **Exit criteria:** `make eval` produces a dated report; CI fails if faithfulness or recall drop
 beyond threshold.
