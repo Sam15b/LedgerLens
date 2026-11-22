@@ -83,3 +83,34 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose down --volumes
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json  # the pnpm version pinned in packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: API types match web/openapi.json
+        run: |
+          pnpm gen:api
+          git diff --exit-code -- lib/api-schema.ts || {
+            echo "::error::lib/api-schema.ts is stale: run pnpm --dir web gen:api"
+            exit 1
+          }
+      - name: Lint
+        run: pnpm lint
+      - name: Type check
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build

@@ -13,6 +13,9 @@ for HTTP errors (``code`` from the status), request validation (``invalid_reques
 the field ``details``) and anything unexpected (``internal_error``, 500, logged with its
 traceback; the message does not leak internals).
 
+Browsers may call it from ``CORS_ORIGINS`` (the dashboard, ``http://localhost:3000`` by
+default); the request id and chat thread id headers are exposed to them.
+
 Run it on a selector event loop (``make api`` does)::
 
     uvicorn ledgerlens.api.main:app --port 8000 --loop asyncio:SelectorEventLoop
@@ -33,6 +36,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -40,7 +44,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
-from ledgerlens.api.routers import anomalies, chat, documents, health, reminders
+from ledgerlens.api.routers import anomalies, chat, documents, health, reminders, stats
 from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import configure_logging, reset_request_id, set_request_id
 from ledgerlens.observability.tracing import get_tracer
@@ -165,6 +169,13 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     )
     app.state.agents = agents or AgentProvider()
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(  # added last, so it is outermost: 4xx error bodies get CORS headers too
+        CORSMiddleware,
+        allow_origins=get_settings().cors_origin_list,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", REQUEST_ID_HEADER],
+        expose_headers=[REQUEST_ID_HEADER, "X-Thread-Id"],
+    )
     app.add_exception_handler(StarletteHTTPException, http_error)
     app.add_exception_handler(RequestValidationError, validation_error)
     app.add_exception_handler(Exception, unexpected_error)
@@ -173,6 +184,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.include_router(reminders.router)
     app.include_router(documents.router)
     app.include_router(anomalies.router)
+    app.include_router(stats.router)
     return app
 
 
