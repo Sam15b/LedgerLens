@@ -88,10 +88,32 @@ The CI subset writes the same files with a `_ci` suffix. The metrics also go to
 use `eval/benchmark_retrieval.py --report`.
 
 ## CI regression gate (`.github/workflows/eval.yml`)
-- Triggers on PRs touching `retrieval/`, `agents/`, `prompts/`, `configs/models.yaml`.
-- Runs the CI subset against the `eval` Pinecone namespace.
-- Fails if faithfulness or recall@5 drops by > 3 points vs `main`'s last report.
-- Posts the results table as a PR comment.
+- Triggers on PRs touching `retrieval/`, `agents/` (prompts included), `configs/models.yaml`,
+  `configs/retrieval.yaml`, `configs/eval.yaml` or the runner.
+- Runs the CI subset (`eval.runner --set ci`) against the `eval` Pinecone namespace.
+- `eval/regression.py` compares it with the newest `eval/reports/<date>/summary_ci.json`
+  committed on the base branch, and fails if a gated metric (`gate_metrics`: faithfulness,
+  recall@5) drops by more than `regression_threshold_pts` (3) points, or if `main` measured
+  it and the PR's run did not. Other scores, latency and cost are shown, not gated.
+- Posts the results table as a PR comment, updated on every push.
+
+The baseline moves only when a new report is committed to `main`: commit
+`eval/reports/<date>/*_ci.*` from `make eval-ci` after a change that is meant to move the
+numbers.
+
+Setup (repository secrets): the gate needs hosted copies of the evaluation stores, because
+the golden set's `relevant_document_ids` are ids in those stores.
+
+| Secret | What |
+|--------|------|
+| `EVAL_DATABASE_URL` | Postgres with the evaluation ledger (`pg_dump` of the dev database) |
+| `EVAL_NEO4J_URI`, `EVAL_NEO4J_USER`, `EVAL_NEO4J_PASSWORD` | the graph: `python scripts/rebuild_graph.py` from that Postgres |
+| `PINECONE_API_KEY` | vectors in the `eval` namespace: `PINECONE_NAMESPACE=eval python scripts/reindex_pinecone.py` against that Postgres |
+| `OPENAI_API_KEY` (and/or `GOOGLE_API_KEY`, `MISTRAL_API_KEY`) | answers and the RAGAS judge; without one, faithfulness is not measured |
+
+Without the store secrets the job posts "Eval gate skipped" and passes. To check a change
+locally the same way: `make eval-ci`, then
+`python -m eval.regression --current eval/reports/<date>/summary_ci.json --base-ref origin/main`.
 
 ## Turning results into resume bullets
 Each bullet should cite a measured number from a report, e.g.:
