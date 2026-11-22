@@ -9,7 +9,8 @@ attributes and an error, if it failed. The span opened inside another becomes it
 (through a context variable, so it follows ``await`` and ``asyncio.to_thread``), which
 gives the tree ``chat -> router -> qa -> tool search_documents -> llm smart``.
 
-Finished spans go to one backend (``TRACING_BACKEND``):
+Tracing is off unless ``TRACING_ENABLED=true``. Then finished spans go to one backend
+(``TRACING_BACKEND``):
 
 * ``langsmith`` -- LangSmith runs in project ``LANGSMITH_PROJECT`` (needs
   ``LANGSMITH_API_KEY``); the tree is in the LangSmith UI;
@@ -26,9 +27,13 @@ Attributes follow one naming scheme, so a trace reads the same in any backend:
 * retrieval (:func:`retrieval_attributes`): ``retriever.variant`` (``r4_graphrag``, ...),
   ``retriever.k`` and ``retriever.top_k_ids``, the chunk ids returned, best first.
 
-With no backend the tracer is off: :func:`span` still runs the code inside it and hands
-out a no-op span, so callers never check whether tracing is on. A backend error is logged
-and dropped; it never reaches the traced code.
+``TRACING_SAMPLE_RATE`` (0-1, default 1) keeps that share of traces: the decision is made
+once, for the root span, and every span below it follows, so a trace is whole or absent.
+
+Tracing off -- disabled, not sampled, or a backend that cannot start (no LangSmith key,
+``langsmith`` not installed) -- never breaks a run: :func:`span` still runs the code inside
+it and hands out a no-op span, so callers never check whether tracing is on. A backend
+error while tracing is logged and dropped; it never reaches the traced code.
 """
 
 from __future__ import annotations
@@ -36,9 +41,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import threading
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -393,10 +399,24 @@ def current_span() -> Span | None:
 
 
 class Tracer:
-    """Makes spans and hands finished ones to the backend (``None``: tracing off)."""
+    """Makes spans and hands finished ones to the backend (``None``: tracing off).
 
-    def __init__(self, backend: TraceBackend | None = None) -> None:
+    ``sample_rate`` is the share of traces kept, decided at each root span (``rng`` draws
+    from [0, 1)).
+    """
+
+    def __init__(
+        self,
+        backend: TraceBackend | None = None,
+        *,
+        sample_rate: float = 1.0,
+        rng: Callable[[], float] = random.random,
+    ) -> None:
+        if not 0.0 <= sample_rate <= 1.0:
+            raise ValueError(f"sample_rate must be between 0 and 1, not {sample_rate}")
         self.backend = backend
+        self.sample_rate = sample_rate
+        self.rng = rng
         self.lock = threading.Lock()
         self._warned = False
 
@@ -419,6 +439,8 @@ class Tracer:
             return NOOP_SPAN
         parent = parent if parent is not None else current_span()
         if parent is not None and not parent.recording:
+            return NOOP_SPAN  # the trace was not sampled: nothing under it is either
+        if parent is None and not self._sampled():
             return NOOP_SPAN
         span_id = str(uuid.uuid4())
         record = SpanRecord(
@@ -434,6 +456,9 @@ class Tracer:
         parent_handle = parent.handle if parent is not None else None
         handle = self._safely("start", self.backend.start, record, parent_handle)
         return Span(self, record, parent, handle)
+
+    def _sampled(self) -> bool:
+        return self.sample_rate >= 1.0 or (self.sample_rate > 0.0 and self.rng() < self.sample_rate)
 
     def export(self, span: Span) -> None:
         if self.backend is not None:
@@ -463,16 +488,33 @@ class Tracer:
 
 
 def build_tracer(settings: Settings | None = None) -> Tracer:
-    """The tracer the settings ask for: ``jsonl``, or ``langsmith`` when a LangSmith key
-    is set; otherwise tracing is off."""
+    """The tracer the settings ask for. Off unless ``TRACING_ENABLED``; a backend that
+    cannot start is logged and leaves tracing off rather than failing the caller."""
     settings = settings or get_settings()
-    if settings.tracing_backend == "jsonl":
-        return Tracer(JsonlBackend(repo_path(settings.tracing_path)))
-    if settings.langsmith_api_key:
-        return Tracer(
-            LangSmithBackend(settings.langsmith_project, api_key=settings.langsmith_api_key)
+    if not settings.tracing_enabled:
+        return Tracer()
+    try:
+        backend = _backend(settings)
+    except Exception as exc:
+        logger.warning(
+            "tracing is off: the %s backend failed to start: %s", settings.tracing_backend, exc
         )
-    return Tracer()
+        return Tracer()
+    if backend is None:
+        return Tracer()
+    logger.info(
+        "tracing to %s (sample rate %.2f)", settings.tracing_backend, settings.tracing_sample_rate
+    )
+    return Tracer(backend, sample_rate=settings.tracing_sample_rate)
+
+
+def _backend(settings: Settings) -> TraceBackend | None:
+    if settings.tracing_backend == "jsonl":
+        return JsonlBackend(repo_path(settings.tracing_path))
+    if not settings.langsmith_api_key:
+        logger.warning("tracing is off: TRACING_BACKEND=langsmith needs LANGSMITH_API_KEY")
+        return None
+    return LangSmithBackend(settings.langsmith_project, api_key=settings.langsmith_api_key)
 
 
 _tracer: Tracer | None = None
