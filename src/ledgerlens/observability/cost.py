@@ -12,6 +12,11 @@ comparison) and forwards each one to its sinks:
   ``LLM_COST_DB=true`` -- the record the dashboards and cost reports query.
 
 A failing sink is logged and skipped: recording cost must never break the call it describes.
+
+The request id says what a call was for: an API request's id, ``doc:<document id>`` for
+the classification and extraction of one ingested document (:func:`document_request_id`),
+or ``eval:<run>:<question>`` for an evaluation question -- which is how
+``eval/latency_cost.py`` reports cost per query and per document.
 """
 
 from __future__ import annotations
@@ -36,6 +41,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RECORDS = 10_000
+
+DOCUMENT_REQUEST_PREFIX = "doc:"
+
+
+def document_request_id(document_id: str) -> str:
+    """The request id LLM calls made while ingesting ``document_id`` are recorded under."""
+    return f"{DOCUMENT_REQUEST_PREFIX}{document_id}"
 
 
 class LLMCallRecord(BaseModel):

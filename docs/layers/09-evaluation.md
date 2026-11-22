@@ -58,21 +58,34 @@ Use **LangSmith** *or* **Arize Phoenix** (OpenTelemetry-based, self-hostable):
 ## Running
 
 ```bash
-make eval                       # full suite → eval/reports/2026-11-02/
-make eval-ci                    # 40-question subset, used in GitHub Actions
-python eval/benchmark_retrieval.py --variants R1,R3,R4,R5 --k 5
+make eval                       # full suite → eval/reports/<date>/summary.md
+make eval-ci                    # 40-question subset → summary_ci.md, used in GitHub Actions
+make eval EVAL_ARGS="--no-answers --limit 20"   # retrieval only, no LLM calls
+python -m eval.benchmark_retrieval --variants R1,R3,R4,R5 --k 5
+python -m eval.latency_cost --llm-calls db      # cost per query / per document from llm_calls
 ```
 
-## Report format (`eval/reports/<date>/summary.md`)
+`eval/runner.py` retrieves every golden question with the default retriever, answers it
+with the `smart` alias and scores the answers with RAGAS (`judge` alias). A one-token call
+checks the answer model first; with no working provider, answers and RAGAS are skipped
+and the report says why, so retrieval metrics and latency still come out. Each run is
+stored in `eval_runs` with the git SHA and a config hash (SHA-256 over `configs/*.yaml`,
+the agent prompts, the golden set and the run options). Each question's LLM calls run
+under the request id `eval:<run>:<question>`, and ingestion's under `doc:<document id>`,
+which is how cost per query and per document are read from `llm_calls`.
 
-```markdown
-| Retriever | recall@5 | faithfulness | answer correctness | p95 ms | $/query |
-|-----------|---------:|-------------:|-------------------:|-------:|--------:|
-| R1 vector |          |              |                    |        |         |
-| R4 GraphRAG |        |              |                    |        |         |
-```
+## Report format (`eval/reports/<date>/`)
 
-Also stored as JSON in `eval_runs` (Postgres) for the dashboard trend chart.
+| File | Holds |
+|------|-------|
+| `summary.md` | setup (retriever, k, git SHA, config hash), headline metrics vs `configs/eval.yaml` targets, recall@5 per category, p50/p95 latency, cost per query, misses |
+| `summary.json` | the same metrics and provenance, read by the CI gate |
+| `latency_cost.md` | latency per step and retrieval stage; cost per query and per ingested document |
+| `results.jsonl` | one line per question (retrieved documents, scores, answer, timings) |
+
+The CI subset writes the same files with a `_ci` suffix. The metrics also go to
+`eval_runs` (Postgres) for the dashboard trend chart. To compare variants side by side,
+use `eval/benchmark_retrieval.py --report`.
 
 ## CI regression gate (`.github/workflows/eval.yml`)
 - Triggers on PRs touching `retrieval/`, `agents/`, `prompts/`, `configs/models.yaml`.
