@@ -100,7 +100,7 @@ def check_score(
     elif baseline is None:
         status = "no baseline"
     else:
-        delta = (current - baseline) * 100
+        delta = round((current - baseline) * 100, 6)  # 0.87 - 0.90 is not exactly -0.03
         if delta < -threshold_pts:
             status = "regressed"
         elif delta > threshold_pts:
