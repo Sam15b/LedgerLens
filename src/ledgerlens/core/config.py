@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     langsmith_api_key: str = ""
     langsmith_project: str = "ledgerlens"
     phoenix_collector_endpoint: str = ""
+    tracing_backend: Literal["langsmith", "jsonl"] = "langsmith"
+    """Where spans go (``observability/tracing.py``): LangSmith runs, or JSON lines."""
+    tracing_path: Path = Path("data/interim/traces.jsonl")
+    """The ``jsonl`` backend's file, relative to the repo root."""
 
 
 @lru_cache
