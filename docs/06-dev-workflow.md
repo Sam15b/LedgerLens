@@ -65,6 +65,11 @@ EMBEDDING_DIM=768
 LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=ledgerlens
 PHOENIX_COLLECTOR_ENDPOINT=
+# Traces of every /chat run (router -> agents -> tools -> LLM calls); off by default.
+TRACING_ENABLED=false
+TRACING_BACKEND=langsmith        # or jsonl: spans in TRACING_PATH, no LangSmith key needed
+TRACING_PATH=data/interim/traces.jsonl
+TRACING_SAMPLE_RATE=1.0          # share of traces kept
 ```
 
 ## Makefile targets

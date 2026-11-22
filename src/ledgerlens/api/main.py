@@ -43,6 +43,7 @@ from ledgerlens.api.agent import AgentProvider
 from ledgerlens.api.routers import anomalies, chat, documents, health, reminders
 from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import configure_logging, reset_request_id, set_request_id
+from ledgerlens.observability.tracing import get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,7 @@ async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     await app.state.agents.aclose()
+    get_tracer().flush()  # spans still queued for the tracing backend
 
 
 def create_app(agents: AgentProvider | None = None) -> FastAPI:

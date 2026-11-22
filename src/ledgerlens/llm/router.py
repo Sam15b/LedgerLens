@@ -17,7 +17,8 @@ only until the first chunk arrives; after that a failure is raised, because anot
 cannot continue a half-written answer.
 
 Every successful call is priced from ``pricing_usd_per_1m_tokens`` and logged with
-provider, model, tokens, cost and latency. See docs/layers/05-model-router.md.
+provider, model, tokens, cost and latency. Each call (fallbacks included) is one ``llm``
+span in the current trace. See docs/layers/05-model-router.md.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from ledgerlens.llm.types import (
     Usage,
 )
 from ledgerlens.observability.cost import CostLedger, LLMCallRecord
+from ledgerlens.observability.tracing import Span, get_tracer, llm_attributes, span
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,30 @@ class LLMClient:
         schema_name: str = "response",
     ) -> LLMResponse:
         """Answer with the first model behind ``model`` (an alias or ``provider/model``)."""
+        with span(f"llm {model}", kind="llm", inputs=_span_inputs(messages)) as traced:
+            response = self._complete(
+                messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                json_schema=json_schema,
+                schema_name=schema_name,
+            )
+            _trace_response(traced, model, response)
+            return response
+
+    def _complete(
+        self,
+        messages: list[Message],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int | None,
+        json_mode: bool,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+    ) -> LLMResponse:
         refs = self.config.resolve(model)
         attempts: list[tuple[str, LLMError]] = []
         for index, ref in enumerate(refs):
@@ -154,6 +180,32 @@ class LLMClient:
         completed one, and the full :class:`LLMResponse` is the generator's return value
         (``response = yield from client.stream(...)``).
         """
+        # A generator must not change the caller's current span, so this one is not made
+        # current: nothing nests under a streamed call anyway.
+        traced = get_tracer().start_span(
+            f"llm {model}",
+            kind="llm",
+            inputs=_span_inputs(messages),
+            attributes={"llm.streamed": True},
+        )
+        try:
+            response = yield from self._stream(
+                messages, model=model, temperature=temperature, max_tokens=max_tokens
+            )
+            _trace_response(traced, model, response)
+            return response
+        except GeneratorExit:
+            traced.set("cancelled", True)
+            raise
+        except BaseException as exc:
+            traced.record_error(exc)
+            raise
+        finally:
+            traced.end()
+
+    def _stream(
+        self, messages: list[Message], *, model: str, temperature: float, max_tokens: int | None
+    ) -> Generator[str, None, LLMResponse]:
         refs = self.config.resolve(model)
         attempts: list[tuple[str, LLMError]] = []
         for index, ref in enumerate(refs):
@@ -348,6 +400,35 @@ class LLMClient:
             action,
             extra={"llm_alias": alias, "llm_model_ref": ref, "error_type": type(exc).__name__},
         )
+
+
+# --------------------------------------------------------------------------- tracing
+
+
+def _span_inputs(messages: list[Message]) -> dict[str, Any]:
+    return {"messages": [{"role": m.role, "content": m.content} for m in messages]}
+
+
+def _trace_response(traced: Span, alias: str, response: LLMResponse) -> None:
+    """What the call returned, on its span: provider, model, tokens, cost and latency (also
+    added up on the spans above it)."""
+    traced.set_attributes(
+        llm_attributes(
+            alias=alias,
+            provider=response.provider,
+            model=response.model,
+            tokens_in=response.usage.tokens_in,
+            tokens_out=response.usage.tokens_out,
+            cost_usd=response.cost_usd,
+            latency_ms=response.latency_ms,
+        )
+    )
+    traced.add_usage(
+        tokens_in=response.usage.tokens_in,
+        tokens_out=response.usage.tokens_out,
+        cost_usd=response.cost_usd,
+    )
+    traced.set_outputs(text=response.text)
 
 
 # --------------------------------------------------------------------------- streaming

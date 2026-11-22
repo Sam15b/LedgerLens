@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 from ledgerlens.core.schemas import DocType
 from ledgerlens.mcp_server.services import Services
 from ledgerlens.mcp_server.tools import READ_ONLY, in_thread, jsonable
+from ledgerlens.observability.tracing import retrieval_attributes, span
 from ledgerlens.retrieval import QueryFilters
 
 SearchDocType = Literal["invoice", "purchase_order", "contract", "payment", "receipt"]
@@ -30,6 +31,8 @@ MAX_K = 20
 class SearchHit(BaseModel):
     """One retrieved chunk."""
 
+    chunk_id: str = ""
+    """The chunk's id, ``{document_id}#c{n}``."""
     citation: str
     """Cite it as this tag: ``doc:<document number>`` (or ``doc:<id prefix>``)."""
     document_id: str
@@ -43,6 +46,8 @@ class SearchHit(BaseModel):
 
 class SearchResult(BaseModel):
     query: str
+    retriever: str = ""
+    """The retriever that answered (``r4_graphrag``, ...)."""
     filters: dict[str, Any] = Field(default_factory=dict)
     """The filters applied (vendor names resolved to ids)."""
     hits: list[SearchHit] = Field(default_factory=list)
@@ -88,12 +93,18 @@ def search_documents(
         )
     except ValidationError as exc:
         raise ToolError(f"bad filters: {exc.errors()[0]['msg']}") from exc
-    result = services.ready_retriever().retrieve(query, filters=filters, k=k)
+    with span("retrieve", kind="retriever", inputs={"query": query, "k": k}) as traced:
+        result = services.ready_retriever().retrieve(query, filters=filters, k=k)
+        traced.set_attributes(
+            retrieval_attributes(result.retriever, [c.id for c in result.chunks], k=k)
+        )
     return SearchResult(
         query=query,
+        retriever=result.retriever,
         filters=jsonable(filters.model_dump(exclude_defaults=True)),
         hits=[
             SearchHit(
+                chunk_id=chunk.id,
                 citation=chunk.citation,
                 document_id=chunk.document_id,
                 doc_type=chunk.doc_type,
