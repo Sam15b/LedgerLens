@@ -115,13 +115,22 @@ plus synthetic linked invoice/PO/payment data.
 
 ## Results
 
-Metrics will be filled in from `eval/reports/` as phases complete.
+Measured numbers only: each one links to the report it comes from. "Not measured" means
+the run that would produce it has not happened yet, and the row says why.
 
-| Metric | Target | Measured |
-|--------|--------|----------|
-| Faithfulness (RAGAS) | ≥ 0.85 | — |
-| Context recall@5 | ≥ 0.90 | — |
-| Extraction F1 (SROIE) | ≥ 0.90 | — |
-| Anomaly PR-AUC | ≥ 0.85 | — |
-| p95 query latency | < 4 s | — |
-| Cost per document | < $0.01 | — |
+| Metric | Target | Measured | Source |
+|--------|--------|----------|--------|
+| Faithfulness (RAGAS) | ≥ 0.85 | not measured: no working LLM key for answers and the judge yet | [`eval/run_ragas.py`](eval/run_ragas.py) |
+| Retrieval recall@5 (200 questions, R4 GraphRAG) | ≥ 0.90 | **0.954** (MRR 0.929) | [summary.md](eval/reports/2026-11-22/summary.md) |
+| Extraction F1 (SROIE) | ≥ 0.90 | not measured on SROIE (not downloaded). The rules baseline scores micro-F1 0.601 on a 130-document held-out set (CORD + synthetic); the fine-tuned model has not been evaluated | [finetune.md](eval/reports/2026-11-18/finetune.md) |
+| Anomaly PR-AUC (held-out test split) | ≥ 0.85 | **0.830** (rules + autoencoder; rules alone 0.661) | [anomaly.md](eval/reports/2026-11-20/anomaly.md) |
+| p95 query latency | < 4 s | retrieval alone: **13.5 s** p95, 6.3 s p50 (CPU cross-encoder rerank); answer step not measured | [latency_cost.md](eval/reports/2026-11-22/latency_cost.md) |
+| Cost per document | < $0.01 | not measured: the dev documents were ingested with the rules extractor ($0, no LLM calls) | [latency_cost.md](eval/reports/2026-11-22/latency_cost.md) |
+
+Retrieval recall@5 by question category, same run: lookup 0.980, clause 0.971,
+multi-hop 1.000, reconciliation 1.000, aggregation 0.793. Before R4 anchored questions
+on the documents they name, multi-hop was 0.833, reconciliation 0.725 and overall 0.882
+([summary_before_fix.md](eval/reports/2026-11-22/summary_before_fix.md)). Every run
+records its git SHA and config hash; `make eval` reproduces it on the local stores, and
+pull requests that touch retrieval or the agents are gated on the 40-question CI subset
+([09-evaluation.md](docs/layers/09-evaluation.md)).

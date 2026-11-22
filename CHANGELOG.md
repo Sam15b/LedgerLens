@@ -8,6 +8,86 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-22
+
+Phase 7 — Evaluation suite. `make eval` gives a dated report, and pull requests that touch
+retrieval, the agents or the model routing are compared with `main`'s last report.
+
+On the 200-question golden set, the default retriever (R4 GraphRAG) reaches **recall@5
+0.954** and MRR 0.929 (`eval/reports/2026-11-22/summary.md`). The fix in this release
+lifted recall@5 from 0.882:
+
+- multi-hop 0.833 → 1.000;
+- reconciliation 0.725 → 1.000.
+
+Answer quality (RAGAS) has not been measured yet: there is no working LLM key here.
+
+### Added
+
+- **Golden set**: 200 questions (`data/golden/golden_set.jsonl`), made up of:
+  - 155 synthetic questions, built by shape generators and checked against the graph
+    (`eval/golden_set/verify.py`), with a review CLI;
+  - 25 CORD receipts and 20 CUAD contract clauses;
+  - a stratified 40-question CI subset (`golden_ci.jsonl`).
+- **RAGAS** (`eval/run_ragas.py`): faithfulness, answer relevancy, context precision and
+  recall, and answer correctness. The judge runs through the router's `judge` alias, and
+  its calls are cached by input hash.
+- **Tracing** (`observability/tracing.py`): every `/chat` request is one trace.
+  - The tree is `chat → router → agent → tool calls → LLM calls`.
+  - Spans carry the provider, model, tokens, cost (added up on every span above), the
+    retriever variant and the top-k chunk ids.
+  - Traces go to LangSmith, or to a local JSONL file shown as a tree by
+    `python -m ledgerlens.observability.tracing show`.
+  - `TRACING_ENABLED` turns tracing on, and `TRACING_SAMPLE_RATE` samples whole traces.
+    A broken backend never breaks a run.
+- **Evaluation runner** (`eval/runner.py`, `make eval`, `make eval-ci`):
+  - each question goes through retrieval, an answer and RAGAS;
+  - a one-token check of the answer model comes first, so a missing key skips the
+    answers and RAGAS with the reason instead of failing 200 questions;
+  - each run is stored in `eval_runs` with the git SHA and a config hash (configs, agent
+    prompts, golden set, options);
+  - each run writes `eval/reports/<date>/summary.md`, `summary.json`, `latency_cost.md`
+    and `results.jsonl`.
+- **Latency and cost** (`eval/latency_cost.py`):
+  - p50 / p95 latency per step and per retrieval stage;
+  - cost per query and per document from `llm_calls`, grouped by request id;
+  - ingestion now records its LLM calls under `doc:<document id>`.
+- **CI regression gate** (`.github/workflows/eval.yml`, `eval/regression.py`):
+  - runs the CI subset against the `eval` Pinecone namespace;
+  - fails if faithfulness or recall@5 drops more than 3 points against the newest
+    `summary_ci.json` on `main`, or if `main` measured one of them and the PR's run did
+    not;
+  - posts the table as a PR comment, updated on every push.
+- `search_documents` returns the retriever name and each hit's `chunk_id`.
+
+### Fixed
+
+- R4 ranked a question's own documents behind look-alikes. In a relationship question
+  that names a document ("the contract behind invoice INV-010790"), the named invoice and
+  its linked contract were found only through graph facts, behind five look-alike chunks
+  from vector search. R4 now asks the graph what links to the named documents, then
+  ranks the best chunk of each named and linked document first. This fixed 20 of the 29
+  misses on the full set.
+
+### Changed
+
+- Package version 0.7.0. `configs/eval.yaml` gains a `recall@5: 0.90` target and
+  `gate_metrics`.
+
+### Known issues
+
+- Faithfulness, answer relevancy, answer correctness and query cost are not measured yet.
+  The answer and judge models need a working key: OpenAI answers 401 here.
+- Retrieval p95 is 13.5 s against a 4 s target. Almost all of it is the cross-encoder
+  rerank running on CPU (p50 5.5 s).
+- Aggregation recall@5 is 0.793. Totals over many invoices need every invoice, but five
+  chunks cannot hold them; the graph's vendor-ledger facts carry those answers instead.
+- The CI gate needs hosted copies of the evaluation stores, provided as repository
+  secrets. Until then it posts "skipped". SROIE is still not downloaded, so extraction F1
+  on SROIE is not measured.
+- Tracing has been checked with the JSONL backend only, because there is no LangSmith key
+  here.
+
 ## [0.5.0] - 2026-11-21
 
 Phase 5 — Agents + MCP: a LangGraph agent graph serves all five user stories of

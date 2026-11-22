@@ -10,8 +10,18 @@ relationships (docs/layers/03-retrieval.md, "GraphRAG algorithm")::
              graph template chosen from the analysis (retrieval/graph.py) -> facts
 
 The result carries R3's chunks *and* the graph facts; :mod:`ledgerlens.retrieval.context`
-fuses them into one cited context. Stages are timed as ``analyze``, R3's own stages and
-``graph``.
+fuses them into one cited context. Stages are timed as ``analyze``, R3's own stages,
+``graph`` and ``anchor``.
+
+**Anchoring.** A relationship question about a named document ("How many days does the
+contract behind invoice INV-010790 allow?") is about that document and the records the
+graph links to it -- but the vector search, which cannot be narrowed to INV-010790 (the
+contract has another number), ranks look-alike invoices above both. So when the analysis
+found document numbers and needs the graph, R4 asks the graph which records are linked to
+the named documents alone (the same template, seeded with just those numbers), searches
+once more narrowed to the named and linked numbers, and puts the best chunk of each of
+those documents first (named documents, then linked ones), ahead of the other seeds. The
+result still holds ``k`` chunks; if either step fails, the vector ranking stands.
 
 The graph is an addition, never a dependency: if Neo4j fails, R4 logs it and returns R3's
 chunks (``timings_ms["graph_error"]`` marks it), so an answer can still be written.
@@ -31,7 +41,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import date
-from typing import Any
+from typing import Any, TypeGuard
 
 from ledgerlens.retrieval import (
     GraphFact,
@@ -41,7 +51,7 @@ from ledgerlens.retrieval import (
     ScoredChunk,
     StageTimer,
 )
-from ledgerlens.retrieval.analyze import QueryAnalysis, QueryAnalyzer
+from ledgerlens.retrieval.analyze import QueryAnalysis, QueryAnalyzer, find_doc_numbers
 from ledgerlens.retrieval.graph import GraphExpander
 from ledgerlens.retrieval.text2cypher import CypherGenerator, CypherGuard, CypherRun
 
@@ -98,7 +108,67 @@ class GraphRAGRetriever:
                 logger.warning("graph expansion failed; using vector results only", exc_info=True)
                 facts = []
                 timer.timings_ms["graph_error"] = 1.0
-        return list(seeds.chunks), facts
+        chunks = list(seeds.chunks)
+        if anchored(analysis):
+            with timer.stage("anchor"):
+                anchors = self.anchor_chunks(query, analysis, filters, k=k)
+            chunks = merge_anchors(anchors, chunks, k=k)
+        return chunks, facts
+
+    def linked_numbers(self, analysis: QueryAnalysis, *, limit: int) -> list[str]:
+        """The named document numbers, then the numbers of the records the graph links to
+        them (at most ``limit``)."""
+        named = [n.upper() for n in analysis.doc_numbers]
+        try:
+            facts = self.expander.facts(analysis, ())  # seeded with the named numbers only
+        except Exception:
+            logger.warning("graph lookup for anchors failed", exc_info=True)
+            facts = []
+        cited = [
+            number
+            for fact in facts
+            for tag in fact.citations
+            for number, _ in find_doc_numbers(tag.removeprefix("doc:").split("@")[0])
+        ]
+        return list(dict.fromkeys([*named, *cited]))[:limit]
+
+    def anchor_chunks(
+        self, query: str, analysis: QueryAnalysis, filters: QueryFilters | None, *, k: int
+    ) -> list[ScoredChunk]:
+        """The best chunk of each named or linked document, in that order (vendor and date
+        filters still apply; type filters do not: the linked records differ)."""
+        numbers = self.linked_numbers(analysis, limit=k)
+        narrowed = QueryFilters(
+            doc_numbers=tuple(numbers),
+            vendor_ids=filters.vendor_ids if filters else (),
+            date_from=filters.date_from if filters else None,
+            date_to=filters.date_to if filters else None,
+        )
+        try:
+            found = self.base.retrieve(query, filters=narrowed, k=2 * len(numbers))
+        except Exception:  # the anchors are a bonus: keep the seeds
+            logger.warning("anchor search failed; keeping the vector ranking", exc_info=True)
+            return []
+        best: dict[str, ScoredChunk] = {}
+        for chunk in found.chunks:  # best first: keep each number's first chunk
+            number = (chunk.doc_number or "").upper()
+            if number in numbers and number not in best:
+                best[number] = chunk
+        return [best[n] for n in numbers if n in best]
+
+
+def anchored(analysis: QueryAnalysis | None) -> TypeGuard[QueryAnalysis]:
+    """A relationship question that names documents (lookups are already narrowed to
+    their numbers by the filters)."""
+    return analysis is not None and bool(analysis.doc_numbers) and analysis.needs_graph
+
+
+def merge_anchors(
+    anchors: list[ScoredChunk], seeds: list[ScoredChunk], *, k: int
+) -> list[ScoredChunk]:
+    """Anchors first, then the seeds not already in, cut to ``k``."""
+    seen = {chunk.id for chunk in anchors}
+    return [*anchors, *(c for c in seeds if c.id not in seen)][:k]
 
 
 # --------------------------------------------------------------------------- R5

@@ -267,11 +267,10 @@ def test_r4_fuses_vector_seeds_with_graph_facts() -> None:
 
     assert result.retriever == "r4_graphrag"
     assert [c.document_id for c in result.chunks] == ["d-inv", "d-x"]
+    hood = {"per_seed": 10, "limit": 30, "max_hops": 2}
     assert runner.calls == [
-        (
-            "invoice_neighborhood",
-            {"seeds": ["INV-889", "d-inv", "d-x"], "per_seed": 10, "limit": 30, "max_hops": 2},
-        )
+        ("invoice_neighborhood", {"seeds": ["INV-889", "d-inv", "d-x"]} | hood),
+        ("invoice_neighborhood", {"seeds": ["INV-889"]} | hood),  # what INV-889 links to
     ]
     assert result.graph_facts[0].text.endswith("-> PO-1042 -> no payment")
     assert result.citations == {"doc:INV-889": "d-inv", "doc:INV-2": "d-x", "doc:PO-1042": "d-po"}
@@ -314,3 +313,76 @@ def test_answer_citations_resolve_to_real_document_ids() -> None:
 
     assert check.ok
     assert check.resolved == {"doc:INV-889": "d-inv", "doc:PO-1042": "d-po"}
+
+
+# --------------------------------------------------------------------------- anchoring
+
+
+class FilteringRetriever(StubRetriever):
+    """Honours ``doc_numbers`` the way the vector store does."""
+
+    def __init__(self, chunks: list[ScoredChunk], fail_narrowed: bool = False) -> None:
+        super().__init__(chunks)
+        self.fail_narrowed = fail_narrowed
+
+    def retrieve(
+        self, query: str, *, filters: QueryFilters | None = None, k: int = 5
+    ) -> RetrievalResult:
+        self.calls.append((query, filters, k))
+        chunks = self.chunks
+        if filters is not None and filters.doc_numbers:
+            if self.fail_narrowed:
+                raise ConnectionError("pinecone timed out")
+            chunks = [c for c in chunks if c.doc_number in filters.doc_numbers]
+        return RetrievalResult.build(query, self.name, chunks[:k], timings_ms={"total": 1.0})
+
+
+LINKED_ROW = INVOICE_ROW | {
+    "contract": {"contract_number": "CT-V001", "document_id": "d-ct", "payment_terms_days": 30}
+}
+# the vector ranking: look-alike invoices first, the named invoice and its contract last
+LOOKALIKES = [
+    chunk("d-a", number="INV-100"),
+    chunk("d-b", 1, number="INV-101"),
+    chunk("d-c", 2, number="INV-102"),
+    chunk("d-po", 3, number="PO-1042"),
+    chunk("d-inv", 4, number="INV-889"),
+    chunk("d-ct", 5, number="CT-V001"),
+]
+
+
+def anchored_r4(**kwargs: Any) -> tuple[GraphRAGRetriever, FilteringRetriever]:
+    base = FilteringRetriever(LOOKALIKES, **kwargs)
+    expander = GraphExpander(runner=StubRunner([LINKED_ROW]), today=TODAY)
+    return GraphRAGRetriever(base, expander, analyzer=ANALYZER), base
+
+
+def test_a_named_document_and_its_linked_records_come_first() -> None:
+    retriever, base = anchored_r4()
+
+    result = retriever.retrieve("Which contract governs the PO on invoice INV-889?", k=4)
+
+    docs = [c.document_id for c in result.chunks]
+    # the invoice the question names, then the contract the graph links to it, then the
+    # best remaining seeds fill the budget
+    assert docs == ["d-inv", "d-ct", "d-a", "d-b"]
+    narrowed = base.calls[1][1]
+    assert narrowed is not None and narrowed.doc_numbers == ("INV-889", "CT-V001")
+    assert "anchor" in result.timings_ms
+
+
+def test_lookups_and_unnamed_questions_are_not_anchored() -> None:
+    retriever, base = anchored_r4()
+
+    retriever.retrieve("What is the total on invoice INV-889?", k=3)  # a plain lookup
+    retriever.retrieve("Which contracts govern our purchase orders?", k=3)  # nothing named
+
+    assert len(base.calls) == 2  # one search each, no anchor search
+
+
+def test_a_failed_anchor_search_keeps_the_vector_ranking() -> None:
+    retriever, _ = anchored_r4(fail_narrowed=True)
+
+    result = retriever.retrieve("Which contract governs the PO on invoice INV-889?", k=3)
+
+    assert [c.document_id for c in result.chunks] == ["d-a", "d-b", "d-c"]
