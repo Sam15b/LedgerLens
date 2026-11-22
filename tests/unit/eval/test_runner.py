@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from eval.golden_set.schema import GoldenQuestion
+from eval.latency_cost import cost_report
 from eval.run_ragas import Sample
 from eval.runner import (
     RagasOutcome,
@@ -17,11 +18,12 @@ from eval.runner import (
     git_revision,
     query_request_id,
     run_eval,
+    write_reports,
 )
 from ledgerlens.core.config import ModelsConfig
 from ledgerlens.llm.router import LLMClient
 from ledgerlens.llm.types import LLMProviderError, LLMRequest, LLMResponse, Usage
-from ledgerlens.observability.cost import CostLedger
+from ledgerlens.observability.cost import CostLedger, LLMCallRecord, document_request_id
 from ledgerlens.retrieval import QueryFilters, RetrievalResult, ScoredChunk
 
 DOC_A = "00000000-0000-4000-8000-00000000000a"
@@ -131,7 +133,7 @@ def test_retrieval_only_run() -> None:
     assert metrics["recall@5"] == 0.5 and metrics["mrr"] == 0.5
     assert metrics["recall@5.lookup"] == 0.5
     assert metrics["latency.retrieval.p50_ms"] == 10.0
-    assert "latency.answer.p50_ms" not in metrics
+    assert "latency.answer.p50_ms" not in metrics and "latency.query.p50_ms" not in metrics
     assert metrics["facts_found"] is None and metrics["cost.query.mean_usd"] == 0.0
 
 
@@ -183,7 +185,7 @@ def test_answers_and_ragas_are_skipped_when_no_model_answers() -> None:
         QUESTIONS, FakeRetriever(), suite="ci", config=CONFIG, llm=client(fail=True), ragas=never
     )
 
-    assert run.llm_status.startswith("AllProvidersFailedError")
+    assert run.llm_status.startswith("skipped, AllProvidersFailedError")
     assert run.metrics["answered"] == 0 and run.metrics["recall@5"] == 0.5
     assert run.ragas is None
 
@@ -221,3 +223,92 @@ def test_eval_run_row_values() -> None:
     assert values["metrics"]["recall@5"] == 0.5
     assert values["id"] == eval_run_values(run)["id"]  # stable per run id
     json.dumps(values)  # JSONB-ready
+
+
+# --------------------------------------------------------------------------- reports
+
+
+def answered_run() -> Any:
+    def fake_ragas(samples: Sequence[Sample]) -> RagasOutcome:
+        return RagasOutcome(
+            summary={"all": {"n": 2, "faithfulness": 0.9}}, metrics=["faithfulness"]
+        )
+
+    config = {"hash": "c" * 64, "files": {}, "options": {"variant": "R4", "k": 5}}
+    return run_eval(
+        QUESTIONS,
+        FakeRetriever(),
+        suite="ci",
+        config=config,
+        llm=client(),
+        ragas=fake_ragas,
+        git_sha="a" * 40,
+        run_id="r4",
+    )
+
+
+def test_reports_are_written_to_the_dated_directory(tmp_path: Path) -> None:
+    run = answered_run()
+
+    paths = write_reports(run, tmp_path / "2026-11-22", documents=None, stored="row-1")
+
+    assert sorted(p.name for p in paths.values()) == [
+        "latency_cost_ci.md",
+        "results_ci.jsonl",
+        "summary_ci.json",
+        "summary_ci.md",
+    ]
+    summary = paths["summary"].read_text(encoding="utf-8")
+    assert summary.startswith("# Evaluation summary (ci set, ")
+    assert "| recall@5 | 0.500 | below 0.90 |" in summary
+    assert "| faithfulness | 0.900 | met |" in summary  # target 0.85 in configs/eval.yaml
+    assert f"| git | `{'a' * 40}` |" in summary and "eval_runs row-1" in summary
+    assert "- q002 (lookup): recall 0.00" in summary
+    data = json.loads(paths["json"].read_text(encoding="utf-8"))
+    assert data["config_hash"] == "c" * 64 and data["metrics"]["faithfulness"] == 0.9
+    assert data["suite"] == "ci" and data["git_sha"] == "a" * 40
+    latency = paths["latency_cost"].read_text(encoding="utf-8")
+    assert "| query (retrieval + answer) | 3 |" in latency
+    assert "| per query | 3 | 3 |" in latency
+    assert "Not read: no llm_calls source" in latency
+    lines = paths["results"].read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["question_id"] for line in lines] == ["q001", "q002", "q003"]
+
+
+def test_full_set_reports_have_no_suffix_and_show_document_cost(tmp_path: Path) -> None:
+    run = answered_run()
+    run.suite = "full"
+    documents = cost_report(
+        [
+            LLMCallRecord(
+                request_id=document_request_id("d1"),
+                alias="extractor",
+                provider="openai",
+                model="gpt-4o-mini",
+                tokens_in=900,
+                tokens_out=300,
+                cost_usd=0.0003,
+                latency_ms=800.0,
+            )
+        ]
+    )
+
+    paths = write_reports(run, tmp_path, documents=documents)
+
+    assert paths["summary"].name == "summary.md" and paths["json"].name == "summary.json"
+    assert "| 1 | 1 | 0.0003 | 0.000300 |" in paths["latency_cost"].read_text(encoding="utf-8")
+
+
+def test_a_skipped_model_is_explained_without_its_key(tmp_path: Path) -> None:
+    class LeakyProvider(AnsweringProvider):
+        def complete(self, req: LLMRequest) -> LLMResponse:
+            raise LLMProviderError("HTTP 401: Incorrect API key sk-proj-abc***xyz", provider="x")
+
+    llm = LLMClient(
+        MODELS, providers={"openai": LeakyProvider()}, factories={}, ledger=CostLedger()
+    )
+    run = run_eval(QUESTIONS, FakeRetriever(), suite="ci", config=CONFIG | {"options": {}}, llm=llm)
+
+    summary = write_reports(run, tmp_path)["summary"].read_text(encoding="utf-8")
+    assert "skipped, AllProvidersFailedError" in summary and "sk-proj" not in summary
+    assert "| faithfulness | not measured |" in summary

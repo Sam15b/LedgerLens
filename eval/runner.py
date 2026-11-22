@@ -22,6 +22,16 @@ Every run is stored in ``eval_runs`` with what makes it reproducible:
   file's own digest in ``config.files``; two runs with the same hash ran the same setup.
 
 ``--no-db`` skips storing (no Postgres); a failed insert is reported, not fatal.
+
+Each run writes a dated report, ``eval/reports/<date>/`` (``--report-dir``):
+
+* ``summary.md`` -- setup, headline metrics against ``configs/eval.yaml`` targets, recall
+  per category, latency and cost, the misses;
+* ``summary.json`` -- the metrics and provenance, which the CI gate compares;
+* ``latency_cost.md`` -- p50 / p95 per step and stage, cost per query and per document;
+* ``results.jsonl`` -- every question's result.
+
+The CI subset's files carry ``_ci`` (``summary_ci.md``, ...), so both fit in one day.
 """
 
 from __future__ import annotations
@@ -35,7 +45,7 @@ import subprocess
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,10 +57,19 @@ from eval.benchmark_retrieval import (
     llm_answerer,
     mean,
     run_benchmark,
+    write_results,
 )
 from eval.golden_set.schema import GoldenQuestion, load_golden_set
-from eval.latency_cost import CostReport, cost_report, latency_summary
-from eval.run_ragas import SKIPPED_CATEGORIES, Sample, contexts_of
+from eval.latency_cost import (
+    CostReport,
+    cost_report,
+    latency_summary,
+    load_llm_calls,
+    render_cost_table,
+    render_latency_table,
+    stage_latencies,
+)
+from eval.run_ragas import SKIPPED_CATEGORIES, Sample, clean_error, contexts_of
 from ledgerlens.core.config import get_config, repo_path
 from ledgerlens.core.logging import request_context
 from ledgerlens.llm.types import Message
@@ -167,8 +186,8 @@ def check_llm(llm: LLMClient, model: str) -> str:
     request id, so it is not counted as a query."""
     try:
         llm.complete([Message.user("Reply with OK.")], model=model, max_tokens=5)
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc}"
+    except Exception as exc:  # providers echo masked keys: keep them out of reports
+        return "skipped, " + clean_error(f"{type(exc).__name__}: {exc}")
     return "ok"
 
 
@@ -295,9 +314,7 @@ def run_metrics(run: EvalRun, *, k: int) -> dict[str, Any]:
     latencies = {
         "retrieval": latency_summary(r.latency_ms for r in results),
         "answer": latency_summary(r.answer_latency_ms for r in answered),
-        "query": latency_summary(
-            r.latency_ms + (r.answer_latency_ms or 0.0) for r in (answered or results)
-        ),
+        "query": latency_summary(r.latency_ms + (r.answer_latency_ms or 0.0) for r in answered),
     }
     for name, summary in latencies.items():
         if summary.n:
@@ -386,6 +403,204 @@ def store_run(run: EvalRun, sessions: sessionmaker[Session] | None = None) -> st
     return str(values["id"])
 
 
+# --------------------------------------------------------------------------- report
+
+
+def report_names(suite: str) -> dict[str, str]:
+    """The files a run writes into its dated directory (the CI subset's carry ``_ci``)."""
+    suffix = "" if suite == "full" else f"_{suite}"
+    return {
+        "summary": f"summary{suffix}.md",
+        "json": f"summary{suffix}.json",
+        "latency_cost": f"latency_cost{suffix}.md",
+        "results": f"results{suffix}.jsonl",
+    }
+
+
+def _score(value: Any) -> str:
+    return "not measured" if value is None else f"{value:.3f}"
+
+
+def _status(value: Any, target: float | None) -> str:
+    if value is None or target is None:
+        return ""
+    return "met" if value >= target else f"below {target:.2f}"
+
+
+def summary_json(run: EvalRun) -> dict[str, Any]:
+    """What CI compares between runs (``eval/regression.py``): metrics plus provenance."""
+    return {
+        "suite": run.suite,
+        "run_id": run.run_id,
+        "date": run.started_at.date().isoformat(),
+        "git_sha": run.git_sha,
+        "git_dirty": run.config.get("git_dirty", False),
+        "config_hash": run.config_hash,
+        "options": run.config.get("options", {}),
+        "llm_status": run.llm_status,
+        "metrics": run.metrics,
+    }
+
+
+def render_latency_cost(run: EvalRun, documents: CostReport | None = None) -> str:
+    """Latency per query and per stage; cost per query (and per ingested document)."""
+    answered = [r for r in run.results if r.answer is not None]
+    rows = {
+        "retrieval": latency_summary(r.latency_ms for r in run.results),
+        "answer": latency_summary(r.answer_latency_ms for r in answered),
+        "query (retrieval + answer)": latency_summary(
+            r.latency_ms + (r.answer_latency_ms or 0.0) for r in answered
+        ),
+    }
+    rows |= {
+        f"stage: {k}": v for k, v in stage_latencies(r.timings_ms for r in run.results).items()
+    }
+    lines = [
+        f"# Latency and cost ({run.suite} set, {run.started_at.date().isoformat()})",
+        "",
+        f"{len(run.results)} questions, retriever `{run.config.get('options', {}).get('variant')}`"
+        f"; git `{(run.git_sha or 'unknown')[:12]}`, config `{run.config_hash[:12]}`.",
+        "",
+        "## Latency",
+        "",
+        *render_latency_table({name: s for name, s in rows.items() if s.n}),
+        "",
+        "## Cost per query",
+        "",
+    ]
+    if run.cost.query.calls:
+        lines += render_cost_table(run.cost)
+    else:
+        lines.append(f"No LLM calls were made for the questions (answers: {run.llm_status}).")
+    if run.ragas is not None:
+        lines += [
+            "",
+            f"RAGAS judge: {run.ragas.judge_calls} calls, ${run.ragas.judge_cost_usd:.4f} "
+            "(not part of the per-query cost).",
+        ]
+    lines += ["", "## Cost per document (ingestion, from llm_calls)", ""]
+    if documents is None:
+        lines.append("Not read: no llm_calls source was available.")
+    elif not documents.document.calls:
+        lines.append(
+            "No recorded ingestion LLM calls (documents ingested with the rules extractor or "
+            "before calls were recorded per document)."
+        )
+    else:
+        doc = documents.document
+        lines += [
+            "| documents | LLM calls | total $ | mean $ | p50 $ | p95 $ | max $ |",
+            "|---:|---:|---:|---:|---:|---:|---:|",
+            f"| {doc.n} | {doc.calls} | {doc.total_usd:.4f} | {doc.mean_usd:.6f} | "
+            f"{doc.p50_usd:.6f} | {doc.p95_usd:.6f} | {doc.max_usd:.6f} |",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def render_summary(run: EvalRun, *, stored: str | None = None) -> str:
+    """The run's report: setup, headline metrics against the targets, recall per
+    category, latency and cost, and the questions that failed."""
+    options = run.config.get("options", {})
+    k = options.get("k", 5)
+    targets = get_config().eval.targets
+    metrics = run.metrics
+    lines = [
+        f"# Evaluation summary ({run.suite} set, {run.started_at.date().isoformat()})",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| questions | {metrics['questions']} ({metrics['answerable']} answerable) |",
+        f"| retriever | `{options.get('variant')}`, k={k}, filters: {options.get('filters')}"
+        f"{', exact hybrid scoring' if options.get('exact_hybrid') else ''} |",
+        f"| answers | `{options.get('answer_model')}`: {run.llm_status} |",
+        f"| git | `{run.git_sha or 'unknown'}`"
+        f"{' (uncommitted changes)' if run.config.get('git_dirty') else ''} |",
+        f"| config hash | `{run.config_hash}` |",
+        f"| run | `{run.run_id}`{f', eval_runs {stored}' if stored else ''} |",
+        "",
+        "## Headline metrics",
+        "",
+        "| metric | value | target |",
+        "|---|---:|---|",
+    ]
+    headline = [f"recall@{k}", "mrr", "evidence_recall", "facts_found", "citations_ok"]
+    headline += list(run.ragas.metrics) if run.ragas else ["faithfulness"]
+    for name in headline:
+        target = targets.get(name)
+        lines.append(
+            f"| {name} | {_score(metrics.get(name))} | {_status(metrics.get(name), target)} |"
+        )
+    per_category = sorted(m for m in metrics if m.startswith(f"recall@{k}."))
+    if per_category:
+        lines += ["", f"## recall@{k} by category", "", "| category | recall |", "|---|---:|"]
+        lines += [f"| {m.split('.', 1)[1]} | {metrics[m]:.3f} |" for m in per_category]
+    lines += [
+        "",
+        "## Latency and cost",
+        "",
+        "| | p50 | p95 |",
+        "|---|---:|---:|",
+    ]
+    for name in ("retrieval", "answer", "query"):
+        if f"latency.{name}.p50_ms" in metrics:
+            lines.append(
+                f"| {name} latency (ms) | {metrics[f'latency.{name}.p50_ms']:.0f} | "
+                f"{metrics[f'latency.{name}.p95_ms']:.0f} |"
+            )
+    lines.append(
+        f"| cost per query ($) | {run.cost.query.p50_usd:.6f} | {run.cost.query.p95_usd:.6f} |"
+    )
+    lines += [
+        "",
+        f"Total query cost ${run.cost.query.total_usd:.4f}; details in "
+        f"`{report_names(run.suite)['latency_cost']}`.",
+    ]
+    failed = [r for r in run.results if r.error]
+    missed = [r for r in run.results if r.recall is not None and r.recall < 1.0]
+    lines += ["", f"## Misses ({len(missed)}) and errors ({len(failed)})", ""]
+    lines += [
+        f"- {r.question_id} ({r.category}): recall {r.recall:.2f}"
+        for r in missed[:30]
+        if r.recall is not None
+    ]
+    lines += [f"- {r.question_id}: {clean_error(r.error or '')}" for r in failed[:20]]
+    if not missed and not failed:
+        lines.append("None.")
+    return "\n".join(lines) + "\n"
+
+
+def write_reports(
+    run: EvalRun,
+    out_dir: Path,
+    *,
+    documents: CostReport | None = None,
+    stored: str | None = None,
+) -> dict[str, Path]:
+    """Write the summary (markdown + JSON), the latency/cost report and per-question
+    results into ``out_dir``; returns the paths by kind."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = {kind: out_dir / name for kind, name in report_names(run.suite).items()}
+    paths["summary"].write_text(render_summary(run, stored=stored), encoding="utf-8")
+    paths["json"].write_text(json.dumps(summary_json(run), indent=2) + "\n", encoding="utf-8")
+    paths["latency_cost"].write_text(render_latency_cost(run, documents), encoding="utf-8")
+    write_results(run.results, paths["results"])
+    return paths
+
+
+def document_costs() -> CostReport | None:
+    """Ingestion cost per document from ``llm_calls`` (or the ``cost_log`` JSONL)."""
+    from ledgerlens.core.config import get_settings
+
+    try:
+        if get_settings().llm_cost_db:
+            return cost_report(load_llm_calls("db"))
+        log = get_config().models.cost_log
+        return cost_report(load_llm_calls(str(repo_path(log)))) if log else None
+    except Exception as exc:
+        logger.warning("could not read llm_calls: %s", exc)
+        return None
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -410,6 +625,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--answer-model", default="smart")
     parser.add_argument("--judge", default="judge")
     parser.add_argument("--no-db", action="store_true", help="do not store the run")
+    parser.add_argument(
+        "--report-dir", type=Path, default=None, help="default: eval/reports/<today>"
+    )
     return parser
 
 
@@ -475,12 +693,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         git_sha=sha,
         on_result=progress,
     )
+    stored = None
     if not args.no_db:
         try:
-            print(f"stored eval_runs {store_run(run)}")
+            stored = store_run(run)
+            print(f"stored eval_runs {stored}")
         except Exception as exc:
             print(f"not stored in eval_runs: {type(exc).__name__}: {exc}")
+    out_dir = args.report_dir or repo_path(f"eval/reports/{date.today().isoformat()}")
+    paths = write_reports(run, out_dir, documents=document_costs(), stored=stored)
     print(json.dumps(run.metrics, indent=2))
+    print("wrote " + ", ".join(str(p) for p in paths.values()))
     return 0
 
 

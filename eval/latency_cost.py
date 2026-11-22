@@ -154,7 +154,7 @@ def cost_group(kind: RequestKind, records: Sequence[LLMCallRecord]) -> CostGroup
         tokens_in=sum(r.tokens_in for r in records),
         tokens_out=sum(r.tokens_out for r in records),
         unpriced_calls=sum(r.cost_usd is None for r in records),
-        total_usd=round(total, 8),
+        total_usd=float(round(total, 8)),
         mean_usd=round(total / len(costs), 8) if costs else 0.0,
         p50_usd=round(percentile(costs, 50), 8),
         p95_usd=round(percentile(costs, 95), 8),
