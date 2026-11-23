@@ -130,6 +130,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/eval/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Runs
+         * @description Evaluation runs, newest first (one suite with ``?suite=``).
+         */
+        get: operations["list_runs_eval_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -473,6 +493,28 @@ export interface components {
         DraftIn: {
             /** Draft */
             draft: string;
+        };
+        /** EvalRunOut */
+        EvalRunOut: {
+            /** Config */
+            config: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Git Sha */
+            git_sha?: string | null;
+            /** Id */
+            id: string;
+            /** Metrics */
+            metrics: {
+                [key: string]: number | string | null;
+            };
+            /** Suite */
+            suite: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -835,6 +877,38 @@ export interface operations {
                     "image/jpeg": unknown;
                     "image/png": unknown;
                     "image/tiff": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_runs_eval_runs_get: {
+        parameters: {
+            query?: {
+                suite?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunOut"][];
                 };
             };
             /** @description Validation Error */
