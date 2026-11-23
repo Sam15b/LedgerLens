@@ -195,7 +195,9 @@ jobs:
               .update("v1." + expires).digest("base64url");
             process.stdout.write(expires + "." + signature);')
           curl -fsS -b "ledgerlens_session=$cookie" http://localhost:3000/api/health > /dev/null
-          curl -fsS -b "ledgerlens_session=$cookie" http://localhost:3000/ | grep -q "Documents ingested"
+          # read the whole page first: `curl | grep -q` fails curl once grep has its match
+          page=$(curl -fsS -b "ledgerlens_session=$cookie" http://localhost:3000/)
+          grep -q "Documents ingested" <<< "$page"
           curl -fsS -b "ledgerlens_session=$cookie" "http://localhost:3000/api/eval/runs?limit=1"
           echo; echo "stack is up: api, worker, mcp, web"
       - name: Service status and logs
