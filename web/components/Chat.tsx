@@ -2,6 +2,7 @@
 
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
+import { CitedText, Sources } from "@/components/Citation";
 import { ToolTimeline } from "@/components/ToolTimeline";
 import { ChatError, streamChat } from "@/lib/chat";
 import {
@@ -200,7 +201,7 @@ function AssistantMessage({ turn }: { turn: AssistantTurn }) {
     >
       <ToolTimeline steps={turn.tools} />
       {turn.text ? (
-        <p className="whitespace-pre-wrap leading-relaxed">{turn.text}</p>
+        <CitedText text={turn.text} citations={turn.citations} />
       ) : turn.status === "streaming" ? (
         <p className="animate-pulse text-muted">Working…</p>
       ) : null}
@@ -210,6 +211,7 @@ function AssistantMessage({ turn }: { turn: AssistantTurn }) {
         </p>
       ) : null}
       {turn.status === "stopped" ? <p className="mt-2 text-xs text-muted">Stopped.</p> : null}
+      <Sources citations={turn.citations} />
     </article>
   );
 }
