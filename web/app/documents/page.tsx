@@ -7,6 +7,7 @@ import { AutoRefresh } from "@/components/AutoRefresh";
 import { DocumentsTable } from "@/components/DocumentsTable";
 import { ErrorPanel, Placeholder } from "@/components/ErrorPanel";
 import { DOCUMENT_STATUSES, inProgress } from "@/components/StatusBadge";
+import { Upload } from "@/components/Upload";
 import { api, load } from "@/lib/api";
 import {
   documentsHref,
@@ -26,6 +27,9 @@ export default function DocumentsPage({ searchParams }: PageProps<"/documents">)
         Uploaded invoices, receipts, purchase orders and contracts, newest first. Open one to
         see the fields extracted from it.
       </p>
+      <div className="mt-6">
+        <Upload />
+      </div>
       <Suspense fallback={<Placeholder className="mt-6 h-72" />}>
         <DocumentsList searchParams={searchParams} />
       </Suspense>
