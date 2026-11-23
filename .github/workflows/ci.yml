@@ -116,3 +116,93 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+
+  # Which parts changed: the compose smoke test only runs when the images could be affected.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docker:
+              - 'infra/docker/**'
+              - 'docker-compose*.yml'
+              - '.dockerignore'
+              - 'web/.dockerignore'
+              - 'pyproject.toml'
+              - 'configs/**'
+              - 'migrations/**'
+              - 'scripts/**'
+              - 'src/ledgerlens/api/**'
+              - 'src/ledgerlens/core/**'
+              - 'src/ledgerlens/storage/**'
+              - 'web/package.json'
+              - 'web/pnpm-lock.yaml'
+              - 'web/next.config.ts'
+              - 'web/proxy.ts'
+              - 'web/app/**'
+              - 'web/lib/**'
+              - '.github/workflows/ci.yml'
+
+  # Build every image and bring the whole stack up as `docker compose up` would (without the
+  # dev override), then check it answers: the API's health and its key, the dashboard's
+  # login gate, and the dashboard reaching the API through its /api forwarder.
+  compose:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      API_KEYS: ci-smoke-key
+      LEDGERLENS_API_KEY: ci-smoke-key
+      DASHBOARD_PASSWORD: ci-smoke-password
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (the worker and mcp images carry PyTorch)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Validate compose files
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml config --quiet
+      - name: Build images
+        run: docker compose -f docker-compose.yml build
+      - name: Start the stack
+        run: docker compose -f docker-compose.yml up -d --wait --wait-timeout 900
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+          curl -fsS http://localhost:8000/health | tee health.json; echo
+          python3 -c 'import json; h = json.load(open("health.json")); assert h["status"] == "ok", h["dependencies"]'
+          test "$(status http://localhost:8000/stats/overview)" = 401
+          curl -fsS -H "X-API-Key: $API_KEYS" http://localhost:8000/stats/overview > /dev/null
+
+          curl -fsS http://localhost:3000/healthz; echo
+          test "$(status http://localhost:3000/)" = 307
+          test "$(status http://localhost:3000/api/health)" = 401
+          # a session cookie signed the way the dashboard signs one (web/lib/session.ts)
+          cookie=$(node -e '
+            const crypto = require("crypto");
+            const expires = Date.now() + 3600e3;
+            const signature = crypto.createHmac("sha256", process.env.DASHBOARD_PASSWORD)
+              .update("v1." + expires).digest("base64url");
+            process.stdout.write(expires + "." + signature);')
+          curl -fsS -b "ledgerlens_session=$cookie" http://localhost:3000/api/health > /dev/null
+          curl -fsS -b "ledgerlens_session=$cookie" http://localhost:3000/ | grep -q "Documents ingested"
+          curl -fsS -b "ledgerlens_session=$cookie" "http://localhost:3000/api/eval/runs?limit=1"
+          echo; echo "stack is up: api, worker, mcp, web"
+      - name: Service status and logs
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml ps -a
+          docker compose -f docker-compose.yml logs --no-color --tail 100
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f docker-compose.yml down --volumes
