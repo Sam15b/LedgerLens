@@ -106,9 +106,12 @@ export function endTurn(turn: AssistantTurn, status: "stopped" | "failed", error
 
 /** Whether the thread waits for decisions on reminder drafts (new messages get 409). */
 export function waitingForDecision(turns: Turn[]): boolean {
-  const last = turns.findLast((t): t is AssistantTurn => t.role === "assistant");
-  if (!last || last.status !== "interrupted" || !last.interrupt) return false;
-  return last.interrupt.reminders.some((r) => !(r.reminder_id in last.decisions));
+  // The latest pause: replies to decisions are separate turns, so look past them.
+  const paused = turns.findLast(
+    (t): t is AssistantTurn => t.role === "assistant" && t.interrupt !== null,
+  );
+  if (!paused?.interrupt) return false;
+  return paused.interrupt.reminders.some((r) => !(r.reminder_id in paused.decisions));
 }
 
 export type Segment = { text: string } | { tag: string; label: string; documentId: string | null };

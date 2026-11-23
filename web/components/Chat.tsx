@@ -3,11 +3,13 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { CitedText, Sources } from "@/components/Citation";
+import { type DecisionOut, InterruptCard } from "@/components/InterruptCard";
 import { ToolTimeline } from "@/components/ToolTimeline";
 import { ChatError, streamChat } from "@/lib/chat";
 import {
   type AssistantTurn,
   applyEvent,
+  type Decision,
   endTurn,
   newAssistantTurn,
   type Turn,
@@ -86,6 +88,24 @@ export function Chat() {
     }
   }
 
+  /** A draft was decided: mark it, and show what the resumed run answered. */
+  function onDecided(key: number, reminderId: string, decision: Decision, out: DecisionOut) {
+    updateAssistant(key, (turn) => ({
+      ...turn,
+      decisions: { ...turn.decisions, [reminderId]: decision },
+    }));
+    const reply = out.reply ?? out.note;
+    if (reply) {
+      setTurns((current) => [
+        ...current,
+        newAssistantTurn(nextKey.current++, {
+          text: reply,
+          status: out.thread_status === "interrupted" ? "interrupted" : "completed",
+        }),
+      ]);
+    }
+  }
+
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     void send(input);
@@ -147,7 +167,10 @@ export function Chat() {
             </li>
           ) : (
             <li key={turn.key} className="max-w-full">
-              <AssistantMessage turn={turn} />
+              <AssistantMessage
+                turn={turn}
+                onDecided={(reminderId, decision, out) => onDecided(turn.key, reminderId, decision, out)}
+              />
             </li>
           ),
         )}
@@ -193,7 +216,13 @@ export function Chat() {
   );
 }
 
-function AssistantMessage({ turn }: { turn: AssistantTurn }) {
+function AssistantMessage({
+  turn,
+  onDecided,
+}: {
+  turn: AssistantTurn;
+  onDecided: (reminderId: string, decision: Decision, out: DecisionOut) => void;
+}) {
   return (
     <article
       aria-busy={turn.status === "streaming"}
@@ -212,6 +241,9 @@ function AssistantMessage({ turn }: { turn: AssistantTurn }) {
       ) : null}
       {turn.status === "stopped" ? <p className="mt-2 text-xs text-muted">Stopped.</p> : null}
       <Sources citations={turn.citations} />
+      {turn.interrupt ? (
+        <InterruptCard interrupt={turn.interrupt} decisions={turn.decisions} onDecided={onDecided} />
+      ) : null}
     </article>
   );
 }
