@@ -42,7 +42,7 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/eval",
     label: "Evaluation",
     description: "Latest evaluation metrics and their trend",
-    ready: false,
+    ready: true,
   },
 ];
 
