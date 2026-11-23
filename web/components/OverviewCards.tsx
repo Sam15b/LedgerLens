@@ -8,6 +8,9 @@ import { formatCount, formatMoney, formatUsd } from "@/lib/format";
 
 type Tone = "default" | "danger";
 
+/** Currencies listed under a card's main figure; the rest are counted. */
+const MORE_CURRENCIES = 3;
+
 function KpiCard({
   label,
   value,
@@ -81,11 +84,16 @@ export function OverviewCards({ overview }: { overview: Overview }) {
           detail={
             <>
               {plural(overview.open_invoices, "open invoice")}
-              {otherCurrencies.map((u) => (
+              {otherCurrencies.slice(0, MORE_CURRENCIES).map((u) => (
                 <span key={u.currency} className="block">
                   + {formatMoney(u.outstanding, u.currency)}
                 </span>
               ))}
+              {otherCurrencies.length > MORE_CURRENCIES ? (
+                <span className="block">
+                  + {plural(otherCurrencies.length - MORE_CURRENCIES, "more currency", "more currencies")}
+                </span>
+              ) : null}
             </>
           }
         />
@@ -95,7 +103,7 @@ export function OverviewCards({ overview }: { overview: Overview }) {
           tone={overview.overdue_invoices > 0 ? "danger" : "default"}
           detail={
             overdue.length > 0
-              ? overdue.map((u) => (
+              ? overdue.slice(0, MORE_CURRENCIES + 1).map((u) => (
                   <span key={u.currency} className="block">
                     {formatMoney(u.overdue, u.currency)} past due
                   </span>
