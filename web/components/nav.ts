@@ -30,7 +30,7 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/anomalies",
     label: "Anomalies",
     description: "Flagged invoices with reasons; confirm or dismiss",
-    ready: false,
+    ready: true,
   },
   {
     href: "/reminders",

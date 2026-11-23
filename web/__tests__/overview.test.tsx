@@ -48,7 +48,7 @@ describe("OverviewCards", () => {
   it("links only to pages that exist", () => {
     render(<OverviewCards overview={overview()} />);
     const links = screen.getAllByRole("link").map((a) => a.getAttribute("href"));
-    expect(links).toEqual(["/documents"]);
+    expect(links).toEqual(["/documents", "/anomalies"]);
   });
 
   it("charts LLM cost per day with a label per bar and a table view", () => {
