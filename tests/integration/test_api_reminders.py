@@ -129,3 +129,43 @@ async def test_draft_waits_then_approval_resumes_the_run(client: httpx.AsyncClie
 async def test_unknown_reminder_is_404(client: httpx.AsyncClient) -> None:
     response = await client.post("/reminders/00000000-0000-4000-8000-000000000000/approve")
     assert response.status_code == 404 and response.json()["error"]["code"] == "not_found"
+
+
+async def test_a_pending_draft_can_be_rewritten_until_it_is_decided(
+    client: httpx.AsyncClient,
+) -> None:
+    chat = await client.post("/chat", json={"message": "Chase INV-1"})
+    (draft,) = dict(sse(chat.text))["interrupt"]["reminders"]
+    reminder_id = draft["reminder_id"]
+
+    listed = (await client.get("/reminders")).json()[0]
+    assert listed["invoice_number"] == "INV-1" and listed["vendor_name"] == VENDOR
+    assert listed["currency"] == "GBP" and Decimal(listed["total"]) == Decimal("1200.00")
+    assert listed["due_date"] == "2026-04-30"
+
+    edited = await client.patch(
+        f"/reminders/{reminder_id}", json={"draft": "Dear Acme,\nPlease pay."}
+    )
+    assert edited.status_code == 200
+    assert edited.json()["draft"] == "Dear Acme,\nPlease pay."
+    assert (
+        edited.json()["status"] == "pending_approval" and edited.json()["invoice_number"] == "INV-1"
+    )
+    assert (await client.get(f"/reminders/{reminder_id}")).json()[
+        "draft"
+    ] == "Dear Acme,\nPlease pay."
+
+    blank = await client.patch(f"/reminders/{reminder_id}", json={"draft": "   "})
+    assert blank.status_code == 422
+
+    approved = await client.post(f"/reminders/{reminder_id}/approve")
+    assert approved.json()["reminder"]["draft"] == "Dear Acme,\nPlease pay."
+    late = await client.patch(f"/reminders/{reminder_id}", json={"draft": "changed"})
+    assert late.status_code == 409 and "no longer change" in late.json()["error"]["message"]
+
+
+async def test_editing_an_unknown_reminder_is_404(client: httpx.AsyncClient) -> None:
+    response = await client.patch(
+        "/reminders/00000000-0000-4000-8000-000000000000", json={"draft": "x"}
+    )
+    assert response.status_code == 404

@@ -45,6 +45,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
 from ledgerlens.api.routers import anomalies, chat, documents, health, reminders, stats
+from ledgerlens.api.routers import eval as eval_runs
 from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import configure_logging, reset_request_id, set_request_id
 from ledgerlens.observability.tracing import get_tracer
@@ -172,7 +173,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.add_middleware(  # added last, so it is outermost: 4xx error bodies get CORS headers too
         CORSMiddleware,
         allow_origins=get_settings().cors_origin_list,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH"],
         allow_headers=["Content-Type", REQUEST_ID_HEADER],
         expose_headers=[REQUEST_ID_HEADER, "X-Thread-Id"],
     )
@@ -185,6 +186,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.include_router(documents.router)
     app.include_router(anomalies.router)
     app.include_router(stats.router)
+    app.include_router(eval_runs.router)
     return app
 
 

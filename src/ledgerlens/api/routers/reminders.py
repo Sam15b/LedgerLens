@@ -3,10 +3,15 @@
 * ``GET /reminders`` -- drafts, newest first (``?status=pending_approval`` by default;
   ``?status=all`` for every one), optionally for one invoice;
 * ``GET /reminders/{id}`` -- one draft;
+* ``PATCH /reminders/{id}`` -- ``{"draft": "..."}``: rewrite a draft that is still
+  ``pending_approval`` (409 once it is decided);
 * ``POST /reminders/{id}/approve`` and ``.../reject`` -- record the decision (the draft
   must still be ``pending_approval``: 409 otherwise), then resume the agent run that
   drafted it (``thread_id``) if it is still waiting for that draft. The response says
   whether the run was resumed and what it answered.
+
+Each reminder carries its invoice's number, vendor, amount and due date, so a queue can
+show what it is about.
 
 Approving only marks a draft ``approved``. LedgerLens has no send path: the person sends
 the approved text themselves.
@@ -16,13 +21,14 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.concurrency import run_in_threadpool
 
@@ -47,6 +53,22 @@ class ReminderOut(BaseModel):
     thread_id: str | None = None
     created_at: datetime
     decided_at: datetime | None = None
+    invoice_number: str | None = None
+    vendor_name: str | None = None
+    currency: str | None = None
+    total: Decimal | None = None
+    due_date: date | None = None
+
+
+class DraftIn(BaseModel):
+    draft: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("draft")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("the draft is empty")
+        return value
 
 
 class DecisionOut(BaseModel):
@@ -68,6 +90,33 @@ def get_sessions() -> sessionmaker[Session]:
 
 
 Sessions = Annotated[sessionmaker[Session], Depends(get_sessions)]
+
+
+def with_invoices(session: Session, rows: list[Any]) -> list[ReminderOut]:
+    """The reminders with their invoices' number, vendor, amount and due date."""
+    from sqlalchemy import select
+
+    from ledgerlens.storage.postgres.models import InvoiceRow
+
+    ids = {row.invoice_id for row in rows}
+    invoices = {
+        inv.id: inv for inv in session.scalars(select(InvoiceRow).where(InvoiceRow.id.in_(ids)))
+    }
+    out = []
+    for row in rows:
+        reminder = ReminderOut.model_validate(row)
+        if (invoice := invoices.get(row.invoice_id)) is not None:
+            reminder = reminder.model_copy(
+                update={
+                    "invoice_number": invoice.invoice_number,
+                    "vendor_name": invoice.vendor_name,
+                    "currency": invoice.currency,
+                    "total": invoice.total,
+                    "due_date": invoice.due_date,
+                }
+            )
+        out.append(reminder)
+    return out
 
 
 def _checked_id(reminder_id: str) -> str:
@@ -93,7 +142,7 @@ def list_reminders(
             invoice_id=invoice_id,
             limit=limit,
         )
-        return [ReminderOut.model_validate(row) for row in rows]
+        return with_invoices(session, rows)
 
 
 @router.get("/{reminder_id}", response_model=ReminderOut)
@@ -104,7 +153,25 @@ def get_reminder(reminder_id: str, sessions: Sessions) -> ReminderOut:
         row = ReminderRepository(session).get(_checked_id(reminder_id))
         if row is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no reminder {reminder_id!r}")
-        return ReminderOut.model_validate(row)
+        return with_invoices(session, [row])[0]
+
+
+@router.patch("/{reminder_id}", response_model=ReminderOut)
+def edit_reminder(reminder_id: str, body: DraftIn, sessions: Sessions) -> ReminderOut:
+    """Rewrite a pending draft (409 once it is approved or rejected)."""
+    from ledgerlens.storage.postgres.db import session_scope
+    from ledgerlens.storage.postgres.repositories import ReminderRepository
+
+    try:
+        with session_scope(sessions) as session:
+            row = ReminderRepository(session).edit(_checked_id(reminder_id), body.draft)
+            edited = with_invoices(session, [row])[0]
+    except KeyError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no reminder {reminder_id!r}") from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    logger.info("reminder %s edited", edited.id)
+    return edited
 
 
 def record_decision(
@@ -115,9 +182,8 @@ def record_decision(
 
     try:
         with session_scope(sessions) as session:
-            return ReminderOut.model_validate(
-                ReminderRepository(session).decide(reminder_id, decision)
-            )
+            row = ReminderRepository(session).decide(reminder_id, decision)
+            return with_invoices(session, [row])[0]
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"no reminder {reminder_id!r}") from exc
     except ValueError as exc:
