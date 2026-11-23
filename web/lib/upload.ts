@@ -1,4 +1,11 @@
-import { apiBaseUrl, apiErrorMessage, type UploadOut, UNREACHABLE } from "@/lib/api";
+import {
+  api,
+  apiBaseUrl,
+  apiErrorMessage,
+  load,
+  type UploadOut,
+  UNREACHABLE,
+} from "@/lib/api";
 
 /** File types ingestion takes (`loader.allowed_mime_types` in configs/ingestion.yaml). */
 export const ACCEPTED_TYPES = ["application/pdf", "image/png", "image/jpeg", "image/tiff"];
@@ -58,4 +65,52 @@ export function uploadFile(
     form.append("file", file, file.name);
     xhr.send(form);
   });
+}
+
+export type Settled = { status: "ready" | "failed"; error: string | null };
+
+/** `GET /documents/{id}`'s status, or `null` when it cannot be read right now. */
+async function readStatus(documentId: string): Promise<Settled | { status: string } | null> {
+  const result = await load((init) =>
+    api.GET("/documents/{document_id}", { ...init, params: { path: { document_id: documentId } } }),
+  );
+  return result.ok ? { status: result.data.status, error: result.data.error ?? null } : null;
+}
+
+/**
+ * Polls the document until the worker has finished with it (`ready` or `failed`). A
+ * failed read is retried; aborting ``signal`` or running past ``timeoutMs`` rejects.
+ */
+export async function waitForDocument(
+  documentId: string,
+  {
+    signal,
+    everyMs = 2_000,
+    timeoutMs = 10 * 60_000,
+    read = readStatus,
+  }: {
+    signal?: AbortSignal;
+    everyMs?: number;
+    timeoutMs?: number;
+    read?: (documentId: string) => Promise<Settled | { status: string } | null>;
+  } = {},
+): Promise<Settled> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    signal?.throwIfAborted();
+    const found = await read(documentId);
+    if (found && (found.status === "ready" || found.status === "failed")) return found as Settled;
+    if (Date.now() + everyMs > deadline) throw new Error("The document is still being processed.");
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, everyMs);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
+  }
 }

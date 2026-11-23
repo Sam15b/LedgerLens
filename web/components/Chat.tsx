@@ -2,6 +2,7 @@
 
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
+import { AttachButton, AttachmentList, useAttachments } from "@/components/ChatAttachments";
 import { CitedText, Sources } from "@/components/Citation";
 import { type DecisionOut, InterruptCard } from "@/components/InterruptCard";
 import { ToolTimeline } from "@/components/ToolTimeline";
@@ -32,6 +33,7 @@ export function Chat() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const attachments = useAttachments();
   const abort = useRef<AbortController | null>(null);
   const nextKey = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
@@ -50,21 +52,24 @@ export function Chat() {
 
   async function send(message: string) {
     const text = message.trim();
-    if (!text || streaming) return;
+    if (!text || streaming || attachments.busy) return;
     const userKey = nextKey.current++;
     const key = nextKey.current++;
+    const documentIds = attachments.readyIds;
+    const names = attachments.items.filter((a) => a.state === "ready").map((a) => a.name);
     setTurns((current) => [
       ...current,
-      { role: "user", key: userKey, text, attachments: [] },
+      { role: "user", key: userKey, text, attachments: names },
       newAssistantTurn(key),
     ]);
     setInput("");
+    attachments.clear();
     setStreaming(true);
     const controller = new AbortController();
     abort.current = controller;
     try {
       const { threadId: thread } = await streamChat(
-        { message: text, thread_id: threadId },
+        { message: text, thread_id: threadId, document_ids: documentIds },
         {
           signal: controller.signal,
           onEvent: (event) => {
@@ -122,10 +127,11 @@ export function Chat() {
     abort.current?.abort();
     setTurns([]);
     setThreadId(null);
+    attachments.clear();
   }
 
   const waiting = waitingForDecision(turns);
-  const blocked = streaming || waiting;
+  const blocked = streaming || waiting || attachments.busy;
 
   return (
     <div className="flex min-h-[70vh] flex-col gap-4">
@@ -164,6 +170,9 @@ export function Chat() {
           turn.role === "user" ? (
             <li key={turn.key} className="self-end max-w-[80%] rounded-lg bg-accent-soft px-4 py-2 text-sm">
               <p className="whitespace-pre-wrap">{turn.text}</p>
+              {turn.attachments.length > 0 ? (
+                <p className="mt-1 text-xs text-muted">Attached: {turn.attachments.join(", ")}</p>
+              ) : null}
             </li>
           ) : (
             <li key={turn.key} className="max-w-full">
@@ -181,7 +190,9 @@ export function Chat() {
         {waiting ? (
           <p className="text-xs text-muted">Approve or reject the reminder drafts above to continue.</p>
         ) : null}
+        <AttachmentList items={attachments.items} onRemove={attachments.remove} />
         <div className="flex items-end gap-2 rounded-lg border border-border bg-surface p-2 focus-within:border-accent">
+          <AttachButton onFiles={attachments.add} disabled={waiting} />
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
