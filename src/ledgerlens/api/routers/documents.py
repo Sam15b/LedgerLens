@@ -9,8 +9,12 @@
 * ``GET /documents`` -- newest first, filtered by ``status`` / ``doc_type``, paged with
   ``limit`` / ``offset``;
 * ``GET /documents/{id}`` -- the document, its status (and ``error`` if it failed), how
-  many chunks it was split into, and the record extracted from it (``record_type``,
-  ``record_id`` and the typed fields, line items included) once it is stored.
+  many chunks it was split into, the record extracted from it (``record_type``,
+  ``record_id`` and the typed fields, line items included) once it is stored, and
+  whether its original file is kept (``has_file``);
+* ``GET /documents/{id}/file`` -- that original file, served inline with its sniffed
+  type (the dashboard shows it next to the extracted fields). Only files uploaded here
+  are kept; a document ingested from a folder by the CLI has none (404).
 
 The raw file is kept at ``<upload_dir>/<document_id>/<original name>``: the worker ingests
 it by path (so API and worker must share the folder) and the document keeps its original
@@ -35,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -149,6 +154,8 @@ class DocumentDetail(DocumentOut):
     record_id: str | None = None
     record: dict[str, Any] | None = None
     """The extracted fields, as stored (``None`` until the document is stored)."""
+    has_file: bool = False
+    """The uploaded file is kept: ``GET /documents/{id}/file`` serves it."""
 
 
 # --------------------------------------------------------------------------- raw files
@@ -176,6 +183,18 @@ class RawFileStore:
         partial.write_bytes(data)
         os.replace(partial, path)  # the worker never sees half a file
         return path.resolve()
+
+    def find(self, document_id: str, filename: str) -> Path | None:
+        """The kept upload of a document, or ``None`` (never uploaded here, or removed).
+
+        ``filename`` comes from the database, but a name that would leave the document's
+        folder is refused all the same.
+        """
+        folder = (self.root / document_id).resolve()
+        path = (folder / filename).resolve()
+        if path.parent != folder or not path.is_file():
+            return None
+        return path
 
 
 # --------------------------------------------------------------------------- dependencies
@@ -358,12 +377,50 @@ async def list_documents(
     return [DocumentOut.of(document) for document in documents]
 
 
+def not_found(document_id: str) -> HTTPException:
+    return HTTPException(status.HTTP_404_NOT_FOUND, f"no document {document_id!r}")
+
+
 @router.get("/{document_id}", response_model=DocumentDetail)
-async def get_document(document_id: str, store: Store) -> DocumentDetail:
+async def get_document(document_id: str, store: Store, raw: RawStore) -> DocumentDetail:
     """One document with its status and the fields extracted from it."""
     detail = None
     if is_document_id(document_id.lower()):
         detail = await run_in_threadpool(store.detail, document_id.lower())
     if detail is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no document {document_id!r}")
+        raise not_found(document_id)
+    detail.has_file = await run_in_threadpool(raw.find, detail.id, detail.filename) is not None
     return detail
+
+
+FILE_TYPES: dict[str, dict[str, Any]] = {
+    t: {} for t in ("application/pdf", "image/png", "image/jpeg", "image/tiff")
+}
+
+
+@router.get(
+    "/{document_id}/file",
+    response_class=FileResponse,
+    responses={200: {"content": FILE_TYPES, "description": "The uploaded file"}},
+)
+async def get_document_file(document_id: str, store: Store, raw: RawStore) -> FileResponse:
+    """The document's original file, as uploaded (404 when it is not kept)."""
+    document = None
+    if is_document_id(document_id.lower()):
+        document = await run_in_threadpool(store.get, document_id.lower())
+    if document is None:
+        raise not_found(document_id)
+    path = await run_in_threadpool(raw.find, document.id, document.filename)
+    if path is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"the original file of document {document.id} is not kept "
+            "(only files uploaded through POST /documents are)",
+        )
+    return FileResponse(
+        path,
+        media_type=document.mime_type or "application/octet-stream",
+        filename=document.filename,
+        content_disposition_type="inline",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"},
+    )

@@ -37,6 +37,14 @@ export function apiBaseUrl(): string {
   return shared ?? DEFAULT_API_URL;
 }
 
+/**
+ * The API's address as the browser sees it, for URLs a server component puts in the page
+ * (an iframe's `src`): never the private `LEDGERLENS_API_URL`.
+ */
+export function publicApiUrl(): string {
+  return process.env.NEXT_PUBLIC_API_URL ?? DEFAULT_API_URL;
+}
+
 export function createApiClient(baseUrl: string = apiBaseUrl()) {
   return createClient<paths>({ baseUrl });
 }

@@ -280,3 +280,44 @@ def test_get_unknown_is_404(env: Env, document_id: str) -> None:
     response = env.client.get(f"/documents/{document_id}")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
+
+
+# --------------------------------------------------------------------------- original file
+
+
+def test_get_says_whether_the_file_is_kept(env: Env) -> None:
+    env.store = FakeStore(document())
+    assert env.client.get(f"/documents/{DOC_ID}").json()["has_file"] is False
+    env.raw.save(DOC_ID, "inv.pdf", PDF)
+    assert env.client.get(f"/documents/{DOC_ID}").json()["has_file"] is True
+
+
+def test_the_file_is_served_inline_with_its_type(env: Env) -> None:
+    env.store = FakeStore(document())
+    env.raw.save(DOC_ID, "inv.pdf", PDF)
+    response = env.client.get(f"/documents/{DOC_ID.upper()}/file")
+    assert response.status_code == 200
+    assert response.content == PDF
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith("inline")
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_file_that_is_not_kept_is_404(env: Env) -> None:
+    env.store = FakeStore(document())
+    response = env.client.get(f"/documents/{DOC_ID}/file")
+    assert response.status_code == 404
+    assert "not kept" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("document_id", ["not-a-uuid", "00000000-0000-4000-8000-000000000000"])
+def test_the_file_of_an_unknown_document_is_404(env: Env, document_id: str) -> None:
+    assert env.client.get(f"/documents/{document_id}/file").status_code == 404
+
+
+def test_find_refuses_a_name_outside_the_document_folder(tmp_path: Path) -> None:
+    raw = RawFileStore(tmp_path)
+    (tmp_path / "secret.txt").write_text("no")
+    (tmp_path / DOC_ID).mkdir()
+    assert raw.find(DOC_ID, "../secret.txt") is None
+    assert raw.find(DOC_ID, "missing.pdf") is None
