@@ -172,7 +172,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.add_middleware(  # added last, so it is outermost: 4xx error bodies get CORS headers too
         CORSMiddleware,
         allow_origins=get_settings().cors_origin_list,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH"],
         allow_headers=["Content-Type", REQUEST_ID_HEADER],
         expose_headers=[REQUEST_ID_HEADER, "X-Thread-Id"],
     )

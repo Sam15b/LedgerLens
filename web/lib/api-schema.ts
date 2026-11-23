@@ -195,7 +195,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Edit Reminder
+         * @description Rewrite a pending draft (409 once it is approved or rejected).
+         */
+        patch: operations["edit_reminder_reminders__reminder_id__patch"];
         trace?: never;
     };
     "/reminders/{reminder_id}/approve": {
@@ -465,6 +469,11 @@ export interface components {
          * @enum {string}
          */
         DocumentStatus: "queued" | "processing" | "ready" | "failed";
+        /** DraftIn */
+        DraftIn: {
+            /** Draft */
+            draft: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -516,20 +525,30 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Currency */
+            currency?: string | null;
             /** Decided At */
             decided_at?: string | null;
             /** Draft */
             draft: string;
+            /** Due Date */
+            due_date?: string | null;
             /** Id */
             id: string;
             /** Invoice Id */
             invoice_id: string;
+            /** Invoice Number */
+            invoice_number?: string | null;
             /** Status */
             status: string;
             /** Thread Id */
             thread_id?: string | null;
             /** Tone */
             tone: string;
+            /** Total */
+            total?: string | null;
+            /** Vendor Name */
+            vendor_name?: string | null;
         };
         /** ReviewIn */
         ReviewIn: {
@@ -912,6 +931,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReminderOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_reminder_reminders__reminder_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                reminder_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftIn"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

@@ -36,7 +36,7 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/reminders",
     label: "Reminders",
     description: "Drafted payment reminders waiting for approval",
-    ready: false,
+    ready: true,
   },
   {
     href: "/eval",

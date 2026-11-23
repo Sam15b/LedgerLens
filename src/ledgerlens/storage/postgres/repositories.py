@@ -783,6 +783,20 @@ class ReminderRepository:
         self.session.flush()
         return row
 
+    def edit(self, reminder_id: str, draft: str) -> ReminderRow:
+        """A person's rewrite of a draft before deciding on it. Raises ``KeyError`` for an
+        unknown id and ``ValueError`` once the draft is decided (its text is then final)."""
+        row = self.get(reminder_id)
+        if row is None:
+            raise KeyError(reminder_id)
+        if row.status != "pending_approval":
+            raise ValueError(
+                f"reminder {reminder_id} is already {row.status}: it can no longer change"
+            )
+        row.draft = draft
+        self.session.flush()
+        return row
+
     def find(
         self, *, status: str | None = None, invoice_id: str | None = None, limit: int = 100
     ) -> list[ReminderRow]:
