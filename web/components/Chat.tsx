@@ -2,6 +2,7 @@
 
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
+import { ToolTimeline } from "@/components/ToolTimeline";
 import { ChatError, streamChat } from "@/lib/chat";
 import {
   type AssistantTurn,
@@ -197,6 +198,7 @@ function AssistantMessage({ turn }: { turn: AssistantTurn }) {
       aria-busy={turn.status === "streaming"}
       className="rounded-lg border border-border bg-surface px-4 py-3 text-sm"
     >
+      <ToolTimeline steps={turn.tools} />
       {turn.text ? (
         <p className="whitespace-pre-wrap leading-relaxed">{turn.text}</p>
       ) : turn.status === "streaming" ? (
