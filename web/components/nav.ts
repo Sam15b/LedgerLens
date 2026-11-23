@@ -18,7 +18,7 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/documents",
     label: "Documents",
     description: "Upload, status and extracted fields next to the document",
-    ready: false,
+    ready: true,
   },
   {
     href: "/chat",
