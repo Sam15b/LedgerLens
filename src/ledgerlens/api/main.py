@@ -5,6 +5,10 @@ Every request gets a request id (:class:`RequestIdMiddleware`): the caller's
 the request (``core.logging``), returned in the ``X-Request-ID`` header, and included in
 every error body, so a user's report can be matched to the logs.
 
+A request that runs past ``REQUEST_TIMEOUT_S`` is answered 504 (``timeout``,
+:class:`TimeoutMiddleware`); a chat run past ``CHAT_TIMEOUT_S`` is stopped with an
+``error`` event.
+
 Errors have one shape (:func:`error_body`)::
 
     {"error": {"code": "not_found", "message": "...", "request_id": "..."}}
@@ -32,6 +36,7 @@ not run on the Proactor loop uvicorn picks on Windows.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -73,7 +78,9 @@ CODES = {
     415: "unsupported_media_type",
     422: "invalid_request",
     429: "too_many_requests",
+    502: "bad_gateway",
     503: "unavailable",
+    504: "timeout",
 }
 
 
@@ -102,6 +109,52 @@ class RequestIdMiddleware:
             await self.app(scope, receive, send_with_id)
         finally:
             reset_request_id(token)
+
+
+class TimeoutMiddleware:
+    """Answers 504 (``timeout``) when a request runs past ``REQUEST_TIMEOUT_S``.
+
+    Pure ASGI, inside :class:`RequestIdMiddleware` so the error carries the request id.
+    ``/chat`` is left alone: it streams for as long as the run takes, under its own
+    deadline (``CHAT_TIMEOUT_S``). A response that has already started cannot become a
+    504; it is cut off and logged. Work handed to a thread pool finishes in the
+    background, but the client gets its answer on time.
+    """
+
+    def __init__(self, app: ASGIApp, exempt: frozenset[str] = frozenset({"/chat"})) -> None:
+        self.app = app
+        self.exempt = exempt
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["path"] in self.exempt:
+            await self.app(scope, receive, send)
+            return
+        seconds = get_settings().request_timeout_s
+        started = False
+
+        async def tracked(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            async with asyncio.timeout(seconds):
+                await self.app(scope, receive, tracked)
+        except TimeoutError:
+            logger.warning("%s %s ran past %gs", scope["method"], scope["path"], seconds)
+            if started:
+                return
+            request_id = (scope.get("state") or {}).get("request_id")
+            body = {
+                "error": {
+                    "code": "timeout",
+                    "message": f"the request took longer than {seconds:g} s; try again",
+                    "request_id": request_id,
+                }
+            }
+            response = JSONResponse(body, status_code=504)
+            await response(scope, receive, send)
 
 
 def request_id_of(request: Request) -> str | None:
@@ -179,6 +232,7 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
     app.state.agents = agents or AgentProvider()
     chat_limit = parse_limit(get_settings().chat_rate_limit)
     app.state.chat_limiter = SlidingWindowLimiter(chat_limit) if chat_limit else None
+    app.add_middleware(TimeoutMiddleware)  # innermost of these: it sees the request id
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(  # added last, so it is outermost: 4xx error bodies get CORS headers too
         CORSMiddleware,

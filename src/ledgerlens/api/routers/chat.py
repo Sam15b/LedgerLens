@@ -15,7 +15,8 @@ The response is ``text/event-stream``; each event is ``event: <type>`` and one J
 * ``interrupt`` -- ``{"thread_id", "type": "reminder_approval", "reminders": [...]}``: the
   run waits for a person to approve or reject reminder drafts
   (``POST /reminders/{id}/approve|reject``);
-* ``error`` -- ``{"message"}``: the run itself failed (agents' own errors are replies);
+* ``error`` -- ``{"message"}``: the run itself failed, or ran past ``CHAT_TIMEOUT_S``
+  and was stopped (agents' own errors are replies);
 * ``done`` -- ``{"thread_id", "status", "intent", "errors"}``: last event of every
   stream; ``status`` is ``completed``, or ``interrupted`` when the run waits for a person.
 
@@ -31,6 +32,7 @@ router, the agents, their tool calls and LLM calls nested under it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -46,6 +48,7 @@ from pydantic import BaseModel, Field
 
 from ledgerlens.api.agent import AgentRuntime, AgentUnavailableError
 from ledgerlens.api.ratelimit import enforce
+from ledgerlens.core.config import get_settings
 from ledgerlens.core.logging import get_request_id
 from ledgerlens.observability.tracing import span
 
@@ -148,17 +151,48 @@ def node_events(node: str, values: Any, cited: set[str]) -> list[str]:
     return out
 
 
+async def with_deadline(stream: AsyncIterator[str], seconds: float) -> AsyncIterator[str]:
+    """``stream``'s items until it ends; ``TimeoutError`` once ``seconds`` have passed.
+
+    The deadline is applied to each step, never across a ``yield``: a timeout scope
+    held over a ``yield`` would cancel whatever the consumer is awaiting instead.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    iterator = aiter(stream)
+    try:
+        while True:
+            left = deadline - loop.time()
+            if left <= 0:
+                raise TimeoutError
+            try:
+                item = await asyncio.wait_for(anext(iterator), left)
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
 async def events(runtime: AgentRuntime, request: ChatRequest, thread_id: str) -> AsyncIterator[str]:
     attributes = {"thread_id": thread_id, "request_id": get_request_id()}
     inputs = {"message": request.message, "document_ids": request.document_ids}
     with span("chat", inputs=inputs, attributes=attributes) as traced:
-        async for event in run_events(runtime, request, thread_id):
-            yield event
+        limit = get_settings().chat_timeout_s
+        try:
+            async for event in with_deadline(run_events(runtime, request, thread_id), limit):
+                yield event
+        except TimeoutError:
+            logger.warning("chat run %s stopped after %gs", thread_id, limit)
+            message = f"the run took longer than {limit:g} s and was stopped"
+            yield sse("error", {"message": message})
         state = await runtime.graph.aget_state({"configurable": {"thread_id": thread_id}})
         values = state.values or {}
         done = {
             "thread_id": thread_id,
-            "status": "interrupted" if state.next else "completed",
+            "status": "interrupted" if waiting(state) else "completed",
             "intent": values.get("intent"),
             "errors": values.get("errors", []),
         }
@@ -189,6 +223,12 @@ async def run_events(
         yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
 
 
+def waiting(state: Any) -> bool:
+    """The thread is paused for a person (an ``interrupt``), not merely unfinished: a run
+    stopped by the deadline leaves nodes pending, and the next message starts afresh."""
+    return bool(getattr(state, "interrupts", ()))
+
+
 def limit_chat(request: Request) -> None:
     """429 when this client started too many runs (after its API key was checked)."""
     enforce(request.app.state.chat_limiter, request, "chat requests")
@@ -207,7 +247,7 @@ async def chat(
     runtime = await get_agent(request)  # after the body is validated: a bad request is 422
     thread_id = body.thread_id or f"chat-{uuid.uuid4().hex[:16]}"
     current = await runtime.graph.aget_state({"configurable": {"thread_id": thread_id}})
-    if current.next:
+    if waiting(current):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"thread {thread_id} is waiting for a decision on its reminder drafts: approve or "
