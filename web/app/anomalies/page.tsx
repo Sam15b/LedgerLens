@@ -5,6 +5,7 @@ import { Suspense } from "react";
 
 import { AnomalyCard } from "@/components/AnomalyCard";
 import { ErrorPanel, Placeholder } from "@/components/ErrorPanel";
+import { ReviewActions } from "@/components/ReviewActions";
 import { api, load } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Anomalies" };
@@ -74,7 +75,10 @@ async function AnomalyList({ searchParams }: { searchParams: PageProps<"/anomali
           <ul className="flex flex-col gap-3">
             {result.data.map((anomaly) => (
               <li key={anomaly.id}>
-                <AnomalyCard anomaly={anomaly} />
+                <AnomalyCard
+                  anomaly={anomaly}
+                  actions={<ReviewActions scoreId={anomaly.id} current={anomaly.review} />}
+                />
               </li>
             ))}
           </ul>
