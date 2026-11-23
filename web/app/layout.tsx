@@ -4,6 +4,7 @@ import { Suspense } from "react";
 
 import { ApiStatus, ApiStatusPending } from "@/components/ApiStatus";
 import { Sidebar } from "@/components/Sidebar";
+import { SignOut } from "@/components/SignOut";
 import { THEME_SCRIPT } from "@/components/theme";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
@@ -42,7 +43,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               <Suspense fallback={<ApiStatusPending />}>
                 <ApiStatus />
               </Suspense>
-              <ThemeToggle />
+              <div className="flex items-center justify-between gap-2">
+                <ThemeToggle />
+                <Suspense>
+                  <SignOut />
+                </Suspense>
+              </div>
             </div>
           }
         />

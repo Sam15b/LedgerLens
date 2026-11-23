@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
 
+    api_keys: str = ""
+    """Comma-separated keys a caller must send (``X-API-Key``); empty turns auth off (dev)."""
+
+    @property
+    def api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
+
+    chat_rate_limit: str = "20/minute"
+    request_timeout_s: float = Field(default=60.0, gt=0)
+    """Longest an ordinary request may take before the API answers 504."""
+    chat_timeout_s: float = Field(default=180.0, gt=0)
+    """Longest a chat run may stream before it is stopped (an ``error`` event)."""
+    """Chat runs one client may start: ``N/second|minute|hour`` or ``N/<k>s``; empty = off."""
+
     # PostgreSQL
     database_url: str = "postgresql+psycopg://ledger:ledger@localhost:5432/ledgerlens"
 

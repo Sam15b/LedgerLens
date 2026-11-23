@@ -107,6 +107,36 @@ Secrets and per-environment values come from `.env` (see `.env.example`). Tunabl
 model aliases, chunk sizes, thresholds — live in `configs/*.yaml` and are validated at load
 time (`ledgerlens.core.config.get_config()`); unknown keys are rejected.
 
+### Exposing a demo: access, budget and abuse
+
+Every chat run and every uploaded document can call paid LLM APIs, so a public demo
+needs its spending limited on purpose. What is in place:
+
+| Protection | Setting | Default |
+|------------|---------|---------|
+| API key on every route but `/health` and `/ready` (401 without one) | `API_KEYS` (comma-separated, so keys can be rotated with overlap) | off when empty |
+| Dashboard login: a signed 12-hour session cookie; the browser never sees the API key | `DASHBOARD_PASSWORD`, `DASHBOARD_SESSION_SECRET`, `LEDGERLENS_API_KEY` (web) | off when empty |
+| Chat runs per user, sliding window (429 + `Retry-After`) | `CHAT_RATE_LIMIT` | `20/minute` |
+| Request deadline (504) / chat run deadline (`error` event) | `REQUEST_TIMEOUT_S` / `CHAT_TIMEOUT_S` | 60 s / 180 s |
+| Upload size and type (413 / 415) | `loader.max_file_mb`, `allowed_mime_types` in `configs/ingestion.yaml` | 25 MB; PDF, PNG, JPEG, TIFF |
+| Agent steps per run | `max_steps` in `configs/agents.yaml` | 8 |
+| Reminders are drafts only: nothing is ever sent | none | always |
+
+Rough worst case, from the prices in `configs/models.yaml` (an estimate, not a
+measurement): a `smart` call (gpt-4o, about 4k tokens in and 500 out) costs about
+$0.015. A run of 8 such steps costs about $0.12, so one user at the default limit could
+spend up to about $2.40 a minute. Before exposing the demo:
+
+- set a hard monthly spending cap with each LLM provider, which is the only limit that
+  holds whatever happens here;
+- lower `CHAT_RATE_LIMIT` (for example `5/minute`), or point the `smart` alias at a
+  cheaper model;
+- run with `LLM_COST_DB=true` so the overview's cost-per-day chart shows real spend;
+- remember the rate limit is counted per API process: with several processes, add a
+  shared limit at the load balancer;
+- `/docs` and `/openapi.json` stay readable without a key (they describe the API, not
+  its data); put them behind the proxy too if that matters.
+
 ## Datasets
 
 [SROIE](https://rrc.cvc.uab.es/?ch=13), [CORD](https://github.com/clovaai/cord),

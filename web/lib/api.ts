@@ -24,29 +24,39 @@ export type UploadOut = Schemas["UploadOut"];
 
 const DEFAULT_API_URL = "http://localhost:8000";
 
+/** Where the browser reaches the API: this site's forwarder (app/api/[...path]/route.ts). */
+export const BROWSER_API_PATH = "/api";
+
 /**
- * Where the API is. The browser uses `NEXT_PUBLIC_API_URL` (inlined at build time); the
- * server prefers `LEDGERLENS_API_URL`, which can be a private address such as
- * `http://api:8000` inside docker compose.
+ * The API's address for the dashboard's server: `LEDGERLENS_API_URL`, which can be a
+ * private address such as `http://api:8000` inside docker compose.
  */
-export function apiBaseUrl(): string {
-  const shared = process.env.NEXT_PUBLIC_API_URL;
-  if (typeof window === "undefined") {
-    return process.env.LEDGERLENS_API_URL ?? shared ?? DEFAULT_API_URL;
-  }
-  return shared ?? DEFAULT_API_URL;
+export function serverApiUrl(): string {
+  return (process.env.LEDGERLENS_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
 }
 
 /**
- * The API's address as the browser sees it, for URLs a server component puts in the page
- * (an iframe's `src`): never the private `LEDGERLENS_API_URL`.
+ * Where calls go: the API itself on the server; on the browser, this site's `/api`
+ * forwarder, which adds the API key (the browser never holds it) and checks the session.
  */
+export function apiBaseUrl(): string {
+  return typeof window === "undefined" ? serverApiUrl() : BROWSER_API_PATH;
+}
+
+/** The API's address as the browser sees it, for URLs a server component puts in the page
+ * (an iframe's `src`). */
 export function publicApiUrl(): string {
-  return process.env.NEXT_PUBLIC_API_URL ?? DEFAULT_API_URL;
+  return BROWSER_API_PATH;
+}
+
+/** The headers the server sends with every call: the API key, when one is configured. */
+function serverHeaders(): Record<string, string> {
+  const key = typeof window === "undefined" ? process.env.LEDGERLENS_API_KEY : undefined;
+  return key ? { "X-API-Key": key } : {};
 }
 
 export function createApiClient(baseUrl: string = apiBaseUrl()) {
-  return createClient<paths>({ baseUrl });
+  return createClient<paths>({ baseUrl, headers: serverHeaders() });
 }
 
 export const api = createApiClient();
