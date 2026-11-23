@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     def api_key_list(self) -> list[str]:
         return [k.strip() for k in self.api_keys.split(",") if k.strip()]
 
+    chat_rate_limit: str = "20/minute"
+    """Chat runs one client may start: ``N/second|minute|hour`` or ``N/<k>s``; empty = off."""
+
     # PostgreSQL
     database_url: str = "postgresql+psycopg://ledger:ledger@localhost:5432/ledgerlens"
 

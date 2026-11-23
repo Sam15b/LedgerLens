@@ -1246,6 +1246,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "description": "Over the chat rate limit; see Retry-After"
           }
         },
         "security": [

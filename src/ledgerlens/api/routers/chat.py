@@ -19,6 +19,9 @@ The response is ``text/event-stream``; each event is ``event: <type>`` and one J
 * ``done`` -- ``{"thread_id", "status", "intent", "errors"}``: last event of every
   stream; ``status`` is ``completed``, or ``interrupted`` when the run waits for a person.
 
+Each client may start ``CHAT_RATE_LIMIT`` runs (default 20 a minute; every run can call
+paid LLMs): beyond it, 429 with ``Retry-After`` and no run.
+
 A conversation is a ``thread_id`` (one is made if the request has none; send it back to
 continue). The graph's checkpointer keeps the thread, so each turn starts from the last.
 
@@ -33,15 +36,16 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Overwrite
 from pydantic import BaseModel, Field
 
 from ledgerlens.api.agent import AgentRuntime, AgentUnavailableError
+from ledgerlens.api.ratelimit import enforce
 from ledgerlens.core.logging import get_request_id
 from ledgerlens.observability.tracing import span
 
@@ -185,8 +189,19 @@ async def run_events(
         yield sse("error", {"message": f"{type(exc).__name__}: {exc}"})
 
 
-@router.post("/chat", response_class=StreamingResponse)
-async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
+def limit_chat(request: Request) -> None:
+    """429 when this client started too many runs (after its API key was checked)."""
+    enforce(request.app.state.chat_limiter, request, "chat requests")
+
+
+@router.post(
+    "/chat",
+    response_class=StreamingResponse,
+    responses={429: {"description": "Over the chat rate limit; see Retry-After"}},
+)
+async def chat(
+    body: ChatRequest, request: Request, _: Annotated[None, Depends(limit_chat)]
+) -> StreamingResponse:
     """Run the agents on a message; stream ``tool_call`` / ``tool_result`` / ``token`` /
     ``citation`` / ``interrupt`` events and a final ``done`` (SSE)."""
     runtime = await get_agent(request)  # after the body is validated: a bad request is 422

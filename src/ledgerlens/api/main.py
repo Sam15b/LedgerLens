@@ -13,6 +13,9 @@ for HTTP errors (``code`` from the status), request validation (``invalid_reques
 the field ``details``) and anything unexpected (``internal_error``, 500, logged with its
 traceback; the message does not leak internals).
 
+``POST /chat`` is rate-limited per client (``CHAT_RATE_LIMIT``, :mod:`.ratelimit`): over
+it, 429 with ``Retry-After``.
+
 With ``API_KEYS`` set, every route but ``/health`` and ``/ready`` needs one of them in
 ``X-API-Key`` (:func:`ledgerlens.api.deps.require_api_key`); 401 otherwise.
 
@@ -48,6 +51,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
 from ledgerlens.api.deps import API_KEY_HEADER, require_api_key
+from ledgerlens.api.ratelimit import SlidingWindowLimiter, parse_limit
 from ledgerlens.api.routers import anomalies, chat, documents, health, reminders, stats
 from ledgerlens.api.routers import eval as eval_runs
 from ledgerlens.core.config import get_settings
@@ -173,6 +177,8 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
         description="Agentic GraphRAG over invoices, purchase orders and contracts.",
     )
     app.state.agents = agents or AgentProvider()
+    chat_limit = parse_limit(get_settings().chat_rate_limit)
+    app.state.chat_limiter = SlidingWindowLimiter(chat_limit) if chat_limit else None
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(  # added last, so it is outermost: 4xx error bodies get CORS headers too
         CORSMiddleware,
