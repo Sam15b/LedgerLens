@@ -24,7 +24,7 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/chat",
     label: "Chat",
     description: "Ask the agents; tool calls and citations as they stream",
-    ready: false,
+    ready: true,
   },
   {
     href: "/anomalies",
