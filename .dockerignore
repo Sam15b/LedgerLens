@@ -1,0 +1,34 @@
+# Build context for the Python images (infra/docker/{api,worker,mcp}.Dockerfile). They need
+# pyproject.toml, README.md, src/, configs/, migrations/, alembic.ini and scripts/ only.
+# web/ is built from its own context (web/.dockerignore).
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+coverage.xml
+.env
+.env.*
+!.env.example
+
+# data, weights and outputs never go into an image (volumes at run time)
+data
+models
+outputs
+mlruns
+wandb
+
+# not needed to run the services
+web
+ml
+eval
+tests
+docs
+notebooks
+infra/aws
+infra/gcp
