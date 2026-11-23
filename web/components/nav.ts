@@ -18,7 +18,7 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/documents",
     label: "Documents",
     description: "Upload, status and extracted fields next to the document",
-    ready: false,
+    ready: true,
   },
   {
     href: "/chat",
@@ -49,4 +49,9 @@ export const NAV_ITEMS: NavItem[] = [
 /** Whether ``href`` is the current page (``/`` only matches itself). */
 export function isActive(href: string, pathname: string): boolean {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
+}
+
+/** Whether ``href`` is a dashboard page that is built (links to others would 404). */
+export function pageReady(href: string): boolean {
+  return NAV_ITEMS.some((item) => item.ready && isActive(item.href, href));
 }

@@ -8,6 +8,7 @@ pnpm install
 pnpm dev          # http://localhost:3000 (or `make web` from the repo root)
 pnpm lint
 pnpm typecheck
+pnpm test         # Vitest + Testing Library (__tests__/); pnpm test:watch while editing
 pnpm build
 ```
 
