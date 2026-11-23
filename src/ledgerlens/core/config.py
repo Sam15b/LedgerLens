@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     def api_key_list(self) -> list[str]:
         return [k.strip() for k in self.api_keys.split(",") if k.strip()]
 
+    mcp_url: str = ""
+    """The MCP server the agents call; overrides ``configs/agents.yaml`` ``mcp.url``
+    (``http://mcp:8765/mcp`` in docker compose)."""
     chat_rate_limit: str = "20/minute"
     request_timeout_s: float = Field(default=60.0, gt=0)
     """Longest an ordinary request may take before the API answers 504."""

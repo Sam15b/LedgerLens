@@ -12,7 +12,7 @@ Package everything into containers, run it locally with one command, and deploy 
 |---------|-------|------|-------|
 | `web` | `infra/docker/web.Dockerfile` (Next.js standalone) | 3000 | Talks to `api` only |
 | `api` | `infra/docker/api.Dockerfile` (FastAPI + uvicorn) | 8000 | Runs LangGraph |
-| `mcp` | `infra/docker/mcp.Dockerfile` | 8100 | MCP over streamable HTTP |
+| `mcp` | `infra/docker/mcp.Dockerfile` | 8765 | MCP over streamable HTTP (`/mcp`) |
 | `worker` | `infra/docker/worker.Dockerfile` | — | Ingestion queue consumer |
 | `postgres` | `postgres:16` | 5432 | Local only (RDS / Cloud SQL in cloud) |
 | `neo4j` | `neo4j:5` | 7474 / 7687 | Local only (AuraDB in cloud) |
@@ -21,6 +21,12 @@ Package everything into containers, run it locally with one command, and deploy 
 | `redis` | `redis:7` | 6379 | Job queue |
 
 ## docker-compose.yml (sketch)
+
+The implemented stack is the repo-root [`docker-compose.yml`](../../docker-compose.yml) (with
+`docker-compose.override.yml` for development). It differs from this first sketch in three
+ways. An `init` job runs migrations and creates the Pinecone index and Neo4j schema. The
+browser talks only to `web`, which forwards to the API with `LEDGERLENS_API_KEY`. And
+`ollama` sits behind the `local-llm` profile.
 
 ```yaml
 services:

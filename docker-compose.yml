@@ -1,9 +1,38 @@
-# Local infrastructure. App services (api, worker, mcp, web) are added in later phases.
-# See docs/layers/10-deployment.md
+# The whole system: stores, the app's four services, and a one-off init job.
+# See docs/layers/10-deployment.md.
 #
-#   docker compose up -d --wait     # start everything and block until healthy
+#   docker compose up -d --wait            # everything, with docker-compose.override.yml (dev:
+#                                          #   source mounted, hot reload)
+#   docker compose -f docker-compose.yml up -d --wait   # the built images only (as in CI)
+#   docker compose up -d --wait postgres neo4j redis pinecone-local   # stores only (make up)
 #
-# Compose reads .env from this directory, so NEO4J_PASSWORD there is shared with the app.
+# Then open http://localhost:3000 (the dashboard). The browser talks only to the web
+# service; web calls the API on the compose network with LEDGERLENS_API_KEY.
+#
+# Compose reads .env from this directory (optional): NEO4J_PASSWORD, LLM keys, API_KEYS,
+# DASHBOARD_PASSWORD... The addresses of the stores below always win over the
+# localhost ones in .env, which are for running the app outside docker.
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-dev}
+  DATABASE_URL: postgresql+psycopg://ledger:ledger@postgres:5432/ledgerlens
+  REDIS_URL: redis://redis:6379/0
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: neo4j
+  NEO4J_PASSWORD: ${NEO4J_PASSWORD:-change-me}
+  # The emulator, by its compose name (.env's PINECONE_HOST is for the host). Set
+  # COMPOSE_PINECONE_HOST= (empty) to use the cloud index from PINECONE_API_KEY instead.
+  PINECONE_HOST: ${COMPOSE_PINECONE_HOST-http://pinecone-local:5080}
+  OLLAMA_BASE_URL: http://ollama:11434
+  MCP_URL: http://mcp:8765/mcp
+  API_KEYS: ${API_KEYS:-}  # from the shell or .env; empty = no auth (local only)
+
+x-app: &app
+  env_file:
+    - path: .env
+      required: false
+  restart: unless-stopped
+
 services:
   postgres:
     image: postgres:16
@@ -43,8 +72,9 @@ services:
 
   # Pinecone Local: in-memory emulator of the Pinecone API for development and CI.
   # Control plane on :5080; each index it creates is served on the next free port (5081+).
-  # Point the app at it with PINECONE_HOST=http://localhost:5080 (any PINECONE_API_KEY works).
-  # Data is not persisted across restarts. Use the real serverless index for eval and prod.
+  # From the host: PINECONE_HOST=http://localhost:5080 (any PINECONE_API_KEY works). Inside
+  # compose the app uses http://pinecone-local:5080 (the index's localhost:<port> address is
+  # rewritten to that name). Data is not persisted across restarts.
   pinecone-local:
     image: ghcr.io/pinecone-io/pinecone-local:latest
     platform: linux/amd64
@@ -53,8 +83,12 @@ services:
       PINECONE_HOST: localhost
     ports: ["5080-5090:5080-5090"]
 
+  # Local models (Llama 3, the fine-tuned extractor): optional, a multi-GB image. Start it
+  # by name (make up does) or with --profile local-llm; without it the router falls
+  # back to the API models.
   ollama:
     image: ollama/ollama
+    profiles: [local-llm]
     ports: ["11434:11434"]
     volumes: [ollama:/root/.ollama]
     healthcheck:
@@ -63,7 +97,82 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-off: database migrations, the Pinecone index and the Neo4j schema (all idempotent).
+  init:
+    <<: *app
+    image: ledgerlens-api
+    build: { context: ., dockerfile: infra/docker/api.Dockerfile }
+    environment: *app-env
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        alembic upgrade head
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          python scripts/create_pinecone_index.py && break
+          [ "$$attempt" = 10 ] && exit 1
+          echo "Pinecone not ready yet; retrying"; sleep 3
+        done
+        python scripts/init_neo4j_schema.py
+    depends_on:
+      postgres: { condition: service_healthy }
+      neo4j: { condition: service_healthy }
+      pinecone-local: { condition: service_started }
+
+  api:
+    <<: *app
+    image: ledgerlens-api
+    build: { context: ., dockerfile: infra/docker/api.Dockerfile }
+    environment: *app-env
+    ports: ["8000:8000"]
+    volumes: [uploads:/app/data/uploads]
+    depends_on:
+      init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      mcp: { condition: service_started }  # the agents connect on the first chat
+
+  worker:
+    <<: *app
+    image: ledgerlens-worker
+    build: { context: ., dockerfile: infra/docker/worker.Dockerfile }
+    environment: *app-env
+    volumes:
+      - uploads:/app/data/uploads  # the files the API stored
+      - hf-cache:/cache/huggingface  # embedding model, downloaded on first use
+      - ./models:/app/models:ro  # anomaly model (trained outside the image)
+    depends_on:
+      init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  mcp:
+    <<: *app
+    image: ledgerlens-mcp
+    build: { context: ., dockerfile: infra/docker/mcp.Dockerfile }
+    environment: *app-env
+    volumes:
+      - hf-cache:/cache/huggingface
+      - ./models:/app/models:ro
+    depends_on:
+      init: { condition: service_completed_successfully }
+
+  web:
+    image: ledgerlens-web
+    build: { context: ./web, dockerfile: ../infra/docker/web.Dockerfile }
+    restart: unless-stopped
+    environment:
+      LEDGERLENS_API_URL: http://api:8000
+      LEDGERLENS_API_KEY: ${LEDGERLENS_API_KEY:-}  # one of the API's API_KEYS
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}  # empty = no login (local only)
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
+    ports: ["${WEB_PORT:-3000}:3000"]
+    depends_on:
+      api: { condition: service_healthy }
+
 volumes:
   pgdata: {}
   neo4jdata: {}
   ollama: {}
+  uploads: {}
+  hf-cache: {}

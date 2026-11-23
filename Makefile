@@ -14,7 +14,7 @@ MCP_PORT ?= 8765
 EVAL_ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help setup install-ml up down init migrate data ingest worker enqueue api mcp mcp-inspect web \
+.PHONY: help setup install-ml up stack down init migrate data ingest worker enqueue api mcp mcp-inspect web \
         test test-int cov lint format eval eval-ci clean
 
 help:             ## Show this help
@@ -31,8 +31,11 @@ install-ml:       ## Install GPU/ML training deps (Colab / Kaggle)
 	$(PY) -m pip install -r requirements-ml.txt
 
 # --- Local services ------------------------------------------------------------------
-up:               ## Start local services (Postgres, Neo4j, Redis, Ollama)
-	docker compose up -d
+up:               ## Start the stores only (Postgres, Neo4j, Redis, Pinecone Local, Ollama)
+	docker compose up -d --wait postgres neo4j redis pinecone-local ollama
+
+stack:            ## Build and run the whole system in docker (dashboard on :3000, dev hot reload)
+	docker compose up -d --build --wait
 
 down:             ## Stop local services
 	docker compose down

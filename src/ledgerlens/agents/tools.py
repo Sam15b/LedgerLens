@@ -27,7 +27,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from ledgerlens.core.config import MCPConnectionConfig, get_config
+from ledgerlens.core.config import MCPConnectionConfig, get_config, get_settings
 from ledgerlens.observability.tracing import retrieval_attributes, span
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,8 @@ def mcp_connections(config: MCPConnectionConfig | None = None) -> dict[str, Any]
                 "args": ["-m", "ledgerlens.mcp_server.server", "--transport", "stdio"],
             }
         }
-    return {SERVER: {"transport": "streamable_http", "url": config.url}}
+    url = get_settings().mcp_url or config.url  # MCP_URL wins (docker compose)
+    return {SERVER: {"transport": "streamable_http", "url": url}}
 
 
 async def load_toolbox(connections: Mapping[str, Any] | None = None) -> ToolBox:

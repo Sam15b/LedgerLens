@@ -46,6 +46,8 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-yaml
+        # Compose's !reset tag is not plain YAML; `docker compose config` checks this file
+        exclude: ^docker-compose\.override\.yml$
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

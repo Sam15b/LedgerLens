@@ -1,13 +1,13 @@
-import { connection } from "next/server";
+import { cookies } from "next/headers";
 
 import { logout } from "@/app/login/actions";
-import { loginRequired } from "@/lib/session";
+import { loginRequired, SESSION_COOKIE, validSession } from "@/lib/session";
 
-/** "Sign out", when the dashboard has a login. Read at request time (inside <Suspense>):
- * the password is runtime configuration, not something to bake into a prerendered page. */
+/** "Sign out", for a signed-in person when the dashboard has a login. Reads the cookie, so
+ * it renders at request time (inside <Suspense>). */
 export async function SignOut() {
-  await connection();
-  if (!loginRequired()) return null;
+  const session = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!loginRequired() || !(await validSession(session))) return null;
   return (
     <form action={logout}>
       <button type="submit" className="text-xs text-muted hover:text-foreground">

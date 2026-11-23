@@ -119,3 +119,34 @@ def test_local_admin_raises_on_server_error() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         admin.describe("chunks")
+
+
+@pytest.mark.parametrize(
+    ("index_host", "control", "expected"),
+    [
+        ("http://localhost:5081", "http://pinecone-local:5080", "http://pinecone-local:5081"),
+        ("http://127.0.0.1:5082", "http://pinecone-local:5080", "http://pinecone-local:5082"),
+        ("http://localhost:5081", "http://localhost:5080", "http://localhost:5081"),
+        (
+            "http://idx-abc.svc.pinecone.io",
+            "http://pinecone-local:5080",
+            "http://idx-abc.svc.pinecone.io",
+        ),
+    ],
+)
+def test_local_index_hosts_follow_the_control_plane_name(
+    index_host: str, control: str, expected: str
+) -> None:
+    from ledgerlens.storage.pinecone_store import rebase_local_host
+
+    assert rebase_local_host(index_host, httpx.URL(control)) == expected
+
+
+def test_describe_reports_the_index_under_the_emulators_compose_name() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = {"name": "chunks", "dimension": 768, "metric": "cosine", "host": "localhost:5081"}
+        return httpx.Response(200, json={**body, "status": {"ready": True}})
+
+    admin = LocalIndexAdmin("http://pinecone-local:5080", transport=httpx.MockTransport(handler))
+    info = admin.describe("chunks")
+    assert info is not None and info.host == "http://pinecone-local:5081"

@@ -16,6 +16,6 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // everything but the login page, the API forwarder and static files
-  matcher: ["/((?!login|api/|_next/static|_next/image|favicon.ico).*)"],
+  // everything but the login page, the API forwarder, the liveness probe and static files
+  matcher: ["/((?!login|api/|healthz|_next/static|_next/image|favicon.ico).*)"],
 };

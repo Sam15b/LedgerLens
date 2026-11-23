@@ -1,0 +1,7 @@
+# Build context for infra/docker/web.Dockerfile (docker build -f ../infra/docker/web.Dockerfile web)
+node_modules
+.next
+coverage
+.env
+.env.*
+*.log
