@@ -50,3 +50,8 @@ export const NAV_ITEMS: NavItem[] = [
 export function isActive(href: string, pathname: string): boolean {
   return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
 }
+
+/** Whether ``href`` is a dashboard page that is built (links to others would 404). */
+export function pageReady(href: string): boolean {
+  return NAV_ITEMS.some((item) => item.ready && isActive(item.href, href));
+}

@@ -13,6 +13,7 @@
   --accent-soft: #dbeafe;
   --success: #15803d;
   --danger: #b91c1c;
+  --chart: #1d4ed8;
 }
 
 [data-theme="dark"] {
@@ -25,6 +26,7 @@
   --accent-soft: #172554;
   --success: #4ade80;
   --danger: #f87171;
+  --chart: #3b82f6; /* the single-series bar colour, validated for this surface */
 }
 
 @theme inline {
@@ -37,6 +39,7 @@
   --color-accent-soft: var(--accent-soft);
   --color-success: var(--success);
   --color-danger: var(--danger);
+  --color-chart: var(--chart);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
