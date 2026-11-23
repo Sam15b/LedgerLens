@@ -1017,6 +1017,14 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "APIKeyHeader": {
+        "description": "One of the keys in the API's API_KEYS setting.",
+        "in": "header",
+        "name": "X-API-Key",
+        "type": "apiKey"
+      }
     }
   },
   "info": {
@@ -1142,6 +1150,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "List Anomalies",
         "tags": [
           "anomalies"
@@ -1195,6 +1208,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Review Anomaly",
         "tags": [
           "anomalies"
@@ -1230,6 +1248,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Chat",
         "tags": [
           "chat"
@@ -1323,6 +1346,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "List Documents",
         "tags": [
           "documents"
@@ -1373,6 +1401,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Upload Document",
         "tags": [
           "documents"
@@ -1416,6 +1449,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Get Document",
         "tags": [
           "documents"
@@ -1458,6 +1496,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Get Document File",
         "tags": [
           "documents"
@@ -1525,6 +1568,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "List Runs",
         "tags": [
           "eval"
@@ -1648,6 +1696,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "List Reminders",
         "tags": [
           "reminders"
@@ -1690,6 +1743,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Get Reminder",
         "tags": [
           "reminders"
@@ -1741,6 +1799,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Edit Reminder",
         "tags": [
           "reminders"
@@ -1784,6 +1847,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Approve",
         "tags": [
           "reminders"
@@ -1827,6 +1895,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Reject",
         "tags": [
           "reminders"
@@ -1890,6 +1963,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "summary": "Overview",
         "tags": [
           "stats"

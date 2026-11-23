@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
 
+    api_keys: str = ""
+    """Comma-separated keys a caller must send (``X-API-Key``); empty turns auth off (dev)."""
+
+    @property
+    def api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
+
     # PostgreSQL
     database_url: str = "postgresql+psycopg://ledger:ledger@localhost:5432/ledgerlens"
 

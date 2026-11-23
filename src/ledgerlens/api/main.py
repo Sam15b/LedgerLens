@@ -13,6 +13,9 @@ for HTTP errors (``code`` from the status), request validation (``invalid_reques
 the field ``details``) and anything unexpected (``internal_error``, 500, logged with its
 traceback; the message does not leak internals).
 
+With ``API_KEYS`` set, every route but ``/health`` and ``/ready`` needs one of them in
+``X-API-Key`` (:func:`ledgerlens.api.deps.require_api_key`); 401 otherwise.
+
 Browsers may call it from ``CORS_ORIGINS`` (the dashboard, ``http://localhost:3000`` by
 default); the request id and chat thread id headers are exposed to them.
 
@@ -33,7 +36,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +47,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ledgerlens import __version__
 from ledgerlens.api.agent import AgentProvider
+from ledgerlens.api.deps import API_KEY_HEADER, require_api_key
 from ledgerlens.api.routers import anomalies, chat, documents, health, reminders, stats
 from ledgerlens.api.routers import eval as eval_runs
 from ledgerlens.core.config import get_settings
@@ -174,19 +178,18 @@ def create_app(agents: AgentProvider | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=get_settings().cors_origin_list,
         allow_methods=["GET", "POST", "PATCH"],
-        allow_headers=["Content-Type", REQUEST_ID_HEADER],
+        allow_headers=["Content-Type", "Authorization", API_KEY_HEADER, REQUEST_ID_HEADER],
         expose_headers=[REQUEST_ID_HEADER, "X-Thread-Id"],
     )
     app.add_exception_handler(StarletteHTTPException, http_error)
     app.add_exception_handler(RequestValidationError, validation_error)
     app.add_exception_handler(Exception, unexpected_error)
-    app.include_router(health.router)
-    app.include_router(chat.router)
-    app.include_router(reminders.router)
-    app.include_router(documents.router)
-    app.include_router(anomalies.router)
-    app.include_router(stats.router)
-    app.include_router(eval_runs.router)
+    app.include_router(health.router)  # open: load balancers and uptime checks call it
+    keyed = [Depends(require_api_key)]
+    for module in (chat, reminders, documents, anomalies, stats, eval_runs):
+        app.include_router(module.router, dependencies=keyed)
+    if not get_settings().api_key_list:
+        logger.warning("API_KEYS is empty: the API accepts requests without a key")
     return app
 
 
