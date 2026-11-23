@@ -52,11 +52,23 @@ pip install -r requirements.txt    # app deps (API, ingestion, storage, LLMs, ag
 pip install -e . --no-deps         # make the ledgerlens package importable
 cp .env.example .env               # fill in API keys
 
-docker compose up -d               # Postgres, Neo4j, Redis, Ollama
+docker compose up -d --wait postgres neo4j redis pinecone-local   # the stores (make up)
 uvicorn ledgerlens.api.main:app --reload
 curl http://localhost:8000/health
 pytest
 ```
+
+Or run the whole system in docker: the stores, a one-off init job (migrations, Pinecone
+index, Neo4j schema), the API, the ingestion worker, the MCP server and the dashboard:
+
+```bash
+docker compose up -d --build --wait   # make stack; dev mode: source mounted, hot reload
+open http://localhost:3000            # the dashboard
+docker compose -f docker-compose.yml up -d --build --wait   # the built images only
+```
+
+Set `API_KEYS` and the same key as `LEDGERLENS_API_KEY` (and `DASHBOARD_PASSWORD`) in
+`.env` before exposing it; see *Exposing a demo* below. Images are in `infra/docker/`.
 
 ML training dependencies (LoRA fine-tuning, GAN, diffusion, Keras autoencoder) are in
 `requirements-ml.txt` and are meant for a CUDA GPU on Google Colab or Kaggle:

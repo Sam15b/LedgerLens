@@ -1,0 +1,69 @@
+# Development overrides, merged automatically by `docker compose up` (leave them out with
+# `docker compose -f docker-compose.yml ...`, as CI does). The app's source is mounted
+# into the containers and each service restarts on a change:
+#
+#   api     uvicorn --reload
+#   worker  watchfiles (installed with uvicorn[standard]) restarts the arq consumer
+#   mcp     watchfiles restarts the MCP server
+#   web     next dev (node_modules in a volume, so the host's Windows/macOS build of
+#           them is never used inside the Linux container)
+#
+# Polling is on because file events do not cross a Docker Desktop bind mount reliably.
+
+services:
+  api:
+    volumes:
+      - ./src:/app/src:ro
+      - ./configs:/app/configs:ro
+      - uploads:/app/data/uploads
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+    command: ["uvicorn", "ledgerlens.api.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--reload", "--reload-dir", "/app/src", "--reload-dir", "/app/configs"]
+
+  worker:
+    volumes:
+      - ./src:/app/src:ro
+      - ./configs:/app/configs:ro
+      - uploads:/app/data/uploads
+      - hf-cache:/cache/huggingface
+      - ./models:/app/models:ro
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+    command: ["watchfiles", "--filter", "python",
+              "python -m ledgerlens.workers.ingest_worker run", "/app/src"]
+
+  mcp:
+    volumes:
+      - ./src:/app/src:ro
+      - ./configs:/app/configs:ro
+      - hf-cache:/cache/huggingface
+      - ./models:/app/models:ro
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+    command: ["watchfiles", "--filter", "python",
+              "python -m ledgerlens.mcp_server.server --transport http --host 0.0.0.0 --port 8765",
+              "/app/src"]
+
+  web:
+    build: !reset null
+    image: node:22-alpine
+    working_dir: /app  # runs as root: the fresh node_modules volume is root-owned (dev only)
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+      - web-next:/app/.next
+    environment:
+      WATCHPACK_POLLING: "true"
+      COREPACK_HOME: /tmp/corepack
+    command: ["sh", "-c", "corepack pnpm install --frozen-lockfile && corepack pnpm dev --hostname 0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+
+volumes:
+  web-node-modules: {}
+  web-next: {}

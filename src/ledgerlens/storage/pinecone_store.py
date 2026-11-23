@@ -132,6 +132,20 @@ class CloudIndexAdmin:
         self._client.delete_index(name)
 
 
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def rebase_local_host(index_host: str, control: httpx.URL) -> str:
+    """The emulator names each index ``localhost:<port>`` (its own view). Reached under
+    another name, e.g. ``pinecone-local`` inside docker compose, that address points at
+    the caller's own container: keep the port, use the control plane's host.
+    """
+    url = httpx.URL(index_host)
+    if url.host in _LOOPBACK and control.host and control.host not in _LOOPBACK:
+        return str(url.copy_with(host=control.host)).rstrip("/")
+    return index_host
+
+
 class LocalIndexAdmin:
     """Index administration on the Pinecone Local emulator over REST."""
 
@@ -142,6 +156,7 @@ class LocalIndexAdmin:
         timeout_s: float = 10.0,
         transport: httpx.BaseTransport | None = None,  # injectable for tests
     ) -> None:
+        self._control = httpx.URL(host)
         self._http = httpx.Client(
             base_url=host.rstrip("/"),
             timeout=timeout_s,
@@ -149,11 +164,12 @@ class LocalIndexAdmin:
             transport=transport,
         )
 
-    @staticmethod
-    def _to_info(body: dict[str, Any]) -> IndexInfo:
+    def _to_info(self, body: dict[str, Any]) -> IndexInfo:
         host = body.get("host")
         if host and "://" not in host:
             host = f"http://{host}"  # the emulator serves plain HTTP
+        if host:
+            host = rebase_local_host(host, self._control)
         return IndexInfo(
             name=body["name"],
             dimension=body.get("dimension"),
