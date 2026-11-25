@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (git-ignored). Only image_tag is required.
+environment       = "prod"
+region            = "us-east-1" # the Pinecone index's region
+github_repository = "Sam15b/LedgerLens"
+
+# The account already has a GitHub OIDC provider? Reuse it.
+# create_github_oidc_provider = false
+
+# The images to run: a commit SHA that build.yml pushed to ECR (the deploy workflow passes it).
+image_tag = "0000000000000000000000000000000000000000"
+
+# Stop paying for a service while it is not needed:
+# service_desired_count = { api = 1, worker = 0, mcp = 1, web = 1 }
+
+# A custom domain instead of the *.cloudfront.net address (certificate in us-east-1):
+# domain_aliases      = ["ledgerlens.example.com"]
+# acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."
