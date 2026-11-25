@@ -25,3 +25,13 @@ output "app_secret_arn" {
   description = "Secrets Manager secret holding the app's keys (JSON); fill in the third-party ones."
   value       = aws_secretsmanager_secret.app.arn
 }
+
+output "db_address" {
+  description = "RDS endpoint host (private subnets: reachable from the tasks only)."
+  value       = aws_db_instance.main.address
+}
+
+output "database_url_secret_arn" {
+  description = "Secrets Manager secret holding DATABASE_URL."
+  value       = aws_secretsmanager_secret.database_url.arn
+}

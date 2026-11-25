@@ -8,6 +8,7 @@ why it is AWS.
 | `network.tf` | VPC, two public and two private subnets, internet gateway, the tasks' security group |
 | `registry.tf` | ECR repositories `ledgerlens/{api,worker,mcp,web}`, the GitHub OIDC provider, the `build.yml` role |
 | `secrets.tf` | Secrets Manager secret `ledgerlens-<env>/app` (JSON) with the app's keys |
+| `database.tf` | RDS PostgreSQL 16 (private, encrypted, TLS only) and the `ledgerlens-<env>/database-url` secret |
 
 ## Before the first apply
 
@@ -57,7 +58,10 @@ aws secretsmanager put-secret-value --secret-id "$SECRET" --secret-string file:/
 rm /tmp/app-secret.json
 ```
 
-Terraform ignores later versions, so `apply` never resets them. Running tasks read secrets
+Terraform ignores later versions, so `apply` never resets them.
+
+`DATABASE_URL` has a secret of its own, written by Terraform. The database password is never
+in the state (write-only arguments); to rotate it, bump `db_password_version` and apply. Running tasks read secrets
 at start: restart the services after a change (`aws ecs update-service --force-new-deployment`).
 
 ## Checks without an AWS account

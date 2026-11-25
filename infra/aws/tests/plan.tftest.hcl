@@ -58,6 +58,30 @@ run "plan_defaults" {
   }
 }
 
+run "database_is_private" {
+  command = plan
+
+  assert {
+    condition     = !aws_db_instance.main.publicly_accessible && aws_db_instance.main.storage_encrypted
+    error_message = "RDS must be private and encrypted"
+  }
+
+  assert {
+    condition     = aws_db_instance.main.password == null
+    error_message = "the database password must only be set write-only (password_wo), never in state"
+  }
+
+  assert {
+    condition     = one([for p in aws_db_parameter_group.postgres.parameter : p.value if p.name == "rds.force_ssl"]) == "1"
+    error_message = "Postgres must refuse unencrypted connections"
+  }
+
+  assert {
+    condition     = aws_db_instance.main.deletion_protection && !aws_db_instance.main.skip_final_snapshot
+    error_message = "by default the database is protected and leaves a final snapshot"
+  }
+}
+
 run "existing_github_oidc_provider" {
   command = plan
 

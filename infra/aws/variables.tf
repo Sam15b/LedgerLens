@@ -59,3 +59,51 @@ variable "secret_recovery_days" {
   type        = number
   default     = 7
 }
+
+# --- database ---
+
+variable "db_engine_version" {
+  description = "PostgreSQL major version (docker-compose runs postgres:16)."
+  type        = string
+  default     = "16"
+}
+
+variable "db_instance_class" {
+  description = "RDS instance class. db.t4g.micro is the cheapest Graviton class (free tier eligible)."
+  type        = string
+  default     = "db.t4g.micro"
+}
+
+variable "db_allocated_storage_gb" {
+  type    = number
+  default = 20
+}
+
+variable "db_max_allocated_storage_gb" {
+  description = "Storage autoscaling ceiling."
+  type        = number
+  default     = 100
+}
+
+variable "db_multi_az" {
+  description = "Standby in a second AZ (doubles the cost). Off for the demo."
+  type        = bool
+  default     = false
+}
+
+variable "db_backup_retention_days" {
+  type    = number
+  default = 7
+}
+
+variable "db_deletion_protection" {
+  description = "Refuse to delete the database, and take a final snapshot when it is deleted. Set false (and apply) before destroying a demo."
+  type        = bool
+  default     = true
+}
+
+variable "db_password_version" {
+  description = "Bump to generate a new database password and write it to RDS and the DATABASE_URL secret."
+  type        = number
+  default     = 1
+}

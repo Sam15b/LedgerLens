@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.10" # S3 backend native locking (use_lockfile)
+  required_version = ">= 1.11" # S3 lock files (1.10), write-only arguments (1.11)
 
   required_providers {
     aws = {
