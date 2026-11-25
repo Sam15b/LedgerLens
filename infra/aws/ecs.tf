@@ -34,6 +34,12 @@ locals {
     PINECONE_CLOUD     = "aws"
     PINECONE_REGION    = local.pinecone_region
     PINECONE_NAMESPACE = var.environment
+    # A sample of /chat traces to LangSmith (key: LANGSMITH_API_KEY in the app secret;
+    # without one, tracing stays off and the app runs as usual).
+    TRACING_ENABLED     = "true"
+    TRACING_BACKEND     = "langsmith"
+    TRACING_SAMPLE_RATE = tostring(var.tracing_sample_rate)
+    LANGSMITH_PROJECT   = "${var.project}-${var.environment}"
   }
   python_secrets = {
     DATABASE_URL      = aws_secretsmanager_secret.database_url.arn

@@ -200,6 +200,18 @@ run "managed_stores" {
   }
 }
 
+run "sampled_tracing" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for pair in [["TRACING_ENABLED", "true"], ["TRACING_SAMPLE_RATE", "0.1"], ["LANGSMITH_PROJECT", "ledgerlens-prod"]] :
+      contains(jsondecode(aws_ecs_task_definition.app["api"].container_definitions)[0].environment, { name = pair[0], value = pair[1] })
+    ])
+    error_message = "prod traces a 10 % sample of chats to its own LangSmith project"
+  }
+}
+
 run "neo4j_uri_must_be_auradb_style" {
   command = plan
 

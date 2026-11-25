@@ -244,3 +244,16 @@ variable "pinecone_region" {
   type        = string
   default     = ""
 }
+
+# --- observability ---
+
+variable "tracing_sample_rate" {
+  description = "Share of /chat runs traced to LangSmith (project <project>-<environment>)."
+  type        = number
+  default     = 0.1
+
+  validation {
+    condition     = var.tracing_sample_rate >= 0 && var.tracing_sample_rate <= 1
+    error_message = "tracing_sample_rate must be between 0 and 1."
+  }
+}
