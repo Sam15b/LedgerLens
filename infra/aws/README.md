@@ -102,6 +102,21 @@ deploys that commit's images; nothing is rebuilt. Set up once:
 The deploy role can change everything this configuration manages: PowerUserAccess plus IAM
 on `ledgerlens-*` roles. Treat the `production` environment as the gate.
 
+## Neo4j AuraDB and Pinecone
+
+Two stores are managed by their vendors rather than AWS. The tasks reach them over TLS
+through the internet gateway.
+
+- **Neo4j AuraDB**: create an instance at console.neo4j.io (AuraDB Free is enough for the
+  demo) and set `neo4j_uri` (`neo4j+s://<id>.databases.neo4j.io`, required) and, if it
+  differs, `neo4j_user`. Put its password in the app secret as `NEO4J_PASSWORD`. Free
+  instances pause after a few days without queries: resume them in the console, or the
+  api's `/health` reports `neo4j` down.
+- **Pinecone serverless**: put the API key in the app secret as `PINECONE_API_KEY`. `init`
+  creates the index (`pinecone_index`) on `aws` in `pinecone_region`, which defaults to
+  `region`. One index serves every environment: each writes and reads its own namespace,
+  so prod tasks use `prod` and an eval run never touches it.
+
 ## Costs and logs
 
 `monthly_budget_usd` sets an account-wide AWS Budget. The default is $200, against an

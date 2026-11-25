@@ -5,6 +5,8 @@ index: ledgerlens-chunks
 dimension: 768                 # BAAI/bge-base-en-v1.5
 metric: dotproduct             # required for hybrid dense + sparse search
 spec: serverless
+# One namespace per environment, picked by APP_ENV or PINECONE_NAMESPACE. The AWS deployment
+# (infra/aws) writes and reads `prod`, in a serverless index in the app's own region.
 namespaces: [dev, eval, prod]  # eval runs never pollute prod
 upsert_batch_size: 100
 # Dense weight; sparse weight = 1 - alpha. Tuned on golden set v0 (2026-11-18, exact hybrid

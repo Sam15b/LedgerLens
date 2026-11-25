@@ -6,6 +6,7 @@
 variables {
   image_tag           = "0123456789abcdef0123456789abcdef01234567"
   budget_alert_emails = ["alerts@example.com"]
+  neo4j_uri           = "neo4j+s://0123abcd.databases.neo4j.io"
 }
 
 mock_provider "aws" {
@@ -167,6 +168,38 @@ run "compute" {
     condition     = output.url == "https://d111111abcdef8.cloudfront.net"
     error_message = "without a custom domain the demo lives at its CloudFront address"
   }
+}
+
+run "managed_stores" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for name in ["api", "worker", "mcp", "init"] : contains(
+        jsondecode(aws_ecs_task_definition.app[name].container_definitions)[0].environment,
+        { name = "PINECONE_NAMESPACE", value = "prod" }
+      )
+    ])
+    error_message = "prod tasks use the prod Pinecone namespace"
+  }
+
+  assert {
+    condition = contains(
+      jsondecode(aws_ecs_task_definition.app["api"].container_definitions)[0].environment,
+      { name = "PINECONE_REGION", value = "us-east-1" }
+    )
+    error_message = "the Pinecone index defaults to the app's region"
+  }
+}
+
+run "neo4j_uri_must_be_auradb_style" {
+  command = plan
+
+  variables {
+    neo4j_uri = "bolt://localhost:7687/neo4j"
+  }
+
+  expect_failures = [var.neo4j_uri]
 }
 
 run "cost_and_logs" {

@@ -213,3 +213,33 @@ variable "log_retention_days" {
     error_message = "log_retention_days must be a CloudWatch retention value (1, 3, 5, 7, 14, 30, 60, 90, ...)."
   }
 }
+
+# --- managed stores outside AWS ---
+
+variable "neo4j_uri" {
+  description = "Neo4j AuraDB connection URI (neo4j+s://<instance>.databases.neo4j.io). Its password goes in the app secret as NEO4J_PASSWORD."
+  type        = string
+
+  validation {
+    condition     = can(regex("^neo4j([+]s)?://[^/]+$", var.neo4j_uri))
+    error_message = "neo4j_uri must look like neo4j+s://<instance>.databases.neo4j.io (AuraDB uses TLS: neo4j+s)."
+  }
+}
+
+variable "neo4j_user" {
+  description = "Neo4j user (AuraDB: the instance's generated user, usually `neo4j`)."
+  type        = string
+  default     = "neo4j"
+}
+
+variable "pinecone_index" {
+  description = "Pinecone serverless index (configs/pinecone.yaml `index`); init creates it if missing."
+  type        = string
+  default     = "ledgerlens-chunks"
+}
+
+variable "pinecone_region" {
+  description = "Region of the Pinecone index (cloud `aws`). Empty: the same region as everything else."
+  type        = string
+  default     = ""
+}

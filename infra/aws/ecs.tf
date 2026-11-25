@@ -15,6 +15,9 @@ locals {
 
   app_secret = aws_secretsmanager_secret.app.arn
 
+  # The index in the app's region keeps queries off the public internet's long haul.
+  pinecone_region = coalesce(var.pinecone_region, var.region)
+
   # What every Python service gets (docker-compose's x-app-env, for the cloud).
   python_env = {
     APP_ENV     = var.environment
@@ -23,6 +26,14 @@ locals {
     LLM_PROFILE = "aws"      # configs/models.yaml: Bedrock first for `smart`, no Ollama
     REDIS_URL   = local.redis_url
     MCP_URL     = "http://mcp:8765/mcp"
+    # Neo4j AuraDB and Pinecone serverless: managed by their vendors, reached over TLS.
+    # Each environment has its own Pinecone namespace (prod / eval / dev) in one index.
+    NEO4J_URI          = var.neo4j_uri
+    NEO4J_USER         = var.neo4j_user
+    PINECONE_INDEX     = var.pinecone_index
+    PINECONE_CLOUD     = "aws"
+    PINECONE_REGION    = local.pinecone_region
+    PINECONE_NAMESPACE = var.environment
   }
   python_secrets = {
     DATABASE_URL      = aws_secretsmanager_secret.database_url.arn
