@@ -1,5 +1,8 @@
 # LedgerLens
 
+[![CI](https://github.com/Sam15b/LedgerLens/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Sam15b/LedgerLens/actions/workflows/ci.yml)
+[![Eval](https://github.com/Sam15b/LedgerLens/actions/workflows/eval.yml/badge.svg?branch=main)](https://github.com/Sam15b/LedgerLens/actions/workflows/eval.yml)
+
 **Agentic GraphRAG for invoices, purchase orders and contracts.**
 
 LedgerLens reads invoices, POs, payments and contracts (PDFs and scans), links them in a

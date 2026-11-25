@@ -130,16 +130,23 @@ load balancer, which gives it HTTPS without a domain.
 | `deploy-aws.yml` / `deploy-gcp.yml` | tag `v*` or manual | Terraform plan/apply, run migrations, update services, smoke test `/health` |
 
 ## Production checklist
-- [ ] Secrets only in secret manager; none in images or repo
-- [ ] Postgres migrations run as a one-off job before rollout
-- [ ] Health + readiness endpoints check Postgres, Neo4j, Pinecone
-- [ ] Upload size/type limits; malware scanning optional
-- [ ] Basic auth (e.g. NextAuth or API key) on the demo
-- [ ] Rate limiting on `/chat`
-- [ ] Budget alerts on cloud + LLM provider accounts
-- [ ] Tracing enabled in prod (sampled)
+- [x] Secrets only in secret manager; none in images or repo (Secrets Manager,
+  injected by ECS; the database password is not even in the Terraform state)
+- [x] Postgres migrations run as a one-off job before rollout (`init` task in
+  `deploy-aws.yml`)
+- [x] Health + readiness endpoints check Postgres, Neo4j, Pinecone (and Redis);
+  probes use `/livez`, which touches no store
+- [x] Upload size/type limits (25 MB; PDF, PNG, JPEG, TIFF); no malware scanning
+- [x] Basic auth (e.g. NextAuth or API key) on the demo: API keys, and a
+  password-gated dashboard session
+- [x] Rate limiting on `/chat`
+- [ ] Budget alerts on cloud + LLM provider accounts: the AWS budget is in
+  Terraform; the OpenAI / Gemini / Mistral caps are set in their consoles
+- [x] Tracing enabled in prod (sampled): 10 % of chats to LangSmith
 
 ## Definition of done
-- `docker compose up` brings up the full stack locally.
-- Tag push deploys to the chosen cloud; smoke test passes.
-- Public demo URL in README with seeded demo data.
+- [x] `docker compose up` brings up the full stack locally (CI's `compose` job).
+- [ ] Tag push deploys to the chosen cloud; smoke test passes: written
+  (`deploy-aws.yml`), not yet run against an account.
+- [ ] Public demo URL in README with seeded demo data: the seeding is ready
+  (`seed_demo_data.py --bundle`, the `seed` task); the URL comes with the first deploy.
