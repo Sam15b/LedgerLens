@@ -66,3 +66,8 @@ output "task_network" {
     security_groups = [aws_security_group.tasks.id]
   }
 }
+
+output "log_groups" {
+  description = "CloudWatch log group per task (streams are <task>/<task>/<task id>)."
+  value       = { for name, group in aws_cloudwatch_log_group.task : name => group.name }
+}

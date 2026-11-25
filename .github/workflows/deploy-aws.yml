@@ -7,7 +7,8 @@ name: Deploy (AWS)
 #   1. wait until all four images of the commit are in ECR
 #   2. terraform apply with image_tag=<sha>: infrastructure changes, and new task
 #      definition revisions (the services do not move to them yet)
-#   3. move the services to the new revisions and wait until they are stable
+#   3. run the one-off init task (migrations) with the new revision; stop if it fails
+#   4. move the services to the new revisions and wait until they are stable
 #
 # Needs the first apply from infra/aws/README.md, a GitHub environment named `production`,
 # and these repository variables:
@@ -108,6 +109,42 @@ jobs:
           echo "cluster=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
           terraform output -json task_definition_arns > "$RUNNER_TEMP/task_definitions.json"
           terraform output -json task_network > "$RUNNER_TEMP/task_network.json"
+
+      - name: Run migrations (init task)
+        env:
+          CLUSTER: ${{ steps.tf.outputs.cluster }}
+        run: |
+          set -euo pipefail
+          # alembic upgrade head, the Pinecone index and the Neo4j schema, all idempotent,
+          # with the new image and before any service moves to it. If it fails the
+          # services keep running the previous release.
+          td=$(jq -r .init "$RUNNER_TEMP/task_definitions.json")
+          subnets=$(jq -r '.subnets | join(",")' "$RUNNER_TEMP/task_network.json")
+          groups=$(jq -r '.security_groups | join(",")' "$RUNNER_TEMP/task_network.json")
+          task=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition "$td" --started-by "deploy-$GITHUB_RUN_ID" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$groups],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          if [ -z "$task" ] || [ "$task" = None ]; then
+            echo "::error::the init task did not start"
+            exit 1
+          fi
+          echo "init task: $task"
+
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          read -r code reason < <(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].[containers[0].exitCode, stoppedReason]' --output text)
+
+          echo "::group::init logs"
+          aws logs get-log-events --log-group-name "$(terraform output -json log_groups | jq -r .init)" \
+            --log-stream-name "init/init/${task##*/}" --start-from-head --output json \
+            | jq -r '.events[].message' || true
+          echo "::endgroup::"
+
+          if [ "$code" != 0 ]; then
+            echo "::error::init exited with $code ($reason); the services were not updated"
+            exit 1
+          fi
 
       - name: Roll out services
         env:
