@@ -254,3 +254,75 @@ def test_repo_retrieval_config_loads() -> None:
 
     assert 0 <= config.retrieval.graph.max_hops <= 2
     assert config.retrieval.rerank_model
+
+
+# models.yaml profiles (LLM_PROFILE) -------------------------------------------------
+
+_PROFILED = """\
+aliases:
+  smart: [openai/gpt-4o, bedrock/global.anthropic.claude-sonnet-5-5]
+  fast: [openai/gpt-4o-mini]
+profiles:
+  aws:
+    smart: [bedrock/global.anthropic.claude-sonnet-5-5, openai/gpt-4o]
+"""
+
+
+def test_profile_replaces_only_its_aliases(tmp_path: Path) -> None:
+    models = load_config(_models_yaml(tmp_path, _PROFILED), llm_profile="aws").models
+
+    assert models.resolve("smart") == [
+        "bedrock/global.anthropic.claude-sonnet-5-5",
+        "openai/gpt-4o",
+    ]
+    assert models.resolve("fast") == ["openai/gpt-4o-mini"]
+
+
+def test_no_profile_keeps_aliases_as_written(tmp_path: Path) -> None:
+    models = load_config(_models_yaml(tmp_path, _PROFILED)).models
+
+    assert models.resolve("smart")[0] == "openai/gpt-4o"
+    assert models.with_profile("") is models
+
+
+def test_unknown_profile_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown LLM_PROFILE 'azure'.*aws"):
+        load_config(_models_yaml(tmp_path, _PROFILED), llm_profile="azure")
+
+
+def test_profile_cannot_invent_an_alias(tmp_path: Path) -> None:
+    body = _PROFILED + "    smrt: [openai/gpt-4o]\n"
+
+    with pytest.raises(ValidationError, match=r"overrides unknown aliases \['smrt'\]"):
+        load_config(_models_yaml(tmp_path, body))
+
+
+def test_profile_refs_are_validated(tmp_path: Path) -> None:
+    body = _PROFILED + "  gcp:\n    fast: [bedrok/x]\n"
+
+    with pytest.raises(ValidationError, match="unknown provider 'bedrok'"):
+        load_config(_models_yaml(tmp_path, body))
+
+
+def test_get_config_applies_llm_profile_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ledgerlens.core import config as config_module
+
+    monkeypatch.setenv("LLM_PROFILE", "aws")
+    config_module.get_settings.cache_clear()
+    config_module.get_config.cache_clear()
+    try:
+        assert config_module.get_config().models.resolve("smart")[0].startswith("bedrock/")
+    finally:
+        config_module.get_settings.cache_clear()
+        config_module.get_config.cache_clear()
+
+
+@pytest.mark.parametrize("profile", ["aws", "gcp"])
+def test_repo_profiles_resolve_to_priced_models_without_ollama(profile: str) -> None:
+    models = load_config(llm_profile=profile).models
+
+    for alias in ("smart", "extractor"):
+        refs = models.resolve(alias)
+        assert set(refs) <= set(models.pricing_usd_per_1m_tokens)
+        assert not any(ref.startswith("ollama/") for ref in refs)
+    assert models.resolve("smart")[0].split("/")[0] == {"aws": "bedrock", "gcp": "gemini"}[profile]

@@ -14,6 +14,18 @@ aliases:
   extractor_api: [openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]
   judge: [openai/gpt-4o]  # eval only: one fixed model so scores stay comparable
 
+# Per-deployment overrides, picked with LLM_PROFILE (infra/aws sets `aws`). Each entry
+# replaces a whole alias above. In the cloud the provider's own model goes first for
+# `smart` (no API key: Bedrock uses the task's IAM role), and the extractor skips the
+# local fine-tuned model, since Ollama is not deployed and waiting for it costs retries.
+profiles:
+  aws:
+    smart: [bedrock/global.anthropic.claude-sonnet-5-5, openai/gpt-4o, gemini/gemini-4-carbon]
+    extractor: [openai/gpt-4o-mini, gemini/gemini-3.8-flash, mistral/mistral-small-2603]
+  gcp:
+    smart: [gemini/gemini-4-carbon, openai/gpt-4o, bedrock/global.anthropic.claude-sonnet-5-5]
+    extractor: [gemini/gemini-3.8-flash, openai/gpt-4o-mini, mistral/mistral-small-2603]
+
 # USD per 1M tokens (standard / on-demand tier, text), keyed like the aliases. A model with
 # no entry (or a null in/out) is logged once and its cost recorded as None.
 # Checked 2026-11-11 against:
