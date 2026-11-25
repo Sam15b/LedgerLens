@@ -113,3 +113,5 @@ terraform init -backend=false
 terraform validate
 terraform test        # plans everything against mocked providers (tests/plan.tftest.hcl)
 ```
+
+CI's `terraform` job runs the same four commands when anything under `infra/aws/` changes.

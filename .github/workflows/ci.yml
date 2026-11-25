@@ -122,6 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docker: ${{ steps.filter.outputs.docker }}
+      terraform: ${{ steps.filter.outputs.terraform }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -147,6 +148,42 @@ jobs:
               - 'web/app/**'
               - 'web/lib/**'
               - '.github/workflows/ci.yml'
+            terraform:
+              - 'infra/aws/**'
+              - '.github/workflows/ci.yml'
+
+  # The AWS Terraform: formatting, validity, and `terraform test`, which plans the whole
+  # configuration against mocked providers (no AWS account or credentials involved).
+  terraform:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugins
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.17.0"
+          terraform_wrapper: false
+      - name: Cache providers
+        uses: actions/cache@v4
+        with:
+          path: .terraform-plugins
+          key: terraform-providers-${{ hashFiles('infra/aws/.terraform.lock.hcl') }}
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+      - name: Format check
+        run: terraform fmt -check -recursive -diff
+      - name: Init (no backend)
+        run: terraform init -backend=false -input=false
+      - name: Validate
+        run: terraform validate
+      - name: Plan tests (mocked providers)
+        run: terraform test
 
   # Build every image and bring the whole stack up as `docker compose up` would (without the
   # dev override), then check it answers: the API's health and its key, the dashboard's
