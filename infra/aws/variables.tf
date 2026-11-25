@@ -184,3 +184,32 @@ variable "acm_certificate_arn" {
     error_message = "domain_aliases needs an acm_certificate_arn in us-east-1."
   }
 }
+
+# --- cost and logs ---
+
+variable "budget_alert_emails" {
+  description = "Who gets the monthly budget's alert emails. Required: the budget exists before anything else is created."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.budget_alert_emails) > 0 && alltrue([for e in var.budget_alert_emails : can(regex("^[^@ ]+@[^@ ]+$", e))])
+    error_message = "budget_alert_emails needs at least one email address."
+  }
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly AWS spend (whole account) the alerts are measured against. Everything running 24/7 is about $160 (ADR-0002)."
+  type        = number
+  default     = 200
+}
+
+variable "log_retention_days" {
+  description = "Days CloudWatch keeps the tasks' logs."
+  type        = number
+  default     = 14
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365], var.log_retention_days)
+    error_message = "log_retention_days must be a CloudWatch retention value (1, 3, 5, 7, 14, 30, 60, 90, ...)."
+  }
+}

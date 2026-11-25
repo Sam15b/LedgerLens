@@ -1,7 +1,12 @@
-# Copy to terraform.tfvars (git-ignored). Only image_tag is required.
+# Copy to terraform.tfvars (git-ignored). Required: budget_alert_emails, image_tag.
 environment       = "prod"
 region            = "us-east-1" # the Pinecone index's region
 github_repository = "Sam15b/LedgerLens"
+
+# Budget alerts (whole account): emails at 50/80/100 % of the limit and on a forecast overrun
+budget_alert_emails = ["you@example.com"]
+# monthly_budget_usd  = 200
+# log_retention_days  = 14
 
 # The account already has a GitHub OIDC provider? Reuse it.
 # create_github_oidc_provider = false

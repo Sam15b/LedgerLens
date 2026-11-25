@@ -119,7 +119,8 @@ resource "aws_service_discovery_http_namespace" "main" {
 resource "aws_cloudwatch_log_group" "task" {
   for_each = local.tasks
 
-  name = "/ecs/${local.name}/${each.key}"
+  name              = "/ecs/${local.name}/${each.key}"
+  retention_in_days = var.log_retention_days
 }
 
 resource "aws_ecs_task_definition" "app" {

@@ -14,6 +14,7 @@ why it is AWS.
 | `iam.tf` | Task execution role (pull, secrets, logs) and task role (Bedrock, EFS, ECS Exec) |
 | `ecs.tf` | ECS cluster, Service Connect names, task definitions for api, worker, mcp, web and the one-off `init`, the four services |
 | `github_deploy.tf` | The role `deploy-aws.yml` assumes (GitHub OIDC, `production` environment only) |
+| `budget.tf` | Monthly AWS budget (whole account) with email alerts at 50/80/100 % and on a forecast overrun |
 | `alb.tf` | Load balancer (admits CloudFront only) and the CloudFront distribution: the public HTTPS address |
 
 ```
@@ -25,7 +26,8 @@ api, worker, mcp --> RDS Postgres, ElastiCache Redis, EFS     (private subnets)
 
 ## Before the first apply
 
-1. **Set a budget alert** in the account (Billing → Budgets) before anything is created.
+1. Decide who gets the budget alerts (`budget_alert_emails`, required). The first apply
+   creates the budget before anything that costs money.
 2. Create the state bucket, once per account:
 
    ```sh
@@ -47,12 +49,12 @@ api, worker, mcp --> RDS Postgres, ElastiCache Redis, EFS     (private subnets)
 The first apply runs from a laptop with administrator credentials (it creates the roles CI
 uses). The images have to exist before the services can start, so it goes in three steps:
 
-1. The registry and the build role only (`image_tag` is not used yet):
+1. The budget, the registry and the build role only (`image_tag` is not used yet):
 
    ```sh
    cd infra/aws
    terraform init -backend-config=backend.hcl
-   terraform apply -var image_tag=none \
+   terraform apply -var image_tag=none -target=aws_budgets_budget.monthly \
      -target=aws_ecr_lifecycle_policy.service -target=aws_iam_role_policy.build
    ```
 
@@ -94,11 +96,21 @@ deploys that commit's images; nothing is rebuilt. Set up once:
 - a GitHub environment `production` (Settings → Environments). Add required reviewers or a
   `v*` tag rule there to gate deploys; the deploy role trusts only jobs in it.
 - repository variables `AWS_DEPLOY_ROLE_ARN` (`terraform output deploy_role_arn`) and
-  `TF_STATE_BUCKET`, and optionally `TERRAFORM_TFVARS` (the contents of a
-  `terraform.tfvars` with non-secret settings).
+  `TF_STATE_BUCKET`, and `TERRAFORM_TFVARS`: the contents of a `terraform.tfvars` with the
+  non-secret settings, at least `budget_alert_emails`.
 
 The deploy role can change everything this configuration manages: PowerUserAccess plus IAM
 on `ledgerlens-*` roles. Treat the `production` environment as the gate.
+
+## Costs and logs
+
+`monthly_budget_usd` sets an account-wide AWS Budget. The default is $200, against an
+estimated $160 a month with everything running (ADR-0002). Task logs go to CloudWatch, one
+group per task, and are kept for `log_retention_days` (default 14).
+
+To pause the demo, set `service_desired_count` to 0 for the services you do not need, then
+deploy. The database, Redis and the load balancer (with its two public IPs) keep costing about
+$50 a month.
 
 ## Secrets
 

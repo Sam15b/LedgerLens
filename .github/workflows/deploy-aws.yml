@@ -17,7 +17,8 @@ name: Deploy (AWS)
 #   AWS_REGION           e.g. us-east-1
 #   AWS_DEPLOY_ROLE_ARN  terraform output deploy_role_arn (GitHub OIDC; no stored keys)
 #   TF_STATE_BUCKET      the Terraform state bucket
-#   TERRAFORM_TFVARS     optional: terraform.tfvars contents (non-secret settings)
+#   TERRAFORM_TFVARS     terraform.tfvars contents: non-secret settings, at least
+#                        budget_alert_emails
 # Until AWS_DEPLOY_ROLE_ARN and TF_STATE_BUCKET are set the job is skipped.
 
 on:
