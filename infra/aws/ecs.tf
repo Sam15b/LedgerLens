@@ -89,6 +89,18 @@ locals {
       }
       health = ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
     }
+    # One-off, by hand: load the demo bundle (scripts/seed_demo_data.py) into the stores.
+    # The worker image has the pipeline (OCR, embeddings); BM25 parameters land on EFS,
+    # where the worker and mcp read them. Re-running is a no-op.
+    seed = {
+      image   = "worker"
+      port    = null
+      command = ["python", "scripts/seed_demo_data.py", "--bundle", local.demo_bundle_uri]
+      volumes = ["processed", "hf_cache"]
+      env     = local.python_env
+      secrets = local.python_secrets
+      health  = null
+    }
     # One-off, before every rollout (all three steps are idempotent).
     init = {
       image = "api"
@@ -105,7 +117,8 @@ locals {
   }
 
   # Long-running services; which of them other services call by name (Service Connect).
-  services_running   = { for name, task in local.tasks : name => task if name != "init" }
+  one_off_tasks      = toset(["init", "seed"])
+  services_running   = { for name, task in local.tasks : name => task if !contains(local.one_off_tasks, name) }
   service_connect_to = toset(["api", "mcp"])
 }
 

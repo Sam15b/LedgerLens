@@ -135,11 +135,12 @@ variable "task_sizes" {
     mcp    = { cpu = 512, memory = 2048 }
     web    = { cpu = 256, memory = 512 }
     init   = { cpu = 512, memory = 1024 }
+    seed   = { cpu = 1024, memory = 4096 }
   }
 
   validation {
-    condition     = alltrue([for t in ["api", "worker", "mcp", "web", "init"] : contains(keys(var.task_sizes), t)])
-    error_message = "task_sizes needs an entry for api, worker, mcp, web and init."
+    condition     = alltrue([for t in ["api", "worker", "mcp", "web", "init", "seed"] : contains(keys(var.task_sizes), t)])
+    error_message = "task_sizes needs an entry for api, worker, mcp, web, init and seed."
   }
 }
 

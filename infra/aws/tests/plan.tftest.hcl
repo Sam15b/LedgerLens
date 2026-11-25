@@ -142,6 +142,14 @@ run "compute" {
   }
 
   assert {
+    condition = (
+      join(" ", jsondecode(aws_ecs_task_definition.app["seed"].container_definitions)[0].command)
+      == "python scripts/seed_demo_data.py --bundle s3://ledgerlens-prod-demo-data-123456789012/demo/demo-bundle.tar.gz"
+    )
+    error_message = "the seed task loads the bundle from the demo bucket"
+  }
+
+  assert {
     condition     = strcontains(join(" ", jsondecode(aws_ecs_task_definition.app["init"].container_definitions)[0].command), "alembic upgrade head")
     error_message = "the init task runs the migrations"
   }
