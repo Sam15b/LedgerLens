@@ -242,3 +242,17 @@ on the documents they name, multi-hop was 0.833, reconciliation 0.725 and overal
 records its git SHA and config hash; `make eval` reproduces it on the local stores, and
 pull requests that touch retrieval or the agents are gated on the 40-question CI subset
 ([09-evaluation.md](docs/layers/09-evaluation.md)).
+
+### Supporting measurements
+
+What each layer adds, from the earlier reports. These runs use different question sets
+and data than the headline table, so compare numbers within a row, not across rows.
+
+| What | Measured | Source |
+|------|----------|--------|
+| Retrieval variants, recall@5 (golden set v0, 47 answerable questions) | dense **0.649** → hybrid (+BM25) **0.777** → + cross-encoder rerank **0.868** → GraphRAG **0.889**. Multi-hop questions: 0.375 → 0.708 → 0.875 → **0.958** | [retrieval.md](eval/reports/2026-11-18/retrieval.md) |
+| OCR on degraded scans (300 pages, Tesseract) | clean: CER **0.011**, extraction F1 0.874, key fields readable on 100 % of pages. Severity 0.5: F1 0.829 (95 % of clean). Full severity: F1 0.555 | [ocr_degraded.md](eval/reports/2026-11-14/ocr_degraded.md) |
+| OCR preprocessing tuning | severity 0.5: CER 0.115 → **0.064**, key fields readable 72 % → **89 %** | [ocr_degraded.md](eval/reports/2026-11-14/ocr_degraded.md) |
+| Synthetic invoice records (WGAN-GP) | **0.0 %** of generated rows break a business rule; mean KS 0.169 (unconditional) / 0.150 (conditioned on vendor category) | [gan.md](eval/reports/2026-11-13/gan.md) |
+| Rendered synthetic documents (950 PDFs) | all 950 ingested; document-type accuracy 91.3 %. Rules-extractor micro-F1: payments 0.991, POs 0.990, contracts 0.895, invoices 0.724 | [extraction_synthetic.md](eval/reports/2026-11-13/extraction_synthetic.md) |
+| Hybrid weight and rerank depth tuning | dense weight 0.7 (flat at 0.4–0.7); 50 rerank candidates: recall@5 0.836 → 0.868, p95 3.6 s → 7.3 s on CPU | [tuning_alpha.md](eval/reports/2026-11-18/tuning_alpha.md), [tuning_rerank_graph.md](eval/reports/2026-11-18/tuning_rerank_graph.md) |
