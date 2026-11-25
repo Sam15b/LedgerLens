@@ -41,6 +41,7 @@ flags suspicious invoices, and drafts payment reminders.
 | ADR | Title |
 |-----|-------|
 | [0001](adr/0001-pinecone-for-vector-store.md) | Use Pinecone as the vector store |
+| [0002](adr/0002-cloud-target.md) | Deploy to AWS (ECS Fargate + RDS + Bedrock) |
 
 ---
 

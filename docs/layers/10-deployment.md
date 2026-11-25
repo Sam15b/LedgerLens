@@ -116,6 +116,10 @@ flowchart TB
 
 Pick **one** path for the live demo (cost); keep the other as working IaC + docs.
 
+**Chosen: AWS** ([ADR-0002](../adr/0002-cloud-target.md)); the Terraform is in
+[`infra/aws/`](../../infra/aws/README.md). The demo is served through CloudFront in front of the
+load balancer, which gives it HTTPS without a domain.
+
 ## GitHub Actions
 
 | Workflow | Trigger | Steps |
