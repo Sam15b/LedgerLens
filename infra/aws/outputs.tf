@@ -2,6 +2,11 @@ output "region" {
   value = var.region
 }
 
+output "environment" {
+  description = "The app's APP_ENV, which its /health reports."
+  value       = var.environment
+}
+
 output "vpc_id" {
   value = aws_vpc.main.id
 }

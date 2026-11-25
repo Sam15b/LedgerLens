@@ -9,6 +9,8 @@ name: Deploy (AWS)
 #      definition revisions (the services do not move to them yet)
 #   3. run the one-off init task (migrations) with the new revision; stop if it fails
 #   4. move the services to the new revisions and wait until they are stable
+#   5. smoke test the public address: the api's /health (every store ok), the dashboard
+#      and its login gate, the HTTPS redirect
 #
 # Needs the first apply from infra/aws/README.md, a GitHub environment named `production`,
 # and these repository variables:
@@ -105,8 +107,11 @@ jobs:
       - name: Read outputs
         id: tf
         run: |
-          echo "url=$(terraform output -raw url)" >> "$GITHUB_OUTPUT"
-          echo "cluster=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
+          {
+            echo "url=$(terraform output -raw url)"
+            echo "cluster=$(terraform output -raw cluster_name)"
+            echo "environment=$(terraform output -raw environment)"
+          } >> "$GITHUB_OUTPUT"
           terraform output -json task_definition_arns > "$RUNNER_TEMP/task_definitions.json"
           terraform output -json task_network > "$RUNNER_TEMP/task_network.json"
 
@@ -180,6 +185,41 @@ jobs:
             fi
             echo "$service: $state"
           done
+
+      - name: Smoke test
+        env:
+          URL: ${{ steps.tf.outputs.url }}
+          ENVIRONMENT: ${{ steps.tf.outputs.environment }}
+        run: |
+          set -euo pipefail
+          status() { curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$@"; }
+
+          # The api's /health, through CloudFront and the load balancer. The new targets
+          # can take a minute to pass the load balancer's health checks.
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 15 "$URL/health" -o "$RUNNER_TEMP/health.json"; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              echo "::error::$URL/health did not answer"
+              exit 1
+            fi
+            sleep 10
+          done
+          jq . "$RUNNER_TEMP/health.json"
+          # every required store answers (Postgres, Neo4j, Redis, Pinecone), and it is prod
+          jq -e --arg env "$ENVIRONMENT" '.status == "ok" and .env == $env' "$RUNNER_TEMP/health.json" > /dev/null || {
+            echo "::error::/health is not ok: $(jq -c .dependencies "$RUNNER_TEMP/health.json")"
+            exit 1
+          }
+
+          # the dashboard: up, behind its login gate, and its API forwarder closed without a session
+          test "$(status "$URL/healthz")" = 200
+          test "$(status "$URL/")" = 307
+          test "$(status "$URL/api/health")" = 401
+          # plain HTTP is redirected to HTTPS
+          test "$(status "http://${URL#https://}/healthz")" = 301
+          echo "smoke test passed: $URL"
 
       - name: Summary
         run: |
