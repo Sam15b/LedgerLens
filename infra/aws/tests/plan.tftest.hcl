@@ -3,7 +3,28 @@
 # It catches what `validate` cannot: bad counts and indexes, wrong references between
 # resources, invalid CIDR maths, and the guarantees asserted below.
 
+variables {
+  image_tag = "0123456789abcdef0123456789abcdef01234567"
+}
+
 mock_provider "aws" {
+  # Generate the mocked computed values at plan time too, so the assertions can look
+  # inside the rendered task definitions.
+  override_during = plan
+
+  mock_resource "aws_ecr_repository" {
+    defaults = { repository_url = "123456789012.dkr.ecr.us-east-1.amazonaws.com/ledgerlens/mock" }
+  }
+  mock_resource "aws_secretsmanager_secret" {
+    defaults = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:mock" }
+  }
+  mock_resource "aws_elasticache_cluster" {
+    defaults = { cache_nodes = [{ address = "queue.mock.cache.amazonaws.com", port = 6379 }] }
+  }
+  mock_resource "aws_cloudfront_distribution" {
+    defaults = { domain_name = "d111111abcdef8.cloudfront.net" }
+  }
+
   mock_data "aws_availability_zones" {
     defaults = { names = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"] }
   }
@@ -79,6 +100,53 @@ run "database_is_private" {
   assert {
     condition     = aws_db_instance.main.deletion_protection && !aws_db_instance.main.skip_final_snapshot
     error_message = "by default the database is protected and leaves a final snapshot"
+  }
+}
+
+run "compute" {
+  command = plan
+
+  assert {
+    condition     = toset(keys(aws_ecs_service.app)) == toset(["api", "worker", "mcp", "web"])
+    error_message = "four long-running services; init is a one-off task, not a service"
+  }
+
+  assert {
+    condition = alltrue([
+      for td in aws_ecs_task_definition.app : alltrue([
+        for e in jsondecode(td.container_definitions)[0].environment :
+        length(regexall("KEY|PASSWORD|SECRET|DATABASE_URL", e.name)) == 0
+      ])
+    ])
+    error_message = "credentials must come from Secrets Manager (secrets), never plain environment"
+  }
+
+  assert {
+    condition     = strcontains(join(" ", jsondecode(aws_ecs_task_definition.app["init"].container_definitions)[0].command), "alembic upgrade head")
+    error_message = "the init task runs the migrations"
+  }
+
+  assert {
+    condition = alltrue([
+      for name, td in aws_ecs_task_definition.app :
+      endswith(jsondecode(td.container_definitions)[0].image, ":0123456789abcdef0123456789abcdef01234567")
+    ])
+    error_message = "every task runs the image_tag being deployed"
+  }
+
+  assert {
+    condition     = length(aws_ecs_service.app["worker"].load_balancer) == 0 && length(aws_ecs_service.app["web"].load_balancer) == 1
+    error_message = "only web (and the api's /health) sit behind the load balancer"
+  }
+
+  assert {
+    condition     = aws_cloudfront_distribution.main.default_cache_behavior[0].viewer_protocol_policy == "redirect-to-https"
+    error_message = "the dashboard must be served over HTTPS (Secure session cookie)"
+  }
+
+  assert {
+    condition     = output.url == "https://d111111abcdef8.cloudfront.net"
+    error_message = "without a custom domain the demo lives at its CloudFront address"
   }
 }
 

@@ -9,6 +9,18 @@ why it is AWS.
 | `registry.tf` | ECR repositories `ledgerlens/{api,worker,mcp,web}`, the GitHub OIDC provider, the `build.yml` role |
 | `secrets.tf` | Secrets Manager secret `ledgerlens-<env>/app` (JSON) with the app's keys |
 | `database.tf` | RDS PostgreSQL 16 (private, encrypted, TLS only) and the `ledgerlens-<env>/database-url` secret |
+| `queue.tf` | ElastiCache Redis, one node: the ingestion queue |
+| `storage.tf` | EFS with four access points: uploads, BM25 parameters, the Hugging Face cache, the anomaly model |
+| `iam.tf` | Task execution role (pull, secrets, logs) and task role (Bedrock, EFS, ECS Exec) |
+| `ecs.tf` | ECS cluster, Service Connect names, task definitions for api, worker, mcp, web and the one-off `init`, the four services |
+| `alb.tf` | Load balancer (admits CloudFront only) and the CloudFront distribution: the public HTTPS address |
+
+```
+browser --HTTPS--> CloudFront --> ALB --> web :3000 --> api :8000 --> mcp :8765
+                                   \--> api /health      (Service Connect names)
+api, worker, mcp --> RDS Postgres, ElastiCache Redis, EFS     (private subnets)
+                 --> Pinecone, Neo4j AuraDB, Bedrock / LLM APIs (internet)
+```
 
 ## Before the first apply
 
@@ -31,17 +43,46 @@ why it is AWS.
 
 ## Apply
 
-```sh
-cd infra/aws
-terraform init -backend-config=backend.hcl
-terraform plan -out=tfplan
-terraform apply tfplan
-```
-
 The first apply runs from a laptop with administrator credentials (it creates the roles CI
-uses afterwards). Then set the repository variables `AWS_REGION` and `AWS_BUILD_ROLE_ARN`
-(`terraform output build_role_arn`), and `build.yml` starts pushing images on every push to
-main.
+uses). The images have to exist before the services can start, so it goes in three steps:
+
+1. The registry and the build role only (`image_tag` is not used yet):
+
+   ```sh
+   cd infra/aws
+   terraform init -backend-config=backend.hcl
+   terraform apply -var image_tag=none \
+     -target=aws_ecr_lifecycle_policy.service -target=aws_iam_role_policy.build
+   ```
+
+2. Set the repository variables `AWS_REGION` and `AWS_BUILD_ROLE_ARN`
+   (`terraform output build_role_arn`). Then run **Build images** (`build.yml`) on main. It
+   pushes `ledgerlens/<service>:<sha>`, and from now on it runs on every push to main.
+3. Everything else, for that commit:
+
+   ```sh
+   terraform plan -var image_tag=<sha> -out=tfplan
+   terraform apply tfplan
+   terraform output url
+   ```
+
+   Then fill in the third-party keys (next section), run `init` once, and restart the
+   services:
+
+   ```sh
+   CLUSTER=$(terraform output -raw cluster_name)
+   NET=$(terraform output -json task_network)
+   aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+     --task-definition "$(terraform output -json task_definition_arns | jq -r .init)" \
+     --network-configuration "awsvpcConfiguration={subnets=[$(jq -r '.subnets | join(",")' <<< "$NET")],securityGroups=[$(jq -r '.security_groups[0]' <<< "$NET")],assignPublicIp=ENABLED}"
+   for s in api worker mcp web; do
+     aws ecs update-service --cluster "$CLUSTER" --service "$s" --force-new-deployment
+   done
+   ```
+
+Services ignore task-definition changes once they exist. A new `image_tag` (or a changed
+environment variable) registers new revisions; a deployment runs `init` with them, then
+moves the services over, so migrations always come first.
 
 ## Secrets
 
@@ -58,11 +99,11 @@ aws secretsmanager put-secret-value --secret-id "$SECRET" --secret-string file:/
 rm /tmp/app-secret.json
 ```
 
-Terraform ignores later versions, so `apply` never resets them.
+Terraform ignores later versions, so `apply` never resets them. Running tasks read secrets
+at start: restart the services after a change (`aws ecs update-service --force-new-deployment`).
 
 `DATABASE_URL` has a secret of its own, written by Terraform. The database password is never
-in the state (write-only arguments); to rotate it, bump `db_password_version` and apply. Running tasks read secrets
-at start: restart the services after a change (`aws ecs update-service --force-new-deployment`).
+in the state (write-only arguments); to rotate it, bump `db_password_version` and apply.
 
 ## Checks without an AWS account
 
