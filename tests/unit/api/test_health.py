@@ -55,6 +55,35 @@ def test_health_ok_when_all_dependencies_up(make_client: Callable[..., TestClien
     assert {"version", "env"} <= body.keys()
 
 
+def test_livez_answers_without_touching_a_store(make_client: Callable[..., TestClient]) -> None:
+    calls: list[str] = []
+
+    def counted() -> str | None:
+        calls.append("postgres")
+        return None
+
+    client = make_client([HealthCheck("postgres", counted)])
+
+    response = client.get("/livez")
+
+    assert (response.status_code, response.text) == (200, "ok")
+    assert calls == []
+    assert "/livez" not in client.get("/openapi.json").json()["paths"]  # a probe, not API
+
+
+def test_livez_needs_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ledgerlens.core.config import get_settings
+
+    monkeypatch.setenv("API_KEYS", "secret-key")
+    get_settings.cache_clear()
+    try:
+        with TestClient(create_app()) as client:
+            assert client.get("/livez").status_code == 200
+            assert client.get("/stats/overview").status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
 def test_health_degraded_but_200_when_required_dependency_down(
     make_client: Callable[..., TestClient],
 ) -> None:

@@ -4,6 +4,9 @@
   ``status`` is ``ok`` when all *required* dependencies are up, otherwise ``degraded``.
 * ``GET /ready`` -- same body, but 503 unless every required dependency is up.
   Use it for container readiness probes.
+* ``GET /livez`` -- 200 ``ok`` while the process serves requests, without touching any
+  store. For probes that run every few seconds (the load balancer's and the container's
+  health checks): ``/health`` calls all four stores, two of them over the internet.
 """
 
 from __future__ import annotations
@@ -50,6 +53,11 @@ def _build(checks: list[HealthCheck]) -> HealthResponse:
 @router.get("/health")
 def health(checks: Checks) -> HealthResponse:
     return _build(checks)
+
+
+@router.get("/livez", include_in_schema=False)
+def livez() -> Response:
+    return Response("ok", media_type="text/plain")
 
 
 @router.get("/ready")

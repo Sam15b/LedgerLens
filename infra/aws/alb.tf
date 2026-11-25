@@ -14,7 +14,9 @@ locals {
   # Services the load balancer forwards to, and their health checks.
   public_targets = {
     web = { port = 3000, health_path = "/healthz" }
-    api = { port = 8000, health_path = "/health" } # only /health is routed to it
+    # Only /health is routed to the api. The probe itself uses /livez: /health queries all
+    # four stores, and the load balancer probes every 15 s from each of its nodes.
+    api = { port = 8000, health_path = "/livez" }
   }
 }
 
@@ -126,9 +128,10 @@ data "aws_cloudfront_cache_policy" "optimized" {
 }
 
 data "aws_cloudfront_origin_request_policy" "all_viewer" {
-  # Host, cookies, query strings and headers as the browser sent them. Next.js server
-  # actions (the login form) compare the Origin header with the Host header.
-  name = "Managed-AllViewer"
+  # Host, cookies, query strings and headers as the browser sent them (Next.js server
+  # actions, the login form, compare Origin with Host), plus CloudFront-Forwarded-Proto:
+  # the load balancer sees plain HTTP, and the login redirect has to stay on HTTPS.
+  name = "Managed-AllViewerAndCloudFrontHeaders-2022-06"
 }
 
 resource "aws_cloudfront_distribution" "main" {

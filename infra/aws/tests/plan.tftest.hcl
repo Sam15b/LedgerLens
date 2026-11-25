@@ -200,6 +200,34 @@ run "managed_stores" {
   }
 }
 
+run "load_balancer_keep_alive" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for e in jsondecode(aws_ecs_task_definition.app["web"].container_definitions)[0].environment :
+      tonumber(e.value) > aws_lb.main.idle_timeout * 1000 if e.name == "KEEP_ALIVE_TIMEOUT"
+      ]) && contains(
+      [for e in jsondecode(aws_ecs_task_definition.app["web"].container_definitions)[0].environment : e.name],
+      "KEEP_ALIVE_TIMEOUT"
+    )
+    error_message = "web must keep idle connections open longer than the load balancer (else 502s)"
+  }
+
+  assert {
+    condition = contains(
+      jsondecode(aws_ecs_task_definition.app["api"].container_definitions)[0].environment,
+      { name = "UVICORN_TIMEOUT_KEEP_ALIVE", value = "310" }
+    )
+    error_message = "the api must keep idle connections open longer than the load balancer"
+  }
+
+  assert {
+    condition     = aws_lb_target_group.service["api"].health_check[0].path == "/livez"
+    error_message = "the load balancer probes /livez, not /health (which queries every store)"
+  }
+}
+
 run "sampled_tracing" {
   command = plan
 

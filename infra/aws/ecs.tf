@@ -60,9 +60,11 @@ locals {
       port    = 8000
       command = null
       volumes = ["uploads"]
-      env     = local.python_env
+      # keep idle connections open longer than the load balancer does (300 s), or it
+      # reuses one the server has just closed and answers 502
+      env     = merge(local.python_env, { UVICORN_TIMEOUT_KEEP_ALIVE = "310" })
       secrets = local.python_secrets
-      health  = concat(local.python_healthcheck, ["import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"])
+      health  = concat(local.python_healthcheck, ["import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=4)"])
     }
     worker = {
       image   = "worker"
@@ -87,7 +89,16 @@ locals {
       port    = 3000
       command = null
       volumes = []
-      env     = { LEDGERLENS_API_URL = "http://api:8000" }
+      env = {
+        LEDGERLENS_API_URL = "http://api:8000"
+        # Listen on every interface: Next's standalone server binds to $HOSTNAME, and the
+        # task's runtime may set that to the task's own address, which leaves 127.0.0.1
+        # (the container health check) unanswered.
+        HOSTNAME = "0.0.0.0"
+        # ms; longer than the load balancer's 300 s idle timeout (Node's default is 5 s),
+        # or it reuses connections the server has closed and answers 502
+        KEEP_ALIVE_TIMEOUT = "310000"
+      }
       secrets = {
         LEDGERLENS_API_KEY       = "${local.app_secret}:LEDGERLENS_API_KEY::"
         DASHBOARD_PASSWORD       = "${local.app_secret}:DASHBOARD_PASSWORD::"

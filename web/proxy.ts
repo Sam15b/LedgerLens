@@ -10,6 +10,9 @@ import { allowed, SESSION_COOKIE } from "@/lib/session";
 export async function proxy(request: NextRequest) {
   if (await allowed(request.cookies.get(SESSION_COOKIE)?.value)) return NextResponse.next();
   const login = new URL("/login", request.url);
+  // Behind CloudFront the load balancer is reached over plain HTTP, so request.url says
+  // http: keep the browser on the scheme it actually used (CloudFront tells us).
+  if (request.headers.get("cloudfront-forwarded-proto") === "https") login.protocol = "https:";
   const next = request.nextUrl.pathname + request.nextUrl.search;
   if (next !== "/") login.searchParams.set("next", next);
   return NextResponse.redirect(login);

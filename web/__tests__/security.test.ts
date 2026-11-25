@@ -76,6 +76,17 @@ describe("login gate", () => {
     expect(location.searchParams.get("next")).toBe("/anomalies?review=all");
   });
 
+  it("redirects on the scheme the browser used behind CloudFront", async () => {
+    vi.stubEnv("DASHBOARD_PASSWORD", ENV.DASHBOARD_PASSWORD!);
+    // the load balancer forwards plain HTTP; CloudFront reports the viewer's HTTPS
+    const request = new NextRequest("http://d1.cloudfront.net/eval", {
+      headers: { "cloudfront-forwarded-proto": "https" },
+    });
+    const location = new URL((await proxy(request)).headers.get("location")!);
+    expect(location.origin).toBe("https://d1.cloudfront.net");
+    expect(location.pathname).toBe("/login");
+  });
+
   it("lets a signed-in request through", async () => {
     vi.stubEnv("DASHBOARD_PASSWORD", ENV.DASHBOARD_PASSWORD!);
     const { value } = await createSession(process.env);
