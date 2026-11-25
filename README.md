@@ -70,6 +70,27 @@ flowchart LR
 Running it all the time costs about $160 a month (estimate in ADR-0002). There is a budget
 alert, and services can be scaled to zero between demos.
 
+## Screenshots
+
+The dashboard on the local development stores: about 1,000 documents from the synthetic
+ledger and public datasets (CUAD contracts, CORD receipts), scored by the anomaly model.
+This is not the live demo.
+
+![A tour of the dashboard: overview, documents, a document's extracted fields, anomaly review, reminder approval and evaluation](docs/assets/dashboard-tour.gif)
+
+| | |
+|---|---|
+| ![Overview: documents ingested, unpaid and overdue totals per currency, flagged invoices, reminders to approve](docs/assets/screenshots/overview.png) | ![Documents: drag-and-drop upload and every document's type, status and pages](docs/assets/screenshots/documents.png) |
+| **Overview**: unpaid and overdue per currency, flags to review | **Documents**: upload, status, type |
+| ![A document's extracted fields and line items](docs/assets/screenshots/document-viewer.png) | ![Anomalies: invoices by score, with the rules and autoencoder features behind each](docs/assets/screenshots/anomalies.png) |
+| **Document**: the fields and line items extracted from it | **Anomalies**: score, the rule and feature reasons, confirm or false positive |
+| ![Reminders: drafts to edit, approve or reject](docs/assets/screenshots/reminders.png) | ![Evaluation: recall@5, MRR, latency and cost of each eval run, with the trend](docs/assets/screenshots/eval.png) |
+| **Reminders**: drafts to edit, approve or reject; nothing is sent | **Evaluation**: the latest run against the one before, and the trend |
+
+Chat is not shown: answering needs an LLM key, which this environment does not have yet.
+The streaming chat, its tool-call timeline and its citations are covered by the web tests
+(`web/__tests__/chat.test.tsx`).
+
 ## Project structure
 
 ```text
