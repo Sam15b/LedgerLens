@@ -21,6 +21,11 @@ output "build_role_arn" {
   value       = aws_iam_role.build.arn
 }
 
+output "deploy_role_arn" {
+  description = "Set as the AWS_DEPLOY_ROLE_ARN repository variable (deploy-aws.yml)."
+  value       = aws_iam_role.deploy.arn
+}
+
 output "app_secret_arn" {
   description = "Secrets Manager secret holding the app's keys (JSON); fill in the third-party ones."
   value       = aws_secretsmanager_secret.app.arn

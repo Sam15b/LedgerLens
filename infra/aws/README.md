@@ -13,6 +13,7 @@ why it is AWS.
 | `storage.tf` | EFS with four access points: uploads, BM25 parameters, the Hugging Face cache, the anomaly model |
 | `iam.tf` | Task execution role (pull, secrets, logs) and task role (Bedrock, EFS, ECS Exec) |
 | `ecs.tf` | ECS cluster, Service Connect names, task definitions for api, worker, mcp, web and the one-off `init`, the four services |
+| `github_deploy.tf` | The role `deploy-aws.yml` assumes (GitHub OIDC, `production` environment only) |
 | `alb.tf` | Load balancer (admits CloudFront only) and the CloudFront distribution: the public HTTPS address |
 
 ```
@@ -83,6 +84,21 @@ uses). The images have to exist before the services can start, so it goes in thr
 Services ignore task-definition changes once they exist. A new `image_tag` (or a changed
 environment variable) registers new revisions; a deployment runs `init` with them, then
 moves the services over, so migrations always come first.
+
+## Deployments
+
+After the first apply, every deployment goes through **Deploy (AWS)**
+(`.github/workflows/deploy-aws.yml`): push a tag `v*`, or run it by hand on main. It
+deploys that commit's images; nothing is rebuilt. Set up once:
+
+- a GitHub environment `production` (Settings → Environments). Add required reviewers or a
+  `v*` tag rule there to gate deploys; the deploy role trusts only jobs in it.
+- repository variables `AWS_DEPLOY_ROLE_ARN` (`terraform output deploy_role_arn`) and
+  `TF_STATE_BUCKET`, and optionally `TERRAFORM_TFVARS` (the contents of a
+  `terraform.tfvars` with non-secret settings).
+
+The deploy role can change everything this configuration manages: PowerUserAccess plus IAM
+on `ledgerlens-*` roles. Treat the `production` environment as the gate.
 
 ## Secrets
 

@@ -77,6 +77,24 @@ run "plan_defaults" {
     ])
     error_message = "the build role must only trust main of this repository"
   }
+
+  assert {
+    condition = anytrue([
+      for c in data.aws_iam_policy_document.deploy_trust.statement[0].condition :
+      c.variable == "token.actions.githubusercontent.com:sub"
+      && c.values == tolist(["repo:Sam15b/LedgerLens:environment:production"])
+    ])
+    error_message = "the deploy role must only trust jobs in the production environment"
+  }
+
+  assert {
+    condition = alltrue([
+      for st in data.aws_iam_policy_document.deploy_iam.statement :
+      alltrue([for r in st.resources : r == "*" || strcontains(r, ":123456789012:")])
+      if st.sid != "ReadManagedPolicies"
+    ])
+    error_message = "the deploy role's IAM rights stay inside this account"
+  }
 }
 
 run "database_is_private" {

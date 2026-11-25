@@ -33,6 +33,12 @@ variable "create_github_oidc_provider" {
   default     = true
 }
 
+variable "github_deploy_environment" {
+  description = "GitHub environment whose jobs may assume the deploy role (deploy-aws.yml runs in it)."
+  type        = string
+  default     = "production"
+}
+
 # --- network ---
 
 variable "vpc_cidr" {
