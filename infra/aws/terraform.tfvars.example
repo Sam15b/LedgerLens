@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (git-ignored). Every value here has a default in variables.tf.
+environment       = "prod"
+region            = "us-east-1" # the Pinecone index's region
+github_repository = "Sam15b/LedgerLens"
+
+# The account already has a GitHub OIDC provider? Reuse it.
+# create_github_oidc_provider = false

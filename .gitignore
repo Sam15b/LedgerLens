@@ -61,3 +61,13 @@ Thumbs.db
 
 # Private daily implementation plan (local only, never pushed)
 docs/daily-plan/
+
+# Terraform (infra/*): providers, state and per-person settings stay local;
+# .terraform.lock.hcl is committed
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+backend.hcl
