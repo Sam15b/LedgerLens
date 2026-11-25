@@ -109,10 +109,12 @@ packages = ["src/ledgerlens"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]  # "." so tests can import eval/ and ml/
 # Integration tests need `docker compose up` and are excluded by default;
-# run them with `pytest -m integration` (or `make test-int`).
-addopts = "-ra -m 'not integration'"
+# run them with `pytest -m integration` (or `make test-int`). Live tests need a deployment:
+# `pytest -m live tests/e2e/test_live.py` with LEDGERLENS_LIVE_URL set.
+addopts = "-ra -m 'not integration and not live'"
 markers = [
     "integration: needs the docker compose services (Postgres, Neo4j, Redis, Pinecone Local)",
+    "live: runs against a deployed environment (LEDGERLENS_LIVE_URL; tests/e2e/test_live.py)",
 ]
 filterwarnings = [
     # Third-party pytest plugin noise (langsmith on Python 3.14); not our code.

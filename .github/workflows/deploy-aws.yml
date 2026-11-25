@@ -222,6 +222,27 @@ jobs:
           test "$(status "http://${URL#https://}/healthz")" = 301
           echo "smoke test passed: $URL"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Live smoke suite (tests/e2e/test_live.py)
+        working-directory: .
+        env:
+          LEDGERLENS_LIVE_URL: ${{ steps.tf.outputs.url }}
+          LEDGERLENS_LIVE_ENV: ${{ steps.tf.outputs.environment }}
+        run: |
+          set -euo pipefail
+          # signs in the way the dashboard does, with its session secret from the app secret
+          secret_arn=$(terraform -chdir=infra/aws output -raw app_secret_arn)
+          session_secret=$(aws secretsmanager get-secret-value --secret-id "$secret_arn" \
+            --query SecretString --output text | jq -r .DASHBOARD_SESSION_SECRET)
+          echo "::add-mask::$session_secret"
+          pip install --quiet pytest httpx
+          # --noconftest: the suite needs only httpx, not the app or the integration fixtures
+          LEDGERLENS_LIVE_SESSION_SECRET="$session_secret" \
+            python -m pytest -m live tests/e2e/test_live.py --noconftest -p no:cacheprovider
+
       - name: Summary
         run: |
           {

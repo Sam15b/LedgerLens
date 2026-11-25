@@ -99,6 +99,17 @@ deploys that commit's images; nothing is rebuilt. Set up once:
   `TF_STATE_BUCKET`, and `TERRAFORM_TFVARS`: the contents of a `terraform.tfvars` with the
   non-secret settings, at least `budget_alert_emails`.
 
+After the rollout, the deploy smoke-tests the public URL. Then it runs the live suite
+(`tests/e2e/test_live.py`), which signs in the way the dashboard does and checks every
+page and the `/api` forwarder. To run the suite by hand, for example after seeding:
+
+```sh
+LEDGERLENS_LIVE_URL=$(terraform output -raw url) \
+LEDGERLENS_LIVE_SESSION_SECRET=<DASHBOARD_SESSION_SECRET from the app secret> \
+LEDGERLENS_LIVE_SEEDED=1 \
+pytest -m live tests/e2e/test_live.py
+```
+
 The deploy role can change everything this configuration manages: PowerUserAccess plus IAM
 on `ledgerlens-*` roles. Treat the `production` environment as the gate.
 
