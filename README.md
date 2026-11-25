@@ -9,7 +9,13 @@ LedgerLens reads invoices, POs, payments and contracts (PDFs and scans), links t
 knowledge graph, answers questions about them, flags suspicious or duplicate invoices,
 and drafts payment reminders.
 
-> 🚧 Early development: Phase 0 (foundation). See the [roadmap](docs/04-implementation-roadmap.md).
+> **v1.0.0**: every phase of the [roadmap](docs/04-implementation-roadmap.md) is built.
+> Still open, with the reason in each phase's Status:
+> - the live deployment (it needs an AWS account);
+> - the fine-tune run (it needs a GPU);
+> - LLM-judged scores (they need an API key).
+>
+> Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Architecture at a glance
 

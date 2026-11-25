@@ -1030,7 +1030,7 @@
   "info": {
     "description": "Agentic GraphRAG over invoices, purchase orders and contracts.",
     "title": "LedgerLens API",
-    "version": "0.7.0"
+    "version": "1.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
