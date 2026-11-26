@@ -8,6 +8,89 @@ follow the roadmap: `v0.<phase>.0` marks the end of each phase in
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-26
+
+Phase 8 — Dashboard and deployment, the last phase of the roadmap.
+- **Dashboard**: a Next.js dashboard over the API.
+- **Local stack**: `docker compose up` runs the whole system.
+- **AWS**: the AWS deployment is written as Terraform and is checked on every PR.
+- **CI/CD**: GitHub Actions builds an image per commit to `main` and deploys `v*` tags.
+
+What is not done, and why, is listed in each phase's **Status** in the
+[roadmap](docs/04-implementation-roadmap.md):
+- no AWS environment has been created yet, so there is no public URL;
+- the QLoRA run needs a GPU;
+- RAGAS and live LLM answers need a working API key.
+
+### Added
+
+- **Dashboard** (`web/`, Next.js 16, React 19, Tailwind 4). Pages:
+  - overview KPI cards: documents, unpaid and overdue per currency, flags to review,
+    reminders to approve, LLM cost per day;
+  - documents, with drag-and-drop upload and a viewer that shows the original next to the
+    extracted fields;
+  - chat over SSE, with a tool-call timeline, clickable citations, attachments, and the
+    reminder-approval interrupt inline;
+  - anomaly review: score, rule and feature reasons, confirm or false positive;
+  - a reminder queue: edit, approve or reject a draft. Nothing is ever sent;
+  - evaluation metrics and their trend.
+
+  The typed client is generated from the API's OpenAPI document, and CI fails when it is
+  stale. Vitest component tests and a lint, type-check and build job run in CI.
+- **API hardening**:
+  - API keys (`API_KEYS`), with rotation by overlap;
+  - a dashboard login: a signed session cookie, and an `/api` forwarder that adds the key
+    on the server, so the browser never sees it;
+  - a per-client chat rate limit (`CHAT_RATE_LIMIT`);
+  - request and chat deadlines, with structured error bodies;
+  - `GET /eval/runs` and `PATCH /reminders/{id}`.
+- **Containers**:
+  - multi-stage Dockerfiles for api, worker, mcp and web, running as non-root users with
+    no model weights inside;
+  - `docker-compose.yml` runs the whole stack plus a one-off `init` (migrations, Pinecone
+    index, Neo4j schema); `docker-compose.override.yml` adds dev hot reload;
+  - a CI `compose` job builds every image and smoke-tests the running stack.
+- **AWS** (`infra/aws/`, [ADR-0002](docs/adr/0002-cloud-target.md)):
+  - ECS Fargate services behind an ALB that only CloudFront can reach (HTTPS without a
+    domain), with Service Connect names as in compose;
+  - RDS PostgreSQL 16. Its password is never in the Terraform state (write-only arguments);
+  - ElastiCache Redis, EFS for shared files, ECR with immutable SHA tags;
+  - Secrets Manager, Bedrock through the task role, Neo4j AuraDB, and the Pinecone `prod`
+    namespace;
+  - an account-wide budget with email alerts, and 14-day log retention;
+  - `terraform test` plans the whole configuration against mocked providers in CI (10 runs
+    of assertions), so the checks need no AWS account.
+- **Build and deploy** (GitHub OIDC, no stored keys):
+  - `build.yml` pushes `ledgerlens/<service>:<sha>` on every push to `main`;
+  - `deploy-aws.yml` deploys a `v*` tag in order: wait for the commit's images, then
+    `terraform apply`, run migrations as a one-off task (and stop if they fail), move the
+    services, check that no rollout was rolled back, smoke-test `/health` and the login
+    gate, and run the live suite.
+- **Live smoke suite** (`tests/e2e/test_live.py`, `pytest -m live`): checks a deployment
+  through its public URL, signing in the way the dashboard does.
+- **Demo data in the cloud**:
+  - `seed_demo_data.py --export` writes the demo selection (105 records, 28 PDFs, ~2 MB)
+    as a bundle;
+  - `--bundle PATH|s3://…` loads one with safe extraction;
+  - a one-off `seed` ECS task runs it.
+
+  No LLM key is needed: documents are stored with their known records.
+- **Cloud model profiles**: `profiles:` in `configs/models.yaml`, picked with
+  `LLM_PROFILE`. The `aws` profile puts Bedrock first for `smart` and drops the
+  undeployed Ollama model from `extractor`.
+- `GET /livez`: a liveness probe that touches no store, for the load balancer and the
+  container health checks.
+- README: architecture diagram, screenshots and a GIF tour of the dashboard, CI badges,
+  and the supporting measurements from every report.
+
+### Changed
+
+- Tracing defaults by environment when unset. In `prod` it is on and keeps 10 % of traces;
+  elsewhere it is off and keeps every trace. Explicit `TRACING_*` settings still win.
+- Probes use `/livez` instead of `/health`, which queries all four stores. Web and api keep
+  idle connections longer than the load balancer does, to avoid 502s on reuse.
+- The roadmap now has a **Status** under every exit criterion, with the report behind it.
+
 ## [0.7.0] - 2026-11-22
 
 Phase 7 — Evaluation suite. `make eval` gives a dated report, and pull requests that touch
@@ -588,7 +671,9 @@ command and reports its health.
 - Package version is read from `src/ledgerlens/__init__.py` (single source) and reset to
   `0.0.0` to match the roadmap's `v0.<phase>.0` scheme.
 
-[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Sam15b/LedgerLens/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Sam15b/LedgerLens/compare/v0.7.0...v1.0.0
+[0.7.0]: https://github.com/Sam15b/LedgerLens/compare/v0.5.0...v0.7.0
 [0.5.0]: https://github.com/Sam15b/LedgerLens/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Sam15b/LedgerLens/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Sam15b/LedgerLens/compare/v0.1.0...v0.3.0

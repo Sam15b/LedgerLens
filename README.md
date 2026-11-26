@@ -1,12 +1,21 @@
 # LedgerLens
 
+[![CI](https://github.com/Sam15b/LedgerLens/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Sam15b/LedgerLens/actions/workflows/ci.yml)
+[![Eval](https://github.com/Sam15b/LedgerLens/actions/workflows/eval.yml/badge.svg?branch=main)](https://github.com/Sam15b/LedgerLens/actions/workflows/eval.yml)
+
 **Agentic GraphRAG for invoices, purchase orders and contracts.**
 
 LedgerLens reads invoices, POs, payments and contracts (PDFs and scans), links them in a
 knowledge graph, answers questions about them, flags suspicious or duplicate invoices,
 and drafts payment reminders.
 
-> 🚧 Early development: Phase 0 (foundation). See the [roadmap](docs/04-implementation-roadmap.md).
+> **v1.0.0**: every phase of the [roadmap](docs/04-implementation-roadmap.md) is built.
+> Still open, with the reason in each phase's Status:
+> - the live deployment (it needs an AWS account);
+> - the fine-tune run (it needs a GPU);
+> - LLM-judged scores (they need an API key).
+>
+> Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Architecture at a glance
 
@@ -69,6 +78,27 @@ flowchart LR
 
 Running it all the time costs about $160 a month (estimate in ADR-0002). There is a budget
 alert, and services can be scaled to zero between demos.
+
+## Screenshots
+
+The dashboard on the local development stores: about 1,000 documents from the synthetic
+ledger and public datasets (CUAD contracts, CORD receipts), scored by the anomaly model.
+This is not the live demo.
+
+![A tour of the dashboard: overview, documents, a document's extracted fields, anomaly review, reminder approval and evaluation](docs/assets/dashboard-tour.gif)
+
+| | |
+|---|---|
+| ![Overview: documents ingested, unpaid and overdue totals per currency, flagged invoices, reminders to approve](docs/assets/screenshots/overview.png) | ![Documents: drag-and-drop upload and every document's type, status and pages](docs/assets/screenshots/documents.png) |
+| **Overview**: unpaid and overdue per currency, flags to review | **Documents**: upload, status, type |
+| ![A document's extracted fields and line items](docs/assets/screenshots/document-viewer.png) | ![Anomalies: invoices by score, with the rules and autoencoder features behind each](docs/assets/screenshots/anomalies.png) |
+| **Document**: the fields and line items extracted from it | **Anomalies**: score, the rule and feature reasons, confirm or false positive |
+| ![Reminders: drafts to edit, approve or reject](docs/assets/screenshots/reminders.png) | ![Evaluation: recall@5, MRR, latency and cost of each eval run, with the trend](docs/assets/screenshots/eval.png) |
+| **Reminders**: drafts to edit, approve or reject; nothing is sent | **Evaluation**: the latest run against the one before, and the trend |
+
+Chat is not shown: answering needs an LLM key, which this environment does not have yet.
+The streaming chat, its tool-call timeline and its citations are covered by the web tests
+(`web/__tests__/chat.test.tsx`).
 
 ## Project structure
 
@@ -221,3 +251,17 @@ on the documents they name, multi-hop was 0.833, reconciliation 0.725 and overal
 records its git SHA and config hash; `make eval` reproduces it on the local stores, and
 pull requests that touch retrieval or the agents are gated on the 40-question CI subset
 ([09-evaluation.md](docs/layers/09-evaluation.md)).
+
+### Supporting measurements
+
+What each layer adds, from the earlier reports. These runs use different question sets
+and data than the headline table, so compare numbers within a row, not across rows.
+
+| What | Measured | Source |
+|------|----------|--------|
+| Retrieval variants, recall@5 (golden set v0, 47 answerable questions) | dense **0.649** → hybrid (+BM25) **0.777** → + cross-encoder rerank **0.868** → GraphRAG **0.889**. Multi-hop questions: 0.375 → 0.708 → 0.875 → **0.958** | [retrieval.md](eval/reports/2026-11-18/retrieval.md) |
+| OCR on degraded scans (300 pages, Tesseract) | clean: CER **0.011**, extraction F1 0.874, key fields readable on 100 % of pages. Severity 0.5: F1 0.829 (95 % of clean). Full severity: F1 0.555 | [ocr_degraded.md](eval/reports/2026-11-14/ocr_degraded.md) |
+| OCR preprocessing tuning | severity 0.5: CER 0.115 → **0.064**, key fields readable 72 % → **89 %** | [ocr_degraded.md](eval/reports/2026-11-14/ocr_degraded.md) |
+| Synthetic invoice records (WGAN-GP) | **0.0 %** of generated rows break a business rule; mean KS 0.169 (unconditional) / 0.150 (conditioned on vendor category) | [gan.md](eval/reports/2026-11-13/gan.md) |
+| Rendered synthetic documents (950 PDFs) | all 950 ingested; document-type accuracy 91.3 %. Rules-extractor micro-F1: payments 0.991, POs 0.990, contracts 0.895, invoices 0.724 | [extraction_synthetic.md](eval/reports/2026-11-13/extraction_synthetic.md) |
+| Hybrid weight and rerank depth tuning | dense weight 0.7 (flat at 0.4–0.7); 50 rerank candidates: recall@5 0.836 → 0.868, p95 3.6 s → 7.3 s on CPU | [tuning_alpha.md](eval/reports/2026-11-18/tuning_alpha.md), [tuning_rerank_graph.md](eval/reports/2026-11-18/tuning_rerank_graph.md) |
