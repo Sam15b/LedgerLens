@@ -64,6 +64,19 @@ timeout_s: 60
 
 > Model IDs and prices change — keep them only in this file and check provider docs.
 
+**Cloud overrides.** `profiles:` holds named alias overrides, and `LLM_PROFILE` picks one at
+start-up. Each override replaces a whole alias, and may only replace aliases that exist.
+The AWS deployment sets `LLM_PROFILE=aws`: `smart` tries Bedrock first, whose credential is
+the task's IAM role, and `extractor` skips the Ollama model, which is not deployed. A `gcp`
+profile does the same with Gemini.
+
+```yaml
+profiles:
+  aws:
+    smart:     [bedrock/<model-id>, openai/gpt-4o, gemini/gemini-pro]
+    extractor: [openai/gpt-4o-mini, gemini/gemini-flash]
+```
+
 ## Routing behaviour
 
 ```mermaid

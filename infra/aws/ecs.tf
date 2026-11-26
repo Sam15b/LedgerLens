@@ -17,11 +17,12 @@ locals {
 
   # What every Python service gets (docker-compose's x-app-env, for the cloud).
   python_env = {
-    APP_ENV    = var.environment
-    LOG_LEVEL  = "INFO"
-    AWS_REGION = var.region # Bedrock; boto3 takes credentials from the task role
-    REDIS_URL  = local.redis_url
-    MCP_URL    = "http://mcp:8765/mcp"
+    APP_ENV     = var.environment
+    LOG_LEVEL   = "INFO"
+    AWS_REGION  = var.region # Bedrock; boto3 takes credentials from the task role
+    LLM_PROFILE = "aws"      # configs/models.yaml: Bedrock first for `smart`, no Ollama
+    REDIS_URL   = local.redis_url
+    MCP_URL     = "http://mcp:8765/mcp"
   }
   python_secrets = {
     DATABASE_URL      = aws_secretsmanager_secret.database_url.arn
@@ -118,7 +119,8 @@ resource "aws_service_discovery_http_namespace" "main" {
 resource "aws_cloudwatch_log_group" "task" {
   for_each = local.tasks
 
-  name = "/ecs/${local.name}/${each.key}"
+  name              = "/ecs/${local.name}/${each.key}"
+  retention_in_days = var.log_retention_days
 }
 
 resource "aws_ecs_task_definition" "app" {

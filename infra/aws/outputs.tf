@@ -2,6 +2,11 @@ output "region" {
   value = var.region
 }
 
+output "environment" {
+  description = "The app's APP_ENV, which its /health reports."
+  value       = var.environment
+}
+
 output "vpc_id" {
   value = aws_vpc.main.id
 }
@@ -19,6 +24,11 @@ output "ecr_repositories" {
 output "build_role_arn" {
   description = "Set as the AWS_BUILD_ROLE_ARN repository variable (build.yml)."
   value       = aws_iam_role.build.arn
+}
+
+output "deploy_role_arn" {
+  description = "Set as the AWS_DEPLOY_ROLE_ARN repository variable (deploy-aws.yml)."
+  value       = aws_iam_role.deploy.arn
 }
 
 output "app_secret_arn" {
@@ -60,4 +70,9 @@ output "task_network" {
     subnets         = aws_subnet.public[*].id
     security_groups = [aws_security_group.tasks.id]
   }
+}
+
+output "log_groups" {
+  description = "CloudWatch log group per task (streams are <task>/<task>/<task id>)."
+  value       = { for name, group in aws_cloudwatch_log_group.task : name => group.name }
 }

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # src/ledgerlens/core/config.py -> repository root is three levels above the package dir.
@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     mistral_base_url: str = "https://api.mistral.ai/v1"
     ollama_base_url: str = "http://localhost:11434"
     aws_region: str = "us-east-1"
+    llm_profile: str = ""
+    """A ``profiles`` entry of ``configs/models.yaml`` to apply over the aliases (``aws`` in
+    the AWS deployment: Bedrock first for ``smart``); empty = the aliases as written."""
 
     # Embeddings
     embedding_model: str = "BAAI/bge-base-en-v1.5"
@@ -165,6 +168,13 @@ class RetryConfig(_Section):
         return self.backoff_s[min(max(retry, 1), len(self.backoff_s)) - 1]
 
 
+def _check_alias_refs(name: str, refs: list[str]) -> None:
+    for ref in refs:
+        split_model_ref(ref)
+    if len(set(refs)) != len(refs):
+        raise ValueError(f"alias {name!r} lists the same model more than once")
+
+
 class ModelsConfig(_Section):
     aliases: dict[str, list[str]] = Field(default_factory=dict)
     pricing_usd_per_1m_tokens: dict[str, ModelPrice] = Field(default_factory=dict)
@@ -172,16 +182,46 @@ class ModelsConfig(_Section):
     timeout_s: float = Field(default=60, gt=0)
     cost_log: str | None = None
     """JSONL file (relative to the repo root) that every priced call is appended to."""
+    profiles: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
+    """Named alias overrides for a deployment (``LLM_PROFILE``): each replaces whole aliases,
+    e.g. ``aws: {smart: [bedrock/...]}`` puts the cloud's own model first."""
 
     @field_validator("aliases")
     @classmethod
     def _check_aliases(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
         for name, refs in aliases.items():
-            for ref in refs:
-                split_model_ref(ref)
-            if len(set(refs)) != len(refs):
-                raise ValueError(f"alias {name!r} lists the same model more than once")
+            _check_alias_refs(name, refs)
         return aliases
+
+    @field_validator("profiles")
+    @classmethod
+    def _check_profiles(
+        cls, profiles: dict[str, dict[str, list[str]]]
+    ) -> dict[str, dict[str, list[str]]]:
+        for profile, aliases in profiles.items():
+            for name, refs in aliases.items():
+                _check_alias_refs(f"{profile}.{name}", refs)
+        return profiles
+
+    @model_validator(mode="after")
+    def _profiles_override_known_aliases(self) -> ModelsConfig:
+        for profile, aliases in self.profiles.items():
+            unknown = sorted(set(aliases) - set(self.aliases))
+            if unknown:
+                raise ValueError(
+                    f"profile {profile!r} overrides unknown aliases {unknown}: "
+                    "a profile can only replace aliases defined under `aliases`"
+                )
+        return self
+
+    def with_profile(self, profile: str) -> ModelsConfig:
+        """This config with ``profiles[profile]`` applied over the aliases ("" = unchanged)."""
+        if not profile:
+            return self
+        if profile not in self.profiles:
+            known = ", ".join(sorted(self.profiles)) or "none"
+            raise ValueError(f"unknown LLM_PROFILE {profile!r} (models.yaml profiles: {known})")
+        return self.model_copy(update={"aliases": {**self.aliases, **self.profiles[profile]}})
 
     @field_validator("pricing_usd_per_1m_tokens")
     @classmethod
@@ -406,13 +446,20 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_config(configs_dir: Path | None = None) -> AppConfig:
-    """Load and validate every ``configs/*.yaml`` file. Missing files fall back to defaults."""
+def load_config(configs_dir: Path | None = None, llm_profile: str = "") -> AppConfig:
+    """Load and validate every ``configs/*.yaml`` file. Missing files fall back to defaults.
+
+    ``llm_profile`` applies that ``models.yaml`` profile over the model aliases.
+    """
     directory = resolve_configs_dir(configs_dir)
     raw = {name: _read_yaml(directory / f"{name}.yaml") for name in _CONFIG_FILES}
-    return AppConfig.model_validate(raw)
+    config = AppConfig.model_validate(raw)
+    if llm_profile:
+        config = config.model_copy(update={"models": config.models.with_profile(llm_profile)})
+    return config
 
 
 @lru_cache
 def get_config() -> AppConfig:
-    return load_config(get_settings().configs_dir)
+    settings = get_settings()
+    return load_config(settings.configs_dir, llm_profile=settings.llm_profile)

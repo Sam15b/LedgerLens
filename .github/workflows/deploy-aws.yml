@@ -1,0 +1,230 @@
+name: Deploy (AWS)
+
+# Deploys one commit to the AWS environment in infra/aws: pushing a tag v* deploys the
+# tagged commit, "Run workflow" deploys the head of the chosen branch. The images are the
+# ones build.yml pushed for that commit (ledgerlens/<service>:<sha>); nothing is rebuilt.
+#
+#   1. wait until all four images of the commit are in ECR
+#   2. terraform apply with image_tag=<sha>: infrastructure changes, and new task
+#      definition revisions (the services do not move to them yet)
+#   3. run the one-off init task (migrations) with the new revision; stop if it fails
+#   4. move the services to the new revisions and wait until they are stable
+#   5. smoke test the public address: the api's /health (every store ok), the dashboard
+#      and its login gate, the HTTPS redirect
+#
+# Needs the first apply from infra/aws/README.md, a GitHub environment named `production`,
+# and these repository variables:
+#   AWS_REGION           e.g. us-east-1
+#   AWS_DEPLOY_ROLE_ARN  terraform output deploy_role_arn (GitHub OIDC; no stored keys)
+#   TF_STATE_BUCKET      the Terraform state bucket
+#   TERRAFORM_TFVARS     terraform.tfvars contents: non-secret settings, at least
+#                        budget_alert_emails
+# Until AWS_DEPLOY_ROLE_ARN and TF_STATE_BUCKET are set the job is skipped.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC token, exchanged for short-lived AWS credentials
+
+concurrency:
+  group: deploy-aws-production
+  cancel-in-progress: false # never stop a deploy halfway through
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  IMAGE_TAG: ${{ github.sha }}
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  deploy:
+    if: vars.AWS_DEPLOY_ROLE_ARN != '' && vars.TF_STATE_BUCKET != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: production # the deploy role trusts only jobs in this environment
+      url: ${{ steps.tf.outputs.url }}
+    defaults:
+      run:
+        working-directory: infra/aws
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
+
+      - name: Wait for this commit's images
+        run: |
+          # build.yml runs on the same push to main; a tag pushed right after the merge
+          # can get here first. Wait up to 40 minutes, then give up.
+          for service in api worker mcp web; do
+            for attempt in $(seq 1 80); do
+              if aws ecr describe-images --repository-name "ledgerlens/$service" \
+                   --image-ids "imageTag=$IMAGE_TAG" > /dev/null 2>&1; then
+                echo "found ledgerlens/$service:$IMAGE_TAG"
+                break
+              fi
+              if [ "$attempt" = 80 ]; then
+                echo "::error::ledgerlens/$service:$IMAGE_TAG is not in ECR. Only commits build.yml built (pushes to main) can be deployed."
+                exit 1
+              fi
+              echo "waiting for ledgerlens/$service:$IMAGE_TAG ($attempt/80)"
+              sleep 30
+            done
+          done
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.17.0"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          -backend-config="key=ledgerlens/prod/terraform.tfstate"
+          -backend-config="region=$AWS_REGION"
+          -backend-config="encrypt=true"
+          -backend-config="use_lockfile=true"
+
+      - name: Settings
+        if: vars.TERRAFORM_TFVARS != ''
+        env:
+          TFVARS: ${{ vars.TERRAFORM_TFVARS }}
+        run: printf '%s\n' "$TFVARS" > terraform.tfvars
+
+      - name: Terraform plan
+        run: terraform plan -input=false -var "image_tag=$IMAGE_TAG" -out=tfplan
+
+      - name: Terraform apply
+        run: terraform apply -input=false tfplan
+
+      - name: Read outputs
+        id: tf
+        run: |
+          {
+            echo "url=$(terraform output -raw url)"
+            echo "cluster=$(terraform output -raw cluster_name)"
+            echo "environment=$(terraform output -raw environment)"
+          } >> "$GITHUB_OUTPUT"
+          terraform output -json task_definition_arns > "$RUNNER_TEMP/task_definitions.json"
+          terraform output -json task_network > "$RUNNER_TEMP/task_network.json"
+
+      - name: Run migrations (init task)
+        env:
+          CLUSTER: ${{ steps.tf.outputs.cluster }}
+        run: |
+          set -euo pipefail
+          # alembic upgrade head, the Pinecone index and the Neo4j schema, all idempotent,
+          # with the new image and before any service moves to it. If it fails the
+          # services keep running the previous release.
+          td=$(jq -r .init "$RUNNER_TEMP/task_definitions.json")
+          subnets=$(jq -r '.subnets | join(",")' "$RUNNER_TEMP/task_network.json")
+          groups=$(jq -r '.security_groups | join(",")' "$RUNNER_TEMP/task_network.json")
+          task=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition "$td" --started-by "deploy-$GITHUB_RUN_ID" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$groups],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          if [ -z "$task" ] || [ "$task" = None ]; then
+            echo "::error::the init task did not start"
+            exit 1
+          fi
+          echo "init task: $task"
+
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          read -r code reason < <(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].[containers[0].exitCode, stoppedReason]' --output text)
+
+          echo "::group::init logs"
+          aws logs get-log-events --log-group-name "$(terraform output -json log_groups | jq -r .init)" \
+            --log-stream-name "init/init/${task##*/}" --start-from-head --output json \
+            | jq -r '.events[].message' || true
+          echo "::endgroup::"
+
+          if [ "$code" != 0 ]; then
+            echo "::error::init exited with $code ($reason); the services were not updated"
+            exit 1
+          fi
+
+      - name: Roll out services
+        env:
+          CLUSTER: ${{ steps.tf.outputs.cluster }}
+        run: |
+          set -euo pipefail
+          services=(api mcp worker web)
+          for service in "${services[@]}"; do
+            td=$(jq -r --arg s "$service" '.[$s]' "$RUNNER_TEMP/task_definitions.json")
+            echo "$service -> $td"
+            aws ecs update-service --cluster "$CLUSTER" --service "$service" \
+              --task-definition "$td" --query 'service.serviceName' --output text
+          done
+
+          # `wait services-stable` gives up after 10 minutes; the worker and mcp images are
+          # large, so allow three rounds.
+          for round in 1 2 3; do
+            aws ecs wait services-stable --cluster "$CLUSTER" --services "${services[@]}" && break
+            [ "$round" = 3 ] && { echo "::error::services did not become stable"; exit 1; }
+          done
+
+          # A failed rollout is rolled back by the circuit breaker, which is also "stable":
+          # check that every service now runs the new revision.
+          for service in "${services[@]}"; do
+            want=$(jq -r --arg s "$service" '.[$s]' "$RUNNER_TEMP/task_definitions.json")
+            # shellcheck disable=SC2016  # backticks are JMESPath literals, not shell
+            read -r running state < <(aws ecs describe-services --cluster "$CLUSTER" --services "$service" \
+              --query 'services[0].deployments[?status==`PRIMARY`] | [0].[taskDefinition, rolloutState]' \
+              --output text)
+            if [ "$running" != "$want" ] || [ "$state" != "COMPLETED" ]; then
+              echo "::error::$service runs $running ($state), expected $want: the rollout failed and was rolled back"
+              exit 1
+            fi
+            echo "$service: $state"
+          done
+
+      - name: Smoke test
+        env:
+          URL: ${{ steps.tf.outputs.url }}
+          ENVIRONMENT: ${{ steps.tf.outputs.environment }}
+        run: |
+          set -euo pipefail
+          status() { curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$@"; }
+
+          # The api's /health, through CloudFront and the load balancer. The new targets
+          # can take a minute to pass the load balancer's health checks.
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 15 "$URL/health" -o "$RUNNER_TEMP/health.json"; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              echo "::error::$URL/health did not answer"
+              exit 1
+            fi
+            sleep 10
+          done
+          jq . "$RUNNER_TEMP/health.json"
+          # every required store answers (Postgres, Neo4j, Redis, Pinecone), and it is prod
+          jq -e --arg env "$ENVIRONMENT" '.status == "ok" and .env == $env' "$RUNNER_TEMP/health.json" > /dev/null || {
+            echo "::error::/health is not ok: $(jq -c .dependencies "$RUNNER_TEMP/health.json")"
+            exit 1
+          }
+
+          # the dashboard: up, behind its login gate, and its API forwarder closed without a session
+          test "$(status "$URL/healthz")" = 200
+          test "$(status "$URL/")" = 307
+          test "$(status "$URL/api/health")" = 401
+          # plain HTTP is redirected to HTTPS
+          test "$(status "http://${URL#https://}/healthz")" = 301
+          echo "smoke test passed: $URL"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed \`$IMAGE_TAG\` (${GITHUB_REF_NAME})"
+            echo "${{ steps.tf.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

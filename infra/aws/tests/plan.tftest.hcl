@@ -4,7 +4,8 @@
 # resources, invalid CIDR maths, and the guarantees asserted below.
 
 variables {
-  image_tag = "0123456789abcdef0123456789abcdef01234567"
+  image_tag           = "0123456789abcdef0123456789abcdef01234567"
+  budget_alert_emails = ["alerts@example.com"]
 }
 
 mock_provider "aws" {
@@ -77,6 +78,24 @@ run "plan_defaults" {
     ])
     error_message = "the build role must only trust main of this repository"
   }
+
+  assert {
+    condition = anytrue([
+      for c in data.aws_iam_policy_document.deploy_trust.statement[0].condition :
+      c.variable == "token.actions.githubusercontent.com:sub"
+      && c.values == tolist(["repo:Sam15b/LedgerLens:environment:production"])
+    ])
+    error_message = "the deploy role must only trust jobs in the production environment"
+  }
+
+  assert {
+    condition = alltrue([
+      for st in data.aws_iam_policy_document.deploy_iam.statement :
+      alltrue([for r in st.resources : r == "*" || strcontains(r, ":123456789012:")])
+      if st.sid != "ReadManagedPolicies"
+    ])
+    error_message = "the deploy role's IAM rights stay inside this account"
+  }
 }
 
 run "database_is_private" {
@@ -148,6 +167,33 @@ run "compute" {
     condition     = output.url == "https://d111111abcdef8.cloudfront.net"
     error_message = "without a custom domain the demo lives at its CloudFront address"
   }
+}
+
+run "cost_and_logs" {
+  command = plan
+
+  assert {
+    condition = (
+      length(aws_budgets_budget.monthly.notification) == 4
+      && alltrue([for n in aws_budgets_budget.monthly.notification : n.subscriber_email_addresses == toset(["alerts@example.com"])])
+    )
+    error_message = "the budget emails at 50/80/100 % actual and 100 % forecast"
+  }
+
+  assert {
+    condition     = alltrue([for g in aws_cloudwatch_log_group.task : g.retention_in_days == 14])
+    error_message = "task logs expire (log_retention_days)"
+  }
+}
+
+run "budget_needs_a_recipient" {
+  command = plan
+
+  variables {
+    budget_alert_emails = []
+  }
+
+  expect_failures = [var.budget_alert_emails]
 }
 
 run "existing_github_oidc_provider" {
