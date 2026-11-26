@@ -135,11 +135,12 @@ variable "task_sizes" {
     mcp    = { cpu = 512, memory = 2048 }
     web    = { cpu = 256, memory = 512 }
     init   = { cpu = 512, memory = 1024 }
+    seed   = { cpu = 1024, memory = 4096 }
   }
 
   validation {
-    condition     = alltrue([for t in ["api", "worker", "mcp", "web", "init"] : contains(keys(var.task_sizes), t)])
-    error_message = "task_sizes needs an entry for api, worker, mcp, web and init."
+    condition     = alltrue([for t in ["api", "worker", "mcp", "web", "init", "seed"] : contains(keys(var.task_sizes), t)])
+    error_message = "task_sizes needs an entry for api, worker, mcp, web, init and seed."
   }
 }
 
@@ -211,5 +212,48 @@ variable "log_retention_days" {
   validation {
     condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365], var.log_retention_days)
     error_message = "log_retention_days must be a CloudWatch retention value (1, 3, 5, 7, 14, 30, 60, 90, ...)."
+  }
+}
+
+# --- managed stores outside AWS ---
+
+variable "neo4j_uri" {
+  description = "Neo4j AuraDB connection URI (neo4j+s://<instance>.databases.neo4j.io). Its password goes in the app secret as NEO4J_PASSWORD."
+  type        = string
+
+  validation {
+    condition     = can(regex("^neo4j([+]s)?://[^/]+$", var.neo4j_uri))
+    error_message = "neo4j_uri must look like neo4j+s://<instance>.databases.neo4j.io (AuraDB uses TLS: neo4j+s)."
+  }
+}
+
+variable "neo4j_user" {
+  description = "Neo4j user (AuraDB: the instance's generated user, usually `neo4j`)."
+  type        = string
+  default     = "neo4j"
+}
+
+variable "pinecone_index" {
+  description = "Pinecone serverless index (configs/pinecone.yaml `index`); init creates it if missing."
+  type        = string
+  default     = "ledgerlens-chunks"
+}
+
+variable "pinecone_region" {
+  description = "Region of the Pinecone index (cloud `aws`). Empty: the same region as everything else."
+  type        = string
+  default     = ""
+}
+
+# --- observability ---
+
+variable "tracing_sample_rate" {
+  description = "Share of /chat runs traced to LangSmith (project <project>-<environment>)."
+  type        = number
+  default     = 0.1
+
+  validation {
+    condition     = var.tracing_sample_rate >= 0 && var.tracing_sample_rate <= 1
+    error_message = "tracing_sample_rate must be between 0 and 1."
   }
 }

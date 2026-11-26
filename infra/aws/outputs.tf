@@ -76,3 +76,8 @@ output "log_groups" {
   description = "CloudWatch log group per task (streams are <task>/<task>/<task id>)."
   value       = { for name, group in aws_cloudwatch_log_group.task : name => group.name }
 }
+
+output "demo_bundle_uri" {
+  description = "Where the seed task reads the demo bundle: upload it here (aws s3 cp)."
+  value       = local.demo_bundle_uri
+}

@@ -216,6 +216,7 @@ jobs:
           set -euo pipefail
           status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
+          test "$(curl -fsS http://localhost:8000/livez)" = ok
           curl -fsS http://localhost:8000/health | tee health.json; echo
           python3 -c 'import json; h = json.load(open("health.json")); assert h["status"] == "ok", h["dependencies"]'
           test "$(status http://localhost:8000/stats/overview)" = 401

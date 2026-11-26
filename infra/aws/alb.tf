@@ -14,7 +14,9 @@ locals {
   # Services the load balancer forwards to, and their health checks.
   public_targets = {
     web = { port = 3000, health_path = "/healthz" }
-    api = { port = 8000, health_path = "/health" } # only /health is routed to it
+    # Only /health is routed to the api. The probe itself uses /livez: /health queries all
+    # four stores, and the load balancer probes every 15 s from each of its nodes.
+    api = { port = 8000, health_path = "/livez" }
   }
 }
 

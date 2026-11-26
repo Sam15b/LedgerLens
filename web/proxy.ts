@@ -9,6 +9,8 @@ import { allowed, SESSION_COOKIE } from "@/lib/session";
  */
 export async function proxy(request: NextRequest) {
   if (await allowed(request.cookies.get(SESSION_COOKIE)?.value)) return NextResponse.next();
+  // Next sends a same-host redirect as a relative Location, so behind CloudFront (which
+  // reaches the load balancer over plain HTTP) the browser stays on HTTPS.
   const login = new URL("/login", request.url);
   const next = request.nextUrl.pathname + request.nextUrl.search;
   if (next !== "/") login.searchParams.set("next", next);

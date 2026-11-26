@@ -20,7 +20,7 @@ traceback; the message does not leak internals).
 ``POST /chat`` is rate-limited per client (``CHAT_RATE_LIMIT``, :mod:`.ratelimit`): over
 it, 429 with ``Retry-After``.
 
-With ``API_KEYS`` set, every route but ``/health`` and ``/ready`` needs one of them in
+With ``API_KEYS`` set, every route but ``/health``, ``/ready`` and ``/livez`` needs one of them in
 ``X-API-Key`` (:func:`ledgerlens.api.deps.require_api_key`); 401 otherwise.
 
 Browsers may call it from ``CORS_ORIGINS`` (the dashboard, ``http://localhost:3000`` by

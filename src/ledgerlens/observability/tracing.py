@@ -9,7 +9,8 @@ attributes and an error, if it failed. The span opened inside another becomes it
 (through a context variable, so it follows ``await`` and ``asyncio.to_thread``), which
 gives the tree ``chat -> router -> qa -> tool search_documents -> llm smart``.
 
-Tracing is off unless ``TRACING_ENABLED=true``. Then finished spans go to one backend
+Tracing is on when ``TRACING_ENABLED=true``, and by default in production
+(``APP_ENV=prod`` with ``TRACING_ENABLED`` unset). Finished spans go to one backend
 (``TRACING_BACKEND``):
 
 * ``langsmith`` -- LangSmith runs in project ``LANGSMITH_PROJECT`` (needs
@@ -27,8 +28,10 @@ Attributes follow one naming scheme, so a trace reads the same in any backend:
 * retrieval (:func:`retrieval_attributes`): ``retriever.variant`` (``r4_graphrag``, ...),
   ``retriever.k`` and ``retriever.top_k_ids``, the chunk ids returned, best first.
 
-``TRACING_SAMPLE_RATE`` (0-1, default 1) keeps that share of traces: the decision is made
-once, for the root span, and every span below it follows, so a trace is whole or absent.
+``TRACING_SAMPLE_RATE`` (0-1) keeps that share of traces: the decision is made once, for
+the root span, and every span below it follows, so a trace is whole or absent. Unset, it
+is :data:`PROD_SAMPLE_RATE` in production (every chat traced would cost more LangSmith
+volume than a demo needs, and keep more user text) and 1 elsewhere.
 
 Tracing off -- disabled, not sampled, or a backend that cannot start (no LangSmith key,
 ``langsmith`` not installed) -- never breaks a run: :func:`span` still runs the code inside
@@ -487,11 +490,27 @@ class Tracer:
             return None
 
 
+PROD_SAMPLE_RATE = 0.1
+"""Share of traces kept in production when ``TRACING_SAMPLE_RATE`` is not set."""
+
+
+def tracing_policy(settings: Settings) -> tuple[bool, float]:
+    """``(enabled, sample_rate)``: the explicit settings, else the defaults for
+    ``APP_ENV`` (prod: on, :data:`PROD_SAMPLE_RATE`; elsewhere: off, every trace)."""
+    prod = settings.app_env == "prod"
+    enabled = settings.tracing_enabled if settings.tracing_enabled is not None else prod
+    rate = settings.tracing_sample_rate
+    if rate is None:
+        rate = PROD_SAMPLE_RATE if prod else 1.0
+    return enabled, rate
+
+
 def build_tracer(settings: Settings | None = None) -> Tracer:
-    """The tracer the settings ask for. Off unless ``TRACING_ENABLED``; a backend that
-    cannot start is logged and leaves tracing off rather than failing the caller."""
+    """The tracer the settings ask for (:func:`tracing_policy`). A backend that cannot
+    start is logged and leaves tracing off rather than failing the caller."""
     settings = settings or get_settings()
-    if not settings.tracing_enabled:
+    enabled, sample_rate = tracing_policy(settings)
+    if not enabled:
         return Tracer()
     try:
         backend = _backend(settings)
@@ -502,10 +521,8 @@ def build_tracer(settings: Settings | None = None) -> Tracer:
         return Tracer()
     if backend is None:
         return Tracer()
-    logger.info(
-        "tracing to %s (sample rate %.2f)", settings.tracing_backend, settings.tracing_sample_rate
-    )
-    return Tracer(backend, sample_rate=settings.tracing_sample_rate)
+    logger.info("tracing to %s (sample rate %.2f)", settings.tracing_backend, sample_rate)
+    return Tracer(backend, sample_rate=sample_rate)
 
 
 def _backend(settings: Settings) -> TraceBackend | None:

@@ -1,4 +1,4 @@
-# Copy to terraform.tfvars (git-ignored). Required: budget_alert_emails, image_tag.
+# Copy to terraform.tfvars (git-ignored). Required: budget_alert_emails, neo4j_uri, image_tag.
 environment       = "prod"
 region            = "us-east-1" # the Pinecone index's region
 github_repository = "Sam15b/LedgerLens"
@@ -7,6 +7,12 @@ github_repository = "Sam15b/LedgerLens"
 budget_alert_emails = ["you@example.com"]
 # monthly_budget_usd  = 200
 # log_retention_days  = 14
+
+# Neo4j AuraDB (console.neo4j.io: create an instance, keep the generated password for the
+# app secret's NEO4J_PASSWORD). Pinecone: the index is created by init, in `region`.
+neo4j_uri = "neo4j+s://xxxxxxxx.databases.neo4j.io"
+# neo4j_user      = "neo4j"
+# pinecone_region = "us-east-1"
 
 # The account already has a GitHub OIDC provider? Reuse it.
 # create_github_oidc_provider = false

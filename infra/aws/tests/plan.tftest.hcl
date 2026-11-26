@@ -6,6 +6,7 @@
 variables {
   image_tag           = "0123456789abcdef0123456789abcdef01234567"
   budget_alert_emails = ["alerts@example.com"]
+  neo4j_uri           = "neo4j+s://0123abcd.databases.neo4j.io"
 }
 
 mock_provider "aws" {
@@ -141,6 +142,14 @@ run "compute" {
   }
 
   assert {
+    condition = (
+      join(" ", jsondecode(aws_ecs_task_definition.app["seed"].container_definitions)[0].command)
+      == "python scripts/seed_demo_data.py --bundle s3://ledgerlens-prod-demo-data-123456789012/demo/demo-bundle.tar.gz"
+    )
+    error_message = "the seed task loads the bundle from the demo bucket"
+  }
+
+  assert {
     condition     = strcontains(join(" ", jsondecode(aws_ecs_task_definition.app["init"].container_definitions)[0].command), "alembic upgrade head")
     error_message = "the init task runs the migrations"
   }
@@ -167,6 +176,78 @@ run "compute" {
     condition     = output.url == "https://d111111abcdef8.cloudfront.net"
     error_message = "without a custom domain the demo lives at its CloudFront address"
   }
+}
+
+run "managed_stores" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for name in ["api", "worker", "mcp", "init"] : contains(
+        jsondecode(aws_ecs_task_definition.app[name].container_definitions)[0].environment,
+        { name = "PINECONE_NAMESPACE", value = "prod" }
+      )
+    ])
+    error_message = "prod tasks use the prod Pinecone namespace"
+  }
+
+  assert {
+    condition = contains(
+      jsondecode(aws_ecs_task_definition.app["api"].container_definitions)[0].environment,
+      { name = "PINECONE_REGION", value = "us-east-1" }
+    )
+    error_message = "the Pinecone index defaults to the app's region"
+  }
+}
+
+run "load_balancer_keep_alive" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for e in jsondecode(aws_ecs_task_definition.app["web"].container_definitions)[0].environment :
+      tonumber(e.value) > aws_lb.main.idle_timeout * 1000 if e.name == "KEEP_ALIVE_TIMEOUT"
+      ]) && contains(
+      [for e in jsondecode(aws_ecs_task_definition.app["web"].container_definitions)[0].environment : e.name],
+      "KEEP_ALIVE_TIMEOUT"
+    )
+    error_message = "web must keep idle connections open longer than the load balancer (else 502s)"
+  }
+
+  assert {
+    condition = contains(
+      jsondecode(aws_ecs_task_definition.app["api"].container_definitions)[0].environment,
+      { name = "UVICORN_TIMEOUT_KEEP_ALIVE", value = "310" }
+    )
+    error_message = "the api must keep idle connections open longer than the load balancer"
+  }
+
+  assert {
+    condition     = aws_lb_target_group.service["api"].health_check[0].path == "/livez"
+    error_message = "the load balancer probes /livez, not /health (which queries every store)"
+  }
+}
+
+run "sampled_tracing" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for pair in [["TRACING_ENABLED", "true"], ["TRACING_SAMPLE_RATE", "0.1"], ["LANGSMITH_PROJECT", "ledgerlens-prod"]] :
+      contains(jsondecode(aws_ecs_task_definition.app["api"].container_definitions)[0].environment, { name = pair[0], value = pair[1] })
+    ])
+    error_message = "prod traces a 10 % sample of chats to its own LangSmith project"
+  }
+}
+
+run "neo4j_uri_must_be_auradb_style" {
+  command = plan
+
+  variables {
+    neo4j_uri = "bolt://localhost:7687/neo4j"
+  }
+
+  expect_failures = [var.neo4j_uri]
 }
 
 run "cost_and_logs" {

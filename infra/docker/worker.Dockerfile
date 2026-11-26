@@ -43,6 +43,8 @@ WORKDIR /app
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /app/src ./src
 COPY configs ./configs
+# one-off jobs run on this image too (scripts/seed_demo_data.py: OCR + embeddings)
+COPY scripts ./scripts
 RUN mkdir -p data/uploads data/interim models && chown -R app:app data models
 USER app
 RUN python -c "import cv2, pytesseract, sentence_transformers, ledgerlens.workers.ingest_worker" \

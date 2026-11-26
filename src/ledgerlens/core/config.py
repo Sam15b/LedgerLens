@@ -105,10 +105,11 @@ class Settings(BaseSettings):
     langsmith_api_key: str = ""
     langsmith_project: str = "ledgerlens"
     phoenix_collector_endpoint: str = ""
-    tracing_enabled: bool = False
-    """Trace agent runs, tool calls and LLM calls (``observability/tracing.py``)."""
-    tracing_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
-    """Share of traces kept (decided per trace)."""
+    tracing_enabled: bool | None = None
+    """Trace agent runs, tool calls and LLM calls (``observability/tracing.py``). Unset:
+    on when ``APP_ENV=prod``, off elsewhere."""
+    tracing_sample_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Share of traces kept (decided per trace). Unset: 0.1 in prod, 1 elsewhere."""
     tracing_backend: Literal["langsmith", "jsonl"] = "langsmith"
     """Where spans go (``observability/tracing.py``): LangSmith runs, or JSON lines."""
     tracing_path: Path = Path("data/interim/traces.jsonl")

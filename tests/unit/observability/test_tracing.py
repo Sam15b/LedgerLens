@@ -195,6 +195,38 @@ def test_build_tracer_is_off_unless_enabled(tmp_path: Path) -> None:
     assert isinstance(jsonl.backend, JsonlBackend)
 
 
+@pytest.mark.parametrize(
+    ("app_env", "enabled", "rate", "expected"),
+    [
+        ("prod", None, None, (True, tracing.PROD_SAMPLE_RATE)),  # sampled by default in prod
+        ("dev", None, None, (False, 1.0)),
+        ("eval", None, None, (False, 1.0)),
+        ("prod", False, None, (False, tracing.PROD_SAMPLE_RATE)),  # explicit settings win
+        ("prod", None, 0.5, (True, 0.5)),
+        ("dev", True, None, (True, 1.0)),
+    ],
+)
+def test_tracing_policy_defaults_by_environment(
+    app_env: str, enabled: bool | None, rate: float | None, expected: tuple[bool, float]
+) -> None:
+    settings = Settings(app_env=app_env, tracing_enabled=enabled, tracing_sample_rate=rate)
+    assert tracing.tracing_policy(settings) == expected
+
+
+def test_prod_tracer_samples_by_default(tmp_path: Path) -> None:
+    tracer = build_tracer(
+        Settings(
+            app_env="prod",
+            tracing_enabled=None,
+            tracing_sample_rate=None,
+            tracing_backend="jsonl",
+            tracing_path=tmp_path / "t.jsonl",
+        )
+    )
+    assert tracer.enabled
+    assert tracer.sample_rate == tracing.PROD_SAMPLE_RATE
+
+
 def test_langsmith_without_a_key_leaves_tracing_off() -> None:
     settings = Settings(tracing_enabled=True, tracing_backend="langsmith", langsmith_api_key="")
     assert not build_tracer(settings).enabled

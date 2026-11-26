@@ -102,6 +102,41 @@ deploys that commit's images; nothing is rebuilt. Set up once:
 The deploy role can change everything this configuration manages: PowerUserAccess plus IAM
 on `ledgerlens-*` roles. Treat the `production` environment as the gate.
 
+## Neo4j AuraDB and Pinecone
+
+Two stores are managed by their vendors rather than AWS. The tasks reach them over TLS
+through the internet gateway.
+
+- **Neo4j AuraDB**: create an instance at console.neo4j.io (AuraDB Free is enough for the
+  demo) and set `neo4j_uri` (`neo4j+s://<id>.databases.neo4j.io`, required) and, if it
+  differs, `neo4j_user`. Put its password in the app secret as `NEO4J_PASSWORD`. Free
+  instances pause after a few days without queries: resume them in the console, or the
+  api's `/health` reports `neo4j` down.
+- **Pinecone serverless**: put the API key in the app secret as `PINECONE_API_KEY`. `init`
+  creates the index (`pinecone_index`) on `aws` in `pinecone_region`, which defaults to
+  `region`. One index serves every environment: each writes and reads its own namespace,
+  so prod tasks use `prod` and an eval run never touches it.
+
+## Seed the demo data
+
+The demo ledger (4 vendors with contracts, POs, payments and invoices: paid, unpaid, and
+every anomaly kind) comes from the synthetic ledger. That ledger is built locally and is
+git-ignored. Export the selection as a bundle (~2 MB), upload it, and run the `seed` task
+once. No LLM key is needed: each document is stored with the record it was rendered from.
+
+```sh
+python scripts/seed_demo_data.py --export demo-bundle.tar.gz      # where data/synthetic is
+aws s3 cp demo-bundle.tar.gz "$(terraform output -raw demo_bundle_uri)"
+aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+  --task-definition "$(terraform output -json task_definition_arns | jq -r .seed)" \
+  --network-configuration "awsvpcConfiguration={subnets=[$(jq -r '.subnets | join(",")' <<< "$NET")],securityGroups=[$(jq -r '.security_groups[0]' <<< "$NET")],assignPublicIp=ENABLED}"
+```
+
+The task's log (`terraform output log_groups`) ends with `parity: every store agrees`.
+It also fits BM25 on the demo documents and saves the parameters to EFS, where the worker
+and mcp read them, so documents uploaded later get sparse vectors too. Re-running it is a
+no-op.
+
 ## Costs and logs
 
 `monthly_budget_usd` sets an account-wide AWS Budget. The default is $200, against an

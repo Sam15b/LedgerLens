@@ -15,6 +15,9 @@ locals {
 
   app_secret = aws_secretsmanager_secret.app.arn
 
+  # The index in the app's region keeps queries off the public internet's long haul.
+  pinecone_region = coalesce(var.pinecone_region, var.region)
+
   # What every Python service gets (docker-compose's x-app-env, for the cloud).
   python_env = {
     APP_ENV     = var.environment
@@ -23,6 +26,20 @@ locals {
     LLM_PROFILE = "aws"      # configs/models.yaml: Bedrock first for `smart`, no Ollama
     REDIS_URL   = local.redis_url
     MCP_URL     = "http://mcp:8765/mcp"
+    # Neo4j AuraDB and Pinecone serverless: managed by their vendors, reached over TLS.
+    # Each environment has its own Pinecone namespace (prod / eval / dev) in one index.
+    NEO4J_URI          = var.neo4j_uri
+    NEO4J_USER         = var.neo4j_user
+    PINECONE_INDEX     = var.pinecone_index
+    PINECONE_CLOUD     = "aws"
+    PINECONE_REGION    = local.pinecone_region
+    PINECONE_NAMESPACE = var.environment
+    # A sample of /chat traces to LangSmith (key: LANGSMITH_API_KEY in the app secret;
+    # without one, tracing stays off and the app runs as usual).
+    TRACING_ENABLED     = "true"
+    TRACING_BACKEND     = "langsmith"
+    TRACING_SAMPLE_RATE = tostring(var.tracing_sample_rate)
+    LANGSMITH_PROJECT   = "${var.project}-${var.environment}"
   }
   python_secrets = {
     DATABASE_URL      = aws_secretsmanager_secret.database_url.arn
@@ -43,9 +60,11 @@ locals {
       port    = 8000
       command = null
       volumes = ["uploads"]
-      env     = local.python_env
+      # keep idle connections open longer than the load balancer does (300 s), or it
+      # reuses one the server has just closed and answers 502
+      env     = merge(local.python_env, { UVICORN_TIMEOUT_KEEP_ALIVE = "310" })
       secrets = local.python_secrets
-      health  = concat(local.python_healthcheck, ["import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"])
+      health  = concat(local.python_healthcheck, ["import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=4)"])
     }
     worker = {
       image   = "worker"
@@ -70,13 +89,34 @@ locals {
       port    = 3000
       command = null
       volumes = []
-      env     = { LEDGERLENS_API_URL = "http://api:8000" }
+      env = {
+        LEDGERLENS_API_URL = "http://api:8000"
+        # Listen on every interface: Next's standalone server binds to $HOSTNAME, and the
+        # task's runtime may set that to the task's own address, which leaves 127.0.0.1
+        # (the container health check) unanswered.
+        HOSTNAME = "0.0.0.0"
+        # ms; longer than the load balancer's 300 s idle timeout (Node's default is 5 s),
+        # or it reuses connections the server has closed and answers 502
+        KEEP_ALIVE_TIMEOUT = "310000"
+      }
       secrets = {
         LEDGERLENS_API_KEY       = "${local.app_secret}:LEDGERLENS_API_KEY::"
         DASHBOARD_PASSWORD       = "${local.app_secret}:DASHBOARD_PASSWORD::"
         DASHBOARD_SESSION_SECRET = "${local.app_secret}:DASHBOARD_SESSION_SECRET::"
       }
       health = ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+    }
+    # One-off, by hand: load the demo bundle (scripts/seed_demo_data.py) into the stores.
+    # The worker image has the pipeline (OCR, embeddings); BM25 parameters land on EFS,
+    # where the worker and mcp read them. Re-running is a no-op.
+    seed = {
+      image   = "worker"
+      port    = null
+      command = ["python", "scripts/seed_demo_data.py", "--bundle", local.demo_bundle_uri]
+      volumes = ["processed", "hf_cache"]
+      env     = local.python_env
+      secrets = local.python_secrets
+      health  = null
     }
     # One-off, before every rollout (all three steps are idempotent).
     init = {
@@ -94,7 +134,8 @@ locals {
   }
 
   # Long-running services; which of them other services call by name (Service Connect).
-  services_running   = { for name, task in local.tasks : name => task if name != "init" }
+  one_off_tasks      = toset(["init", "seed"])
+  services_running   = { for name, task in local.tasks : name => task if !contains(local.one_off_tasks, name) }
   service_connect_to = toset(["api", "mcp"])
 }
 

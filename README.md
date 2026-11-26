@@ -25,6 +25,51 @@ and drafts payment reminders.
 
 Full design: **[docs/](docs/README.md)**
 
+## Live demo
+
+**Not deployed yet.** The AWS deployment is written and checked, but no environment has
+been created from it, so there is no public URL. The address will be the CloudFront URL
+that `terraform output url` prints, behind the dashboard's password.
+
+The deployment is built and checked in CI:
+- Terraform in [`infra/aws/`](infra/aws/README.md) (why AWS: [ADR-0002](docs/adr/0002-cloud-target.md));
+- `build.yml` pushes an image per commit to main;
+- `deploy-aws.yml` deploys a `v*` tag: migrations first, then a `/health` smoke test;
+- `seed_demo_data.py --bundle` loads the demo ledger: 4 vendors with their contracts,
+  POs, payments and invoices (paid, unpaid, and each kind of anomaly). It needs no LLM key.
+
+```mermaid
+flowchart LR
+    U([Browser]) -- HTTPS --> CF[CloudFront<br/>*.cloudfront.net]
+    CF -- HTTP, CloudFront IPs only --> ALB[Application<br/>Load Balancer]
+    subgraph ECS["ECS Fargate (Service Connect names)"]
+        WEB[web<br/>Next.js :3000]
+        API[api<br/>FastAPI + LangGraph :8000]
+        MCP[mcp<br/>tools :8765]
+        WRK[worker<br/>ingestion queue]
+    end
+    ALB --> WEB
+    ALB -- /health --> API
+    WEB -- X-API-Key --> API
+    API --> MCP
+    subgraph VPC["Private subnets"]
+        RDS[(RDS PostgreSQL)]
+        RED[(ElastiCache Redis)]
+        EFS[(EFS: uploads,<br/>models, BM25)]
+    end
+    API --> RDS & RED & EFS
+    WRK --> RDS & RED & EFS
+    MCP --> RDS & EFS
+    API & MCP & WRK --> PC[(Pinecone serverless<br/>namespace prod)]
+    API & MCP & WRK --> NJ[(Neo4j AuraDB)]
+    API & WRK --> LLM{{Bedrock via task role,<br/>OpenAI / Gemini / Mistral}}
+    SM[Secrets Manager] -.-> ECS
+    GH[GitHub Actions<br/>OIDC] -. images .-> ECR[(ECR)] -.-> ECS
+```
+
+Running it all the time costs about $160 a month (estimate in ADR-0002). There is a budget
+alert, and services can be scaled to zero between demos.
+
 ## Project structure
 
 ```text
@@ -126,7 +171,7 @@ needs its spending limited on purpose. What is in place:
 
 | Protection | Setting | Default |
 |------------|---------|---------|
-| API key on every route but `/health` and `/ready` (401 without one) | `API_KEYS` (comma-separated, so keys can be rotated with overlap) | off when empty |
+| API key on every route but `/health`, `/ready` and `/livez` (401 without one) | `API_KEYS` (comma-separated, so keys can be rotated with overlap) | off when empty |
 | Dashboard login: a signed 12-hour session cookie; the browser never sees the API key | `DASHBOARD_PASSWORD`, `DASHBOARD_SESSION_SECRET`, `LEDGERLENS_API_KEY` (web) | off when empty |
 | Chat runs per user, sliding window (429 + `Retry-After`) | `CHAT_RATE_LIMIT` | `20/minute` |
 | Request deadline (504) / chat run deadline (`error` event) | `REQUEST_TIMEOUT_S` / `CHAT_TIMEOUT_S` | 60 s / 180 s |
